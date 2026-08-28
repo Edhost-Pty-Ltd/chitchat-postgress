@@ -79,7 +79,7 @@ export default function SplashScreen() {
     setTimeout(() => {
       Animated.timing(screenOp, {
         toValue: 0, duration: FADEOUT_DURATION, useNativeDriver: true,
-      }).start(() => navigation.replace('SignIn'));
+      }).start(() => navigation.replace('CreateAccount'));
     }, LOGO_IN + HOLD_DURATION);
   }, []);
 

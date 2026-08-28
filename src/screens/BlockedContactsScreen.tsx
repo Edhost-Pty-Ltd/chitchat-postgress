@@ -177,10 +177,14 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
   },
   backButton: {
-    width: 40,
-    height: 40,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.65)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.8)',
   },
   headerTitle: {
     flex: 1,

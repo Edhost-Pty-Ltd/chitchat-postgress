@@ -251,7 +251,7 @@ export const COUNTRIES: Country[] = [
 ];
 
 // Default selection
-export const DEFAULT_COUNTRY = COUNTRIES.find((c) => c.code === 'US')!;
+export const DEFAULT_COUNTRY = COUNTRIES.find((c) => c.code === 'ZA')!;
 
 /** Format a raw digit string into spaced groups for a country */
 export function formatPhoneNumber(digits: string, groups: number[]): string {

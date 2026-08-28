@@ -53,31 +53,26 @@ export const GRADIENTS = {
 } as const;
 
 export const GLASS = {
-  // Fully transparent glass — only a subtle border, gradient shows through 100%
+  // Clean flat cards — solid soft-white surface, no glass rim.
   card: {
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.18)',
+    backgroundColor: 'rgba(255,255,255,0.85)',
+    borderWidth: 0,
   },
   elevated: {
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.22)',
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    borderWidth: 0,
   },
   input: {
-    backgroundColor: 'rgba(30,156,240,0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.18)',
+    backgroundColor: 'rgba(255,255,255,0.7)',
+    borderWidth: 0,
   },
   nav: {
     backgroundColor: 'transparent',
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(30,156,240,0.18)',
+    borderTopWidth: 0,
   },
   header: {
     backgroundColor: 'transparent',
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(30,156,240,0.18)',
+    borderBottomWidth: 0,
   },
 } as const;
 

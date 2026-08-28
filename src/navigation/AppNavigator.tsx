@@ -18,15 +18,14 @@ import ChatScreen         from '../screens/ChatScreen';
 import CallsScreen        from '../screens/CallsScreen';
 import StatusScreen       from '../screens/StatusScreen';
 import ContactsScreen     from '../screens/ContactsScreen';
-import CalendarScreen     from '../screens/CalendarScreen';
-import NotesScreen        from '../screens/NotesScreen';
+
 import SettingsScreen     from '../screens/SettingsScreen';
 import AppearanceScreen  from '../screens/AppearanceScreen';
 import ProfileScreen     from '../screens/ProfileScreen';
 import CreateAccountScreen from '../screens/CreateAccountScreen';
 import VideoCallScreen    from '../screens/VideoCallScreen';
 import AudioCallScreen    from '../screens/AudioCallScreen';
-import GroupCallScreen    from '../screens/GroupCallScreen';
+
 import AccountSettingsScreen      from '../screens/AccountSettingsScreen';
 import PrivacySettingsScreen      from '../screens/PrivacySettingsScreen';
 import NotificationSettingsScreen from '../screens/NotificationSettingsScreen';
@@ -39,7 +38,7 @@ import { IncomingCallManager } from '../components';
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 export default function AppNavigator() {
-  const { isSignedIn, loading } = useAuth();
+  const { isSignedIn, loading, phone } = useAuth();
   
   console.log('[AppNavigator] Component render - isSignedIn:', isSignedIn, 'loading:', loading);
 
@@ -48,6 +47,13 @@ export default function AppNavigator() {
   const [profileCheckError, setProfileCheckError] = useState<boolean>(false);
 
   const checkProfileExists = useCallback(async (retry = 0) => {
+    // Demo mode bypass — no Firebase user, skip Firestore check
+    if (phone === '+0000000000') {
+      console.log('[AppNavigator] Demo mode detected, skipping profile check');
+      setProfileExists(true);
+      return;
+    }
+
     const authInstance = getAuth();
     const currentUser = authInstance.currentUser;
     console.log('[AppNavigator] checkProfileExists - currentUser:', currentUser?.uid, 'retry:', retry);
@@ -99,7 +105,7 @@ export default function AppNavigator() {
         setProfileCheckError(true);
       }
     }
-  }, []); // Empty deps - function doesn't depend on any external state
+  }, [phone]); // Re-create when phone changes (e.g., demo mode)
 
   // Check profile existence when user is authenticated
   useEffect(() => {
@@ -123,7 +129,7 @@ export default function AppNavigator() {
   // This forces them to go through the proper SignIn → CreateAccount flow
   useEffect(() => {
     console.log('[AppNavigator] Profile check state - isSignedIn:', isSignedIn, 'profileExists:', profileExists, 'profileCheckError:', profileCheckError);
-    if (isSignedIn && profileExists === false && !profileCheckError) {
+    if (isSignedIn && profileExists === false && !profileCheckError && phone !== '+0000000000') {
       console.log('[AppNavigator] User authenticated without profile, signing out...');
       (async () => {
         const authInstance = getAuth();
@@ -131,7 +137,7 @@ export default function AppNavigator() {
         // Auth context will handle the cleanup via onAuthStateChanged
       })();
     }
-  }, [isSignedIn, profileExists, profileCheckError]);
+  }, [isSignedIn, profileExists, profileCheckError, phone]);
 
   // While hydrating from AsyncStorage show a branded splash
   if (loading) {
@@ -199,14 +205,12 @@ export default function AppNavigator() {
             <Stack.Screen name="Calls"       component={CallsScreen}       />
             <Stack.Screen name="Status"      component={StatusScreen}      />
             <Stack.Screen name="Contacts"    component={ContactsScreen}    />
-            <Stack.Screen name="Calendar"    component={CalendarScreen}    />
-            <Stack.Screen name="Notes"       component={NotesScreen}       />
             <Stack.Screen name="Settings"    component={SettingsScreen}    />
             <Stack.Screen name="Appearance"      component={AppearanceScreen}      />
             <Stack.Screen name="Profile"         component={ProfileScreen}         />
             <Stack.Screen name="VideoCall"       component={VideoCallScreen}       />
             <Stack.Screen name="AudioCall"       component={AudioCallScreen}       />
-            <Stack.Screen name="GroupCall"       component={GroupCallScreen}       />
+
             <Stack.Screen name="AccountSettings"      component={AccountSettingsScreen}      />
             <Stack.Screen name="PrivacySettings"      component={PrivacySettingsScreen}      />
             <Stack.Screen name="NotificationSettings" component={NotificationSettingsScreen} />

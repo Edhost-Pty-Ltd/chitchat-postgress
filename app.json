@@ -13,8 +13,6 @@
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Chit-Chat needs access to your microphone to record voice notes.",
         "NSContactsUsageDescription": "Chit-Chat needs access to your contacts to help you find friends on the app.",
-        "NSLocationWhenInUseUsageDescription": "Chit-Chat needs access to your location to share it with your contacts.",
-        "NSLocationAlwaysUsageDescription": "Chit-Chat needs access to your location to share live location updates.",
         "NSUserNotificationsUsageDescription": "Chit-Chat needs permission to send you notifications for new messages, calls, and status updates."
       }
     },
@@ -36,7 +34,6 @@
         }
       ],
       "@react-native-firebase/app",
-      "@livekit/react-native-expo-plugin",
       "@config-plugins/react-native-webrtc",
       "expo-contacts",
       "expo-font",
@@ -66,16 +63,6 @@
           "photosPermission": "Chit-Chat needs access to your photos to share images in chats.",
           "savePhotosPermission": "Chit-Chat needs permission to save photos to your gallery.",
           "isAccessMediaLocationEnabled": true
-        }
-      ],
-      [
-        "expo-location",
-        {
-          "locationAlwaysAndWhenInUsePermission": "Chit-Chat needs access to your location to share it with your contacts.",
-          "locationAlwaysPermission": "Chit-Chat needs access to your location to share live location updates.",
-          "locationWhenInUsePermission": "Chit-Chat needs access to your location to share it with your contacts.",
-          "isAndroidBackgroundLocationEnabled": true,
-          "isAndroidForegroundServiceEnabled": true
         }
       ],
       "expo-video",
@@ -108,10 +95,7 @@
         "android.permission.READ_MEDIA_VIDEO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.INTERNET",
-        "android.permission.ACCESS_NETWORK_STATE",
-        "android.permission.ACCESS_FINE_LOCATION",
-        "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_BACKGROUND_LOCATION"
+        "android.permission.ACCESS_NETWORK_STATE"
       ],
       "softwareKeyboardLayoutMode": "pan"
     },

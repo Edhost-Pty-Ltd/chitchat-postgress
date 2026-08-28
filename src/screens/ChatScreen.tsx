@@ -42,7 +42,7 @@ import { db } from '../config/firebase';
 import { Avatar } from '../components';
 import { VoiceMessageBubble } from '../components/VoiceMessageBubble';
 import { FileMessageBubble } from '../components/FileMessageBubble';
-import { LocationMessageBubble } from '../components/LocationMessageBubble';
+
 import { VoiceRecordingOverlay } from '../components/VoiceRecordingOverlay';
 import { ForwardModal } from '../components/ForwardModal';
 import { MessageInfoModal } from '../components/MessageInfoModal';
@@ -51,16 +51,16 @@ import { useMessages, FireMessage } from '../hooks/useMessages';
 import { useVoicePlayer } from '../hooks/useVoicePlayer';
 import { useVoiceRecorder, RecordingResult } from '../hooks/useVoiceRecorder';
 import { useOutgoingCall } from '../hooks/useOutgoingCall';
-import { useLocationSharing } from '../hooks/useLocationSharing';
-import { useGroupCall } from '../hooks/useGroupCall';
+
+
 import { usePhoneBook } from '../hooks/usePhoneBook';
 import { useOtherUserPresence, useWritePresence } from '../hooks/usePresence';
 import { fetchUserPrivacySettings } from '../hooks/usePrivacySettings';
 import { clearLocalMessages } from '../hooks/useLocalMessages';
 import { useContacts, AppContact } from '../hooks/useContacts';
-import { useActiveCall } from '../context/ActiveCallContext';
+
 import { uploadVoiceNote, UploadProgress } from '../utils/voiceNoteStorage';
-import { sendVoiceMessage, sendImageMessage, sendFileMessage, sendCurrentLocationMessage, sendLiveLocationMessage, stopLiveLocationSharing } from '../hooks/useChatActions';
+import { sendVoiceMessage, sendImageMessage, sendFileMessage } from '../hooks/useChatActions';
 import { parseSystemMessage } from '../utils/systemMessageParser';
 import { getDateLabel, groupMessagesByDate } from '../utils/dateUtils';
 import { useTypingIndicator } from '../hooks/useTypingIndicator';
@@ -307,11 +307,7 @@ export default function ChatScreen() {
   // ── Outgoing call ──────────────────────────────────────────────
   const outgoingCall = useOutgoingCall();
 
-  // ── Group call ──────────────────────────────────────────────────
-  const groupCall = useGroupCall();
 
-  // ── Active call (app-level LiveKit host; supports minimize) ──────
-  const { startCall: startActiveCall } = useActiveCall();
 
   // ── Phone book name resolver (saved contact name, else phone number) ──
   const { resolveName } = usePhoneBook();
@@ -344,19 +340,16 @@ export default function ChatScreen() {
   // ── Contacts (for share contact feature) ──────────────────────────────────
   const { contacts: phoneContacts, loading: contactsLoading, hasPermission: contactsPermission } = useContacts();
 
-  // ── Location sharing ────────────────────────────────────────────
-  const locationSharing = useLocationSharing();
+
 
   const [input, setInput] = useState('');
   const listRef = useRef<FlatList>(null);
   const [showEmoji, setShowEmoji] = useState(false);
   const [showAttach, setShowAttach] = useState(false);
-  const [showLocationMenu, setShowLocationMenu] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [selectedDuration, setSelectedDuration] = useState(15);
 
   // ── Search state ────────────────────────────────────────────────────
   const [searchOpen, setSearchOpen] = useState(false);
@@ -1035,9 +1028,6 @@ export default function ChatScreen() {
           messageData.fileName = messageToForward.fileName;
           messageData.fileSize = messageToForward.fileSize;
           messageData.mimeType = messageToForward.mimeType;
-        } else if (messageToForward.type === 'location' && messageToForward.location) {
-          messageData.location = messageToForward.location;
-          messageData.isLiveLocation = false; // Don't forward live location status
         }
 
         // Add message to target chat
@@ -1080,74 +1070,60 @@ export default function ChatScreen() {
   };
 
   // ── Voice call handler ──────────────────────────────────────────
-  // ── Unified call initiation — LiveKit for both 1-on-1 and group ─────────────
-  // A 1-on-1 call is just a 2-person LiveKit room, so the same GroupCallScreen
-  // + group-call-notification flow handles every call. This makes "Add to call"
-  // work everywhere.
+  // Uses WebRTC signaling for 1:1 calls — navigates to AudioCall or VideoCall screen.
   const startCall = useCallback(async (callType: 'audio' | 'video') => {
-    if (!userId) {
+    if (!userId || !otherUserId) {
       Alert.alert('Cannot make call', 'User information not available.');
       return;
     }
 
+    if (isGroup) {
+      Alert.alert('Not Supported', 'Group calls are not available.');
+      return;
+    }
+
     try {
-      const userDisplayName = user?.phoneNumber || user?.displayName || 'Unknown';
-      let memberIds: string[];
-
-      if (isGroup) {
-        // Group: pull the member list from the chat document
-        const chatRef = doc(db, 'chats', chatId);
-        const chatSnap = await getDoc(chatRef);
-        if (!chatSnap.exists()) {
-          Alert.alert('Error', 'Could not load group information');
-          return;
-        }
-        memberIds = (chatSnap.data().members as string[]) || [];
-      } else {
-        // 1-on-1: a 2-person LiveKit room
-        if (!otherUserId) {
-          Alert.alert('Cannot make call', 'User information not available.');
-          return;
-        }
-
-        // Check the other user's privacyCalls setting before starting
-        const calleePrivacy = await fetchUserPrivacySettings(otherUserId);
-        if (calleePrivacy.calls === 'Nobody') {
-          Alert.alert("Can't call", `${displayName} has turned off calls.`);
-          return;
-        }
-        // 'Contacts' — all users you have a direct chat with are contacts, so allowed.
-
-        memberIds = [userId, otherUserId];
+      // Check the other user's privacyCalls setting before starting
+      const calleePrivacy = await fetchUserPrivacySettings(otherUserId);
+      if (calleePrivacy.calls === 'Nobody') {
+        Alert.alert("Can't call", `${displayName} has turned off calls.`);
+        return;
       }
 
-      const result = await groupCall.initiateGroupCall(
-        chatId,
+      const callerInfo = {
         userId,
-        userDisplayName,
-        memberIds,
-        callType
+        displayName: user?.displayName || user?.phoneNumber || 'You',
+        photoUrl: user?.photoURL || null,
+      };
+      const calleeInfo = {
+        userId: otherUserId,
+        displayName,
+        photoUrl: otherUserPhoto || null,
+      };
+
+      const callId = await outgoingCall.initiateCall(
+        userId,
+        otherUserId,
+        callerInfo,
+        calleeInfo,
+        callType,
       );
 
-      if (result) {
-        startActiveCall({
-          roomName: result.roomName,
-          displayName: userDisplayName,
-          audioOnly: callType === 'audio',
-          // For a group this is the group name; for 1-on-1 it's the other person.
-          groupName: displayName,
-          memberCount: memberIds.length,
-          chatId,
-          callId: result.callId,
+      if (callId) {
+        const screen = callType === 'video' ? 'VideoCall' : 'AudioCall';
+        navigation.navigate(screen, {
+          callId,
+          isOutgoing: true,
+          otherParty: calleeInfo,
         });
       } else {
-        Alert.alert('Error', groupCall.error || 'Failed to start call');
+        Alert.alert('Error', 'Failed to start call');
       }
     } catch (error) {
       console.error('[ChatScreen] Error initiating call:', error);
       Alert.alert('Error', 'Failed to start call');
     }
-  }, [userId, isGroup, chatId, otherUserId, displayName, user, groupCall, startActiveCall]);
+  }, [userId, otherUserId, isGroup, displayName, user, outgoingCall, navigation, otherUserPhoto]);
 
   const handleVoiceCall = useCallback(() => startCall('audio'), [startCall]);
 
@@ -1472,68 +1448,6 @@ export default function ChatScreen() {
     }
   };
 
-  // ── Location handlers ───────────────────────────────────────────
-  const handleOpenLocationMenu = () => {
-    setShowAttach(false);
-    setShowLocationMenu(true);
-  };
-
-  const handleSendCurrentLocation = async () => {
-    if (!userId) return;
-    
-    setShowLocationMenu(false);
-    
-    const location = await locationSharing.getCurrentLocation();
-    if (!location) {
-      Alert.alert('Error', locationSharing.error || 'Failed to get location');
-      return;
-    }
-    
-    const result = await sendCurrentLocationMessage(chatId, userId, location);
-    
-    if (!result.success) {
-      Alert.alert('Error', 'Failed to send location');
-    }
-  };
-
-  const handleStartLiveLocation = async () => {
-    if (!userId) return;
-    
-    setShowLocationMenu(false);
-    
-    const location = await locationSharing.getCurrentLocation();
-    if (!location) {
-      Alert.alert('Error', locationSharing.error || 'Failed to get location');
-      return;
-    }
-    
-    const result = await sendLiveLocationMessage(
-      chatId,
-      userId,
-      location,
-      selectedDuration
-    );
-    
-    if (!result.success) {
-      Alert.alert('Error', 'Failed to send live location');
-      return;
-    }
-    
-    const started = await locationSharing.startLiveSharing(
-      chatId,
-      result.messageId,
-      selectedDuration
-    );
-    
-    if (!started) {
-      Alert.alert('Error', locationSharing.error || 'Failed to start live sharing');
-    }
-  };
-
-  const handleStopLiveLocation = async (messageId: string) => {
-    await locationSharing.stopLiveSharing();
-    await stopLiveLocationSharing(chatId, messageId);
-  };
 
   // ── Clear chat handler ──────────────────────────────────────────
   const handleClearChat = useCallback(async () => {
@@ -1817,15 +1731,6 @@ export default function ChatScreen() {
               mimeType={item.mimeType ?? undefined}
               isOutgoing={false}
             />
-          ) : item.type === 'location' && item.location ? (
-            <LocationMessageBubble
-              location={item.location}
-              isLiveLocation={item.isLiveLocation}
-              liveLocationExpiry={item.liveLocationExpiry}
-              isSender={false}
-              onStopSharing={() => handleStopLiveLocation(item.messageId)}
-              timestamp={item.timestamp}
-            />
           ) : item.type === 'image' && item.imageUrl ? (
             <LinearGradient colors={GRADIENTS.chatSent} style={[styles.bubble, styles.bubbleIn, styles.imageBubble]}>
               <TouchableOpacity 
@@ -1914,16 +1819,6 @@ export default function ChatScreen() {
               fileUrl={item.fileUrl!}
               mimeType={item.mimeType ?? undefined}
               isOutgoing={true}
-            />
-          ) : item.type === 'location' && item.location ? (
-            <LocationMessageBubble
-              location={item.location}
-              isLiveLocation={item.isLiveLocation}
-              liveLocationExpiry={item.liveLocationExpiry}
-              isSender={true}
-              onStopSharing={() => handleStopLiveLocation(item.messageId)}
-              timestamp={item.timestamp}
-              tickIcon={tickIcon}
             />
           ) : item.type === 'image' && item.imageUrl ? (
             <View style={[styles.bubble, styles.bubbleOut, styles.imageBubble]}>
@@ -2559,7 +2454,6 @@ export default function ChatScreen() {
             {[
               { icon: 'document-outline' as const, label: 'Files',    action: openDocuments },
               { icon: 'camera-outline'   as const, label: 'Camera',   action: () => { setShowAttach(false); openCamera(); } },
-              { icon: 'location-outline' as const, label: 'Location', action: handleOpenLocationMenu },
             ].map((item) => (
               <TouchableOpacity key={item.label} style={[styles.attachItem, bevel]}
                 onPress={item.action} activeOpacity={0.8}>
@@ -2691,99 +2585,6 @@ export default function ChatScreen() {
             </ScrollView>
           </View>
         </KeyboardAvoidingView>
-      </Modal>
-
-      {/* ── Location Sharing Menu ── */}
-      <Modal
-        visible={showLocationMenu}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowLocationMenu(false)}
-      >
-        <TouchableOpacity 
-          style={styles.attachOverlay}
-          activeOpacity={1}
-          onPress={() => setShowLocationMenu(false)}
-        />
-        <View style={[styles.attachSheet, { backgroundColor: FG.glassBg }]}>
-          <View style={styles.attachHandle} />
-          <AppText style={[styles.attachTitle, { color: textColor, fontFamily }]}>
-            Share Location
-          </AppText>
-
-          {/* Current Location */}
-          <TouchableOpacity 
-            style={[styles.locationOption, bevel]}
-            onPress={handleSendCurrentLocation}
-            activeOpacity={0.8}
-          >
-            <View style={styles.locationIconWrap}>
-              <AppIcon name="location" size={28} color={COLORS.blue} fixedColor />
-            </View>
-            <View style={styles.locationOptionText}>
-              <AppText style={[styles.locationOptionTitle, { color: textColor, fontFamily }]}>
-                Current Location
-              </AppText>
-              <AppText style={[styles.locationOptionDesc, { color: COLORS.sub }]}>
-                Send your current location
-              </AppText>
-            </View>
-          </TouchableOpacity>
-
-          {/* Live Location */}
-          <View style={[styles.locationOption, bevel]}>
-            <View style={styles.locationIconWrap}>
-              <AppIcon name="navigate" size={28} color={COLORS.blue} fixedColor />
-            </View>
-            <View style={styles.locationOptionText}>
-              <AppText style={[styles.locationOptionTitle, { color: textColor, fontFamily }]}>
-                Live Location
-              </AppText>
-              <AppText style={[styles.locationOptionDesc, { color: COLORS.sub }]}>
-                Share for:
-              </AppText>
-              
-              {/* Duration Selector */}
-              <View style={styles.durationButtons}>
-                {[5, 15, 30, 60].map((duration) => {
-                  const isSelected = selectedDuration === duration;
-                  return (
-                    <TouchableOpacity
-                      key={duration}
-                      style={[
-                        styles.durationButton,
-                        isSelected ? { backgroundColor: COLORS.blue } : bevel,
-                      ]}
-                      onPress={() => setSelectedDuration(duration)}
-                    >
-                      <AppText 
-                        style={[
-                          styles.durationText,
-                          { color: isSelected ? '#fff' : textColor }
-                        ]}
-                        fixedColor={isSelected}
-                      >
-                        {duration}m
-                      </AppText>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-
-              <TouchableOpacity 
-                style={[styles.startLiveButton, { marginTop: 12 }]}
-                onPress={handleStartLiveLocation}
-                activeOpacity={0.85}
-              >
-                <LinearGradient colors={GRADIENTS.primary} style={styles.startLiveButtonInner}>
-                  <AppText fixedColor style={styles.startLiveButtonText}>
-                    Start Sharing
-                  </AppText>
-                </LinearGradient>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
       </Modal>
 
       {/* ── In-app camera ── */}

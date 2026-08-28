@@ -2,7 +2,6 @@
 export * from './StatusViewer';
 export * from './CreateStatusModal';
 export * from './VoiceMessageBubble';
-export * from './LocationMessageBubble';
 export * from './ForwardModal';
 export * from './MessageInfoModal';
 export * from './FloatingCallOverlay';
@@ -73,10 +72,10 @@ const TABS: {
   label: string;
   screen: keyof RootStackParamList;
 }[] = [
-  { id: 'chats',    icon: 'chatbubble-outline',      iconActive: 'chatbubble',      label: 'Chats',    screen: 'Chats'    },
-  { id: 'calls',    icon: 'call-outline',             iconActive: 'call',            label: 'Calls',    screen: 'Calls'    },
-  { id: 'status',   icon: 'radio-button-off-outline', iconActive: 'radio-button-on', label: 'Updates',  screen: 'Status'   },
-  { id: 'settings', icon: 'settings-outline',         iconActive: 'settings',        label: 'Settings', screen: 'Settings' },
+  { id: 'status',   icon: 'aperture-outline',    iconActive: 'aperture',    label: 'Updates', screen: 'Status'   },
+  { id: 'calls',    icon: 'call-outline',        iconActive: 'call',        label: 'Calls',   screen: 'Calls'    },
+  { id: 'chats',    icon: 'chatbubbles-outline', iconActive: 'chatbubbles', label: 'Chats',   screen: 'Chats'    },
+  { id: 'settings', icon: 'person-outline',      iconActive: 'person',      label: 'You',     screen: 'Settings' },
 ];
 
 interface BottomNavProps { active: TabKey; }
@@ -86,7 +85,7 @@ export function BottomNav({ active }: BottomNavProps) {
   const { fontFamily } = useTypography();
   const { bevel } = useGlass();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuth();
+  const { userId, avatarUri, displayName } = useAuth();
   
   // Use the hooks directly (now properly imported at the top)
   const { totalUnread } = useUnreadCount(userId);
@@ -114,7 +113,23 @@ export function BottomNav({ active }: BottomNavProps) {
             onPress={() => navigation.navigate(t.screen as any)}
           >
             <View>
-              {isActive ? (
+              {t.id === 'settings' ? (
+                // "You" tab — show the user's profile picture
+                <View style={[styles.iconTileInactive, isActive && styles.avatarActiveRing]}>
+                  {avatarUri ? (
+                    <Image
+                      source={{ uri: avatarUri }}
+                      style={styles.navAvatarImg}
+                    />
+                  ) : (
+                    <View style={styles.navAvatarFallback}>
+                      <AppText style={styles.navAvatarInitials} fixedColor>
+                        {(displayName || 'You').split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2)}
+                      </AppText>
+                    </View>
+                  )}
+                </View>
+              ) : isActive ? (
                 <LinearGradient colors={GRADIENTS.primary} style={styles.iconTileActive}>
                   <AppIcon name={t.iconActive} size={20} color="#fff" fixedColor />
                 </LinearGradient>
@@ -251,6 +266,23 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 
+  // "You" tab avatar
+  navAvatarImg: {
+    width: 30, height: 30, borderRadius: 15,
+    borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.7)',
+  },
+  navAvatarFallback: {
+    width: 30, height: 30, borderRadius: 15,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: COLORS.blue,
+  },
+  navAvatarInitials: { fontSize: 11, fontWeight: '700', color: '#fff' },
+  avatarActiveRing: {
+    borderWidth: 2,
+    borderColor: COLORS.blue,
+    borderRadius: 18,
+  },
+
   navLabel:       { fontSize: 10, fontWeight: '500' },
   navLabelActive: { fontWeight: '700', color: COLORS.blue },
   
@@ -295,7 +327,6 @@ const styles = StyleSheet.create({
 // Export other components that are in separate files
 export { IncomingCallOverlay } from './IncomingCallOverlay';
 export { IncomingCallManager } from './IncomingCallManager';
-export { LocationMessageBubble } from './LocationMessageBubble';
 export { FloatingCallOverlay } from './FloatingCallOverlay';
 export { default as RTCView } from './RTCView';
 

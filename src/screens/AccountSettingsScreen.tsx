@@ -155,7 +155,12 @@ export default function AccountSettingsScreen() {
 const styles = StyleSheet.create({
   root: { flex: 1 },
   header: { flexDirection: 'row', alignItems: 'center', paddingTop: 0, paddingBottom: 12, paddingHorizontal: 14, borderBottomWidth: 1 },
-  back:   { width: 36 },
+  back:   {
+    width: 38, height: 38, borderRadius: 19,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.65)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.8)',
+  },
   title:  { flex: 1, textAlign: 'center', fontSize: 17, fontWeight: '700' },
   scroll: { paddingHorizontal: 14, paddingTop: 16, paddingBottom: 40, gap: 8 },
   sectionLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 1.2, paddingHorizontal: 4, paddingBottom: 2, paddingTop: 8 },

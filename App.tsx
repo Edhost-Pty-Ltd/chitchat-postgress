@@ -14,12 +14,9 @@ import { ThemeProvider } from './src/context/ThemeContext';
 import { CallProvider } from './src/context/CallContext';
 import { NotificationProvider } from './src/context/NotificationContext';
 import { FloatingCallProvider } from './src/context/FloatingCallContext';
-import { ActiveCallProvider } from './src/context/ActiveCallContext';
 import AppNavigator from './src/navigation/AppNavigator';
 import ToastOverlay from './src/components/ToastNotification';
 import { FloatingCallManager } from './src/components/FloatingCallManager';
-import { CallHost } from './src/components/CallHost';
-import GroupCallNotificationManager from './src/components/GroupCallNotificationManager';
 import { BiometricGate } from './src/components/BiometricGate';
 import { usePushNotifications } from './src/hooks/usePushNotifications';
 
@@ -119,7 +116,6 @@ export default function App() {
           <CallProvider>
             <NotificationProvider>
               <FloatingCallProvider>
-                <ActiveCallProvider>
                   <ActivityWatcher />
                   <PushNotificationManager />
                   <NavigationContainer>
@@ -127,11 +123,8 @@ export default function App() {
                     <AppNavigator />
                     <ToastOverlay />
                     <FloatingCallManager />
-                    <GroupCallNotificationManager />
-                    <CallHost />
                     <BiometricGate />
                   </NavigationContainer>
-                </ActiveCallProvider>
               </FloatingCallProvider>
             </NotificationProvider>
           </CallProvider>

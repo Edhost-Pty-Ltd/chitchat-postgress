@@ -326,7 +326,12 @@ export default function ChangeNumberScreen() {
 const styles = StyleSheet.create({
   root:   { flex: 1 },
   header: { flexDirection: 'row', alignItems: 'center', paddingTop: Platform.OS === 'web' ? 16 : 52, paddingBottom: 12, paddingHorizontal: 14, gap: 8, borderBottomWidth: 1 },
-  backBtn:     { width: 36 },
+  backBtn:     {
+    width: 38, height: 38, borderRadius: 19,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.65)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.8)',
+  },
   headerTitle: { flex: 1, textAlign: 'center', fontSize: 17, fontWeight: '700' },
   webNoticeIcon: {
     width: 80, height: 80, borderRadius: 40,

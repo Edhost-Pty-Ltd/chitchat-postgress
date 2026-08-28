@@ -13,18 +13,19 @@ import { Platform } from 'react-native';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getFirestore, enableIndexedDbPersistence } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
+import { getAuth as getWebAuth } from 'firebase/auth';
 
 // Initialize React Native Firebase (native module)
 // This ensures the native auth module is loaded before we use it
 import './firebaseNative';
 
 const firebaseConfig = {
-  apiKey:            'AIzaSyBzstwF1NgQWASsqVa4R5IiZpFLoKZnSJQ',
-  authDomain:        'chit-chat-67a7f.firebaseapp.com',
-  projectId:         'chit-chat-67a7f',
-  storageBucket:     'chit-chat-67a7f.firebasestorage.app',
-  messagingSenderId: '825582316169',
-  appId:             '1:825582316169:web:ea4abdaa918504fe77f458',
+  apiKey:            'AIzaSyB5utwhyyfeEgdC2EUNLcZChFvuc9oc44U',
+  authDomain:        'chitchatbusiness-880ce.firebaseapp.com',
+  projectId:         'chitchatbusiness-880ce',
+  storageBucket:     'chitchatbusiness-880ce.firebasestorage.app',
+  messagingSenderId: '600971982253',
+  appId:             '1:600971982253:android:98266dc9861305e84e5d24',
 };
 
 console.log('[Firebase] Initializing Firebase...');
@@ -43,6 +44,11 @@ console.log('[Firebase] Firestore initialized');
 export const storage = getStorage(app);
 
 console.log('[Firebase] Storage initialized');
+
+// Firebase Auth (Web SDK) — used by web-specific hooks
+export const auth = getWebAuth(app);
+
+console.log('[Firebase] Auth initialized');
 
 // Enable offline persistence for better reliability (web only)
 // This allows Firestore to work offline and sync when connection is restored

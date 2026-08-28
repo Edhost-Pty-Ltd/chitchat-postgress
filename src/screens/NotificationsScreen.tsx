@@ -179,7 +179,12 @@ const styles = StyleSheet.create({
     paddingTop: 0, paddingBottom: 12, paddingHorizontal: 14,
     borderBottomWidth: 1, gap: 10,
   },
-  back:         { width: 34 },
+  back:         {
+    width: 38, height: 38, borderRadius: 19,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.65)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.8)',
+  },
   headerCenter: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 },
   headerTitle:  { fontSize: 17, fontWeight: '700', color: COLORS.text },
   headerBadge:  {

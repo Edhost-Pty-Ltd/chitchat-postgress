@@ -1,5 +1,5 @@
 // ─── Mock Data ────────────────────────────────────────────────────────────────
-import { Contact, Message, Call, StatusUpdate, CalendarEvent, Note } from '../types';
+import { Contact, Message, Call, StatusUpdate } from '../types';
 
 export const CONTACTS: Contact[] = [
   { id: 1, name: 'Anna Martin',   avatar: 'AM', color: '#f97316', status: 'online',  lastMsg: 'Hey! How are you?',           time: '9:40 AM',   unread: 2 },
@@ -65,15 +65,3 @@ export const STATUSES: StatusUpdate[] = [
   { id: 5, name: 'Team Office',  avatar: 'TO', color: '#06b6d4', time: '2h ago'   },
 ];
 
-export const CALENDAR_EVENTS: CalendarEvent[] = [
-  { id: 1, title: 'Team Meeting',      date: '2025-05-22', startTime: '10:00 AM', endTime: '11:00 AM', color: '#1a7fe8' },
-  { id: 2, title: 'Project Deadline',  date: '2025-05-22', startTime: '2:00 PM',  endTime: '3:00 PM',  color: '#e84343' },
-  { id: 3, title: 'Dinner with Family',date: '2025-05-22', startTime: '7:00 PM',  endTime: '8:00 PM',  color: '#f59e0b' },
-];
-
-export const NOTES: Note[] = [
-  { id: 1, title: 'Meeting Notes',  preview: 'Discuss project roadmap and next steps.',              date: 'May 23, 2025', checked: false },
-  { id: 2, title: 'Shopping List',  preview: 'Milk, Eggs, Bread, Fruits, Chicken, Rice',            date: 'May 21, 2025', checked: false },
-  { id: 3, title: 'Ideas',          preview: '• New app features\n• Game plan',                     date: 'May 20, 2025', checked: false },
-  { id: 4, title: 'Workout Plan',   preview: 'Monday: Chest\nTuesday: Back',                        date: 'May 19, 2025', checked: true  },
-];

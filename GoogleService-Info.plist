@@ -3,17 +3,17 @@
 <plist version="1.0">
 <dict>
 	<key>API_KEY</key>
-	<string>AIzaSyDkgWtY5T513N6orCBKdEyO0nG5YCEieDM</string>
+	<string>AIzaSyB5utwhyyfeEgdC2EUNLcZChFvuc9oc44U</string>
 	<key>GCM_SENDER_ID</key>
-	<string>825582316169</string>
+	<string>600971982253</string>
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
 	<string>com.edhost.chitchat.app</string>
 	<key>PROJECT_ID</key>
-	<string>chit-chat-67a7f</string>
+	<string>chitchatbusiness-880ce</string>
 	<key>STORAGE_BUCKET</key>
-	<string>chit-chat-67a7f.firebasestorage.app</string>
+	<string>chitchatbusiness-880ce.firebasestorage.app</string>
 	<key>IS_ADS_ENABLED</key>
 	<false></false>
 	<key>IS_ANALYTICS_ENABLED</key>
@@ -25,6 +25,6 @@
 	<key>IS_SIGNIN_ENABLED</key>
 	<true></true>
 	<key>GOOGLE_APP_ID</key>
-	<string>1:825582316169:ios:1d6ef113064fa33f77f458</string>
+	<string>1:600971982253:ios:98266dc9861305e84e5d24</string>
 </dict>
 </plist>

@@ -146,7 +146,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     borderBottomWidth: 1,
   },
-  back:  { width: 36 },
+  back:  {
+    width: 38, height: 38, borderRadius: 19,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.65)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.8)',
+  },
   title: { flex: 1, textAlign: 'center', fontSize: 17, fontWeight: '700' },
   scroll: { paddingHorizontal: 14, paddingTop: 16, paddingBottom: 40, gap: 8 },
   sectionLabel: {

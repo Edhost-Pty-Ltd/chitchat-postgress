@@ -20,7 +20,7 @@ export interface UseRegistrationReturn {
   isLoading: boolean;
 
   // Form actions
-  submitRegistration: (username: string, phone: string, imageUri: string | null) => Promise<void>;
+  submitRegistration: (username: string, phone: string, imageUri: string | null, businessMeta?: BusinessMeta) => Promise<void>;
 
   // OTP actions
   verifyOTP: (code: string) => Promise<boolean>;
@@ -34,6 +34,13 @@ export interface UseRegistrationReturn {
   proceedWithoutPhoto: () => Promise<void>;
 }
 
+export interface BusinessMeta {
+  email?: string;
+  website?: string;
+  catalog?: string;
+  operationalHours?: string;
+}
+
 export function useRegistration(): UseRegistrationReturn {
   const [registrationStep, setRegistrationStep] = useState<RegistrationStep>('form');
   const [error, setError] = useState<string | null>(null);
@@ -45,10 +52,11 @@ export function useRegistration(): UseRegistrationReturn {
   const phoneRef = useRef<string>('');
   const usernameRef = useRef<string>('');
   const imageUriRef = useRef<string | null>(null);
+  const businessMetaRef = useRef<BusinessMeta>({});
 
   // ── Submit registration: send OTP to phone ─────────────────────
   const submitRegistration = useCallback(
-    async (username: string, phone: string, imageUri: string | null): Promise<void> => {
+    async (username: string, phone: string, imageUri: string | null, businessMeta?: BusinessMeta): Promise<void> => {
       try {
         setIsLoading(true);
         setError(null);
@@ -57,6 +65,7 @@ export function useRegistration(): UseRegistrationReturn {
         usernameRef.current = username;
         phoneRef.current = phone;
         imageUriRef.current = imageUri;
+        businessMetaRef.current = businessMeta || {};
 
         const authInstance = getAuth();
         const confirmation = await signInWithPhoneNumber(authInstance, phone);
@@ -162,9 +171,15 @@ export function useRegistration(): UseRegistrationReturn {
           userDocRef,
           {
             uid,
-            displayName: usernameRef.current,  // Use displayName to match the rest of the app
+            displayName: usernameRef.current,  // Business name
             phone: phoneRef.current,
             photoURL,
+            // Business fields
+            email: businessMetaRef.current.email || null,
+            website: businessMetaRef.current.website || null,
+            catalog: businessMetaRef.current.catalog || null,
+            operationalHours: businessMetaRef.current.operationalHours || null,
+            accountType: 'business',
             createdAt: serverTimestamp(),
             lastSeen: serverTimestamp(),
           },

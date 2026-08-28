@@ -15,8 +15,7 @@ import { AppBg, AppText, AppIcon, useForeground, useGlass } from '../context/The
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../hooks/useAuth';
 import { useCallHistory } from '../hooks/useCallHistory';
-import { useGroupCall } from '../hooks/useGroupCall';
-import { useActiveCall } from '../context/ActiveCallContext';
+import { useOutgoingCall } from '../hooks/useOutgoingCall';
 import { useContacts } from '../hooks/useContacts';
 import { usePhoneBook } from '../hooks/usePhoneBook';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
@@ -297,8 +296,7 @@ export default function CallsScreen() {
   const { callHistory, loading, error } = useCallHistory(user?.uid ?? null);
   const { contacts, loading: contactsLoading } = useContacts();
   const { resolveName } = usePhoneBook();
-  const groupCall = useGroupCall();
-  const { startCall: startActiveCall } = useActiveCall();
+  const outgoingCall = useOutgoingCall();
   const { bevel } = useGlass();
   const insets = useSafeAreaInsets();
 
@@ -342,11 +340,12 @@ export default function CallsScreen() {
     ? callHistory.filter((c) => c.status === 'missed') 
     : callHistory;
 
-  // ── Shared LiveKit call initiator ─────────────────────────────────────────
-  const startLiveKitCall = async (
+  // ── Direct WebRTC call initiator ─────────────────────────────────────────
+  const startDirectCall = async (
     calleeUserId: string,
     displayName: string,
     callType: 'audio' | 'video',
+    photoUrl?: string | null,
   ) => {
     if (!user) { Alert.alert('Error', 'You must be logged in to make calls'); return; }
 
@@ -357,28 +356,31 @@ export default function CallsScreen() {
       return;
     }
 
-    // Get or create a direct chat to use as the call room anchor
-    const chatId = await getOrCreateDirectChat(user.uid, calleeUserId);
-    const roomName = `chitchat-${chatId}`;
-    const callerName = user.phoneNumber || user.displayName || 'Unknown';
+    const callerInfo = {
+      userId: user.uid,
+      displayName: user.displayName || user.phoneNumber || 'You',
+      photoUrl: user.photoURL || null,
+    };
+    const calleeInfo = {
+      userId: calleeUserId,
+      displayName,
+      photoUrl: photoUrl || null,
+    };
 
-    const result = await groupCall.initiateGroupCall(
-      chatId,
+    const callId = await outgoingCall.initiateCall(
       user.uid,
-      callerName,
-      [user.uid, calleeUserId],
+      calleeUserId,
+      callerInfo,
+      calleeInfo,
       callType,
     );
 
-    if (result) {
-      startActiveCall({
-        roomName: result.roomName,
-        displayName: callerName,
-        audioOnly: callType === 'audio',
-        groupName: displayName,   // other person's name for 1-on-1
-        memberCount: 2,
-        chatId,
-        callId: result.callId,
+    if (callId) {
+      const screen = callType === 'video' ? 'VideoCall' : 'AudioCall';
+      navigation.navigate(screen, {
+        callId,
+        isOutgoing: true,
+        otherParty: calleeInfo,
       });
     } else {
       Alert.alert('Call Failed', 'Unable to start call. Please try again.');
@@ -391,7 +393,7 @@ export default function CallsScreen() {
     setPickerOpen(false);
     setCalling(true);
     try {
-      await startLiveKitCall(userId, displayName, 'audio');
+      await startDirectCall(userId, displayName, 'audio', photoUrl);
     } catch (err) {
       console.error('[CallsScreen] Audio call failed:', err);
       Alert.alert('Call Failed', 'Unable to start call. Please try again.');
@@ -406,7 +408,7 @@ export default function CallsScreen() {
     setPickerOpen(false);
     setCalling(true);
     try {
-      await startLiveKitCall(userId, displayName, 'video');
+      await startDirectCall(userId, displayName, 'video', photoUrl);
     } catch (err) {
       console.error('[CallsScreen] Video call failed:', err);
       Alert.alert('Call Failed', 'Unable to start call. Please try again.');
@@ -436,7 +438,7 @@ export default function CallsScreen() {
       }
 
       const callerDisplayName = resolveCallerName(item.otherParty.userId, item.otherParty.displayName);
-      await startLiveKitCall(item.otherParty.userId, callerDisplayName, typeToUse);
+      await startDirectCall(item.otherParty.userId, callerDisplayName, typeToUse, item.otherParty.photoUrl);
     } catch (err) {
       console.error('[CallsScreen] Call back failed:', err);
       Alert.alert('Call Failed', 'Unable to start call. Please try again.');

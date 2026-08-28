@@ -1,13 +1,13 @@
 {
   "project_info": {
-    "project_number": "825582316169",
-    "project_id": "chit-chat-67a7f",
-    "storage_bucket": "chit-chat-67a7f.firebasestorage.app"
+    "project_number": "600971982253",
+    "project_id": "chitchatbusiness-880ce",
+    "storage_bucket": "chitchatbusiness-880ce.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:825582316169:android:8c1dbb74c2ad54e177f458",
+        "mobilesdk_app_id": "1:600971982253:android:98266dc9861305e84e5d24",
         "android_client_info": {
           "package_name": "com.edhost.chitchat"
         }
@@ -15,7 +15,7 @@
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyDCPz9ZC-VCEXe8J2RRYzOhDUiKwA5_u3w"
+          "current_key": "AIzaSyB5utwhyyfeEgdC2EUNLcZChFvuc9oc44U"
         }
       ],
       "services": {

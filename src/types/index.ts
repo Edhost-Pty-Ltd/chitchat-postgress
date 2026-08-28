@@ -33,7 +33,7 @@ export interface ChatMessage {
   messageId: string;
   senderId: string;
   text: string | null;
-  type: 'text' | 'image' | 'video' | 'voice' | 'audio' | 'file' | 'location' | 'system';
+  type: 'text' | 'image' | 'video' | 'voice' | 'audio' | 'file' | 'system';
   
   // Media URLs
   imageUrl?: string | null;
@@ -49,11 +49,6 @@ export interface ChatMessage {
   duration?: number;
   thumbnailUrl?: string;
   
-  // Location data
-  location?: LocationData | null;
-  isLiveLocation?: boolean;
-  liveLocationExpiry?: Date | null;
-  
   timestamp: Date;
   readBy: string[];
   editedAt?: Date | null;
@@ -62,25 +57,6 @@ export interface ChatMessage {
   blockedMessage?: boolean; // Message sent while recipient was blocked
 }
 
-// ─── Location Data ─────────────────────────────────────────────────────────────
-export interface LocationData {
-  latitude: number;
-  longitude: number;
-  accuracy?: number;
-  altitude?: number | null;
-  altitudeAccuracy?: number | null;
-  heading?: number | null;
-  speed?: number | null;
-  timestamp: number;
-}
-
-// ─── Live Location Update ──────────────────────────────────────────────────────
-export interface LiveLocationUpdate {
-  messageId: string;
-  location: LocationData;
-  timestamp: Date;
-  isActive: boolean;
-}
 
 export interface Call {
   id: number;
@@ -130,38 +106,6 @@ export interface FireStatus {
   selectedUsers?: string[];
 }
 
-// ─── Calendar ─────────────────────────────────────────────────────────────
-export interface CalendarEvent {
-  id: number;
-  title: string;
-  date: string;       // "YYYY-MM-DD"
-  startTime: string;
-  endTime: string;
-  color: string;
-}
-
-// ─── Notes ────────────────────────────────────────────────────────────────
-export interface DrawStroke {
-  points: { x: number; y: number }[];
-  color: string;
-  width: number;
-}
-
-export interface NoteAttachment {
-  uri: string;
-  name: string;
-  type: 'image' | 'document';
-}
-
-export interface Note {
-  id: number;
-  title: string;
-  preview: string;
-  date: string;
-  checked?: boolean;
-  strokes?: DrawStroke[];
-  attachments?: NoteAttachment[];
-}
 
 // ─── Navigation param list ─────────────────────────────────────────────────
 export type RootStackParamList = {
@@ -172,8 +116,6 @@ export type RootStackParamList = {
   Calls: undefined;
   Status: undefined;
   Contacts: undefined;
-  Calendar: undefined;
-  Notes: undefined;
   Settings: undefined;
   Appearance: undefined;
   Profile: undefined;
@@ -185,15 +127,6 @@ export type RootStackParamList = {
   Notifications: undefined;
   LinkedDevices: undefined;
   BlockedContacts: undefined;
-  GroupCall: {
-    roomName: string;
-    displayName: string;
-    audioOnly: boolean;
-    groupName: string;
-    memberCount: number;
-    chatId?: string;
-    callId?: string;
-  };
   AudioCall: { 
     callId: string;
     isOutgoing: boolean;

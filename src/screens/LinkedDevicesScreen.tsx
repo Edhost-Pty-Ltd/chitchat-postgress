@@ -113,7 +113,7 @@ export default function LinkedDevicesScreen() {
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
 
         {/* Info banner */}
-        <View style={[styles.banner, { backgroundColor: FG.glassBg, borderColor: FG.glassBorder }]}>
+        <View style={[styles.banner, { backgroundColor: 'rgba(255,255,255,0.6)' }]}>
           <AppIcon name="information-circle-outline" size={18} color={COLORS.blue} fixedColor />
           <AppText style={[styles.bannerTxt, { color: FG.secondary }]}>
             These devices are signed in with your ChitChat account. You can log out of any device remotely.
@@ -230,7 +230,7 @@ function DeviceCard({ device, FG, textColor, fontFamily, onLogout }: DeviceCardP
   return (
     <View style={[styles.card, bevel]}>
       {/* Icon */}
-      <View style={[styles.deviceIconWrap, { backgroundColor: 'rgba(30,156,240,0.12)', borderColor: 'rgba(30,156,240,0.25)' }]}>
+      <View style={[styles.deviceIconWrap, { backgroundColor: 'rgba(30,156,240,0.10)' }]}>
         <AppIcon name={DEVICE_ICON[device.type]} size={22} color={COLORS.blue} fixedColor />
       </View>
 
@@ -287,14 +287,19 @@ const styles = StyleSheet.create({
     paddingTop: 0, paddingBottom: 12, paddingHorizontal: 14,
     borderBottomWidth: 1,
   },
-  back:  { width: 36 },
+  back:  {
+    width: 38, height: 38, borderRadius: 19,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.65)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.8)',
+  },
   title: { flex: 1, textAlign: 'center', fontSize: 17, fontWeight: '700' },
 
   scroll: { paddingHorizontal: 14, paddingTop: 16, paddingBottom: 48, gap: 8 },
 
   banner: {
     flexDirection: 'row', gap: 10, alignItems: 'flex-start',
-    borderRadius: RADIUS.lg, borderWidth: 1,
+    borderRadius: RADIUS.lg, borderWidth: 0,
     paddingHorizontal: 14, paddingVertical: 12,
     marginBottom: 4,
   },
@@ -312,7 +317,7 @@ const styles = StyleSheet.create({
 
   deviceIconWrap: {
     width: 48, height: 48, borderRadius: 14,
-    borderWidth: 1, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 0, alignItems: 'center', justifyContent: 'center',
     flexShrink: 0,
   },
 

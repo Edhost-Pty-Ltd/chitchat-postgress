@@ -105,7 +105,7 @@ async function uploadVoiceNoteReal(
         clearTimeout(timeout);
         if (xhr.status === 200) {
           // Get download URL
-          const bucketName = 'chit-chat-67a7f.firebasestorage.app';
+          const bucketName = 'chitchatbusiness-880ce.firebasestorage.app';
           const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(storagePath)}?alt=media`;
           console.log('[VoiceStorage] Upload complete, URL:', downloadUrl);
           resolve({ downloadUrl, storagePath });
@@ -125,7 +125,7 @@ async function uploadVoiceNoteReal(
       });
       
       // Upload to Firebase Storage REST API
-      const bucketName = 'chit-chat-67a7f.firebasestorage.app';
+      const bucketName = 'chitchatbusiness-880ce.firebasestorage.app';
       const uploadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o?name=${encodeURIComponent(storagePath)}`;
       
       xhr.open('POST', uploadUrl);

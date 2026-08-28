@@ -313,37 +313,29 @@ export function useTypography() {
 }
 
 // ─── useGlass ─────────────────────────────────────────────────────────────────
-// Returns ready-to-spread style objects for the app's beveled "clear glass"
-// look. Adapts automatically to light/dark backgrounds. The centre stays fully
-// transparent (gradient shows through); the 3D comes from directional borders.
+// Returns ready-to-spread style objects for the app's card surfaces.
+// The glass/bevel look has been replaced app-wide with clean, flat cards:
+// a soft white surface with a subtle border. Adapts to light/dark.
 export function useGlass() {
   const { FG } = useContext(ThemeContext);
 
-  // Beveled glass surface — spread onto any card/container View.
+  const isDark = FG.icon.includes('255'); // dark background → light FG tokens
+
+  // Clean flat card surface — solid, no glass rim.
   const bevel = {
-    backgroundColor: 'transparent' as const,
-    borderWidth: 1.5,
-    borderColor: FG.bevelBorder,
-    borderTopColor: FG.bevelTop,
-    borderLeftColor: FG.bevelLeft,
-    borderBottomColor: FG.bevelBottom,
-    borderRightColor: FG.bevelRight,
+    backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.85)',
+    borderWidth: 0,
   };
 
-  // Circular glass icon button (matches the ChatsScreen search icon).
+  // Circular flat icon button.
   const iconButton = {
     width: 38,
     height: 38,
     borderRadius: 19,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
-    backgroundColor: 'transparent' as const,
-    borderWidth: 1.5,
-    borderColor: FG.bevelBorder,
-    borderTopColor: FG.bevelTop,
-    borderLeftColor: FG.bevelLeft,
-    borderBottomColor: FG.bevelBottom,
-    borderRightColor: FG.bevelRight,
+    backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(30,156,240,0.10)',
+    borderWidth: 0,
   };
 
   return { bevel, iconButton, FG };
@@ -404,7 +396,9 @@ export function AppIcon({
 
   if (!glass) return icon;
 
-  // 3D glass tile — beveled clear glass, consistent with useGlass().iconButton
+  const isDark = FG.icon.includes('255'); // dark background → light FG tokens
+
+  // Clean flat tile — soft tinted background, no bevel/glass rim.
   return (
     <View style={[
       {
@@ -413,15 +407,7 @@ export function AppIcon({
         borderRadius: tileSize * 0.28,
         alignItems: 'center',
         justifyContent: 'center',
-        // Clear centre — no fill, no elevation (avoids Android white-fill artifact)
-        backgroundColor: 'transparent',
-        // Directional bevel rim — adapts to light/dark via FG tokens
-        borderWidth: 1.5,
-        borderColor: FG.bevelBorder,
-        borderTopColor: FG.bevelTop,
-        borderLeftColor: FG.bevelLeft,
-        borderBottomColor: FG.bevelBottom,
-        borderRightColor: FG.bevelRight,
+        backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(30,156,240,0.10)',
       },
       style,
     ]}>
