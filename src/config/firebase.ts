@@ -1,23 +1,22 @@
-// ─── Firebase Configuration (Hybrid) ──────────────────────────────────────────
-// Auth:      @react-native-firebase/auth (native module, supports phone OTP)  
-// Firestore: firebase/firestore (JS SDK)
+// ─── Firebase Configuration ────────────────────────────────────────────────────
+// All Firebase services now use @react-native-firebase (native modules).
+// Auth + Firestore + Storage all share the same native SDK instance, so
+// security rules work correctly — request.auth is always populated.
 //
-// WORKAROUND: Since bridging auth between native and JS SDK is complex and requires
-// a backend to generate custom tokens, we temporarily use permissive Firestore rules
-// that allow authenticated users (from either SDK) to access data.
-//
-// TODO: Implement proper auth bridge or migrate to full JS SDK when phone auth
-// supports it without requiring reCAPTCHA manual handling.
+// Web fallback uses the JS SDK (only for useAuth.web.ts and Platform.OS==='web').
 
 import { Platform } from 'react-native';
+
+// ── Native (iOS / Android) ────────────────────────────────────────────────────
+import nativeFirestore from '@react-native-firebase/firestore';
+import nativeStorage from '@react-native-firebase/storage';
+import { getAuth as getNativeAuth } from '@react-native-firebase/auth';
+
+// ── Web fallback (JS SDK) ─────────────────────────────────────────────────────
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getFirestore, enableIndexedDbPersistence } from 'firebase/firestore';
+import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import { getAuth as getWebAuth } from 'firebase/auth';
-
-// Initialize React Native Firebase (native module)
-// This ensures the native auth module is loaded before we use it
-import './firebaseNative';
 
 const firebaseConfig = {
   apiKey:            'AIzaSyB5utwhyyfeEgdC2EUNLcZChFvuc9oc44U',
@@ -28,42 +27,31 @@ const firebaseConfig = {
   appId:             '1:600971982253:android:98266dc9861305e84e5d24',
 };
 
-console.log('[Firebase] Initializing Firebase...');
+// Always initialize the JS SDK app so web builds and useAuth.web.ts work
+const webApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// Prevent duplicate app initialization on hot reload
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+// ── Exports ───────────────────────────────────────────────────────────────────
+// On native: db / storage are the @react-native-firebase instances.
+// On web:    db / storage are the JS SDK instances.
+// All consumers import from this file — the platform difference is invisible.
 
-console.log('[Firebase] Firebase app initialized:', app.name);
+export const db =
+  Platform.OS !== 'web'
+    ? nativeFirestore()
+    : getFirestore(webApp);
 
-// Firestore — real-time database (JS SDK)
-export const db = getFirestore(app);
+export const storage =
+  Platform.OS !== 'web'
+    ? nativeStorage()
+    : getStorage(webApp);
 
-console.log('[Firebase] Firestore initialized');
+export const auth =
+  Platform.OS !== 'web'
+    ? getNativeAuth()
+    : getWebAuth(webApp);
 
-// Firebase Storage — voice note audio file hosting
-export const storage = getStorage(app);
+// Named re-exports so existing callers that do `import { db } from '../config/firebase'`
+// keep working with zero changes.
+export { nativeFirestore, nativeStorage };
 
-console.log('[Firebase] Storage initialized');
-
-// Firebase Auth (Web SDK) — used by web-specific hooks
-export const auth = getWebAuth(app);
-
-console.log('[Firebase] Auth initialized');
-
-// Enable offline persistence for better reliability (web only)
-// This allows Firestore to work offline and sync when connection is restored
-if (Platform.OS === 'web') {
-  try {
-    enableIndexedDbPersistence(db).catch((err) => {
-      if (err.code === 'failed-precondition') {
-        console.warn('[Firebase] Persistence failed: Multiple tabs open');
-      } else if (err.code === 'unimplemented') {
-        console.warn('[Firebase] Persistence not available in this browser');
-      }
-    });
-  } catch (error) {
-    console.warn('[Firebase] Persistence initialization error:', error);
-  }
-}
-
-export default app;
+export default webApp;

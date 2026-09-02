@@ -13,6 +13,8 @@ import {
 } from 'firebase/auth';
 import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
 import { db, auth as firebaseAuth } from '../config/firebase';
+// NOTE: This file is web-only. On web, db is the firebase/firestore JS SDK instance
+// so the JS SDK API (doc, setDoc, serverTimestamp, etc.) is correct here.
 
 export type AuthStep = 'idle' | 'sending' | 'otpSent' | 'verifying' | 'done' | 'error';
 

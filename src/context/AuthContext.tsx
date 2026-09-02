@@ -17,7 +17,7 @@ import React, {
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getAuth, onAuthStateChanged, signOut as fbSignOut } from '@react-native-firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { startStatusCleanupService, stopStatusCleanupService } from '../services/statusCleanupService';
 import { writePresence } from '../hooks/usePresence';
@@ -234,13 +234,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         console.log('[AuthContext] Current Firebase user:', currentUser?.uid);
         
         if (currentUser) {
-          const userRef = doc(db, 'users', currentUser.uid);
+          const fsDb = db as ReturnType<typeof firestore>;
           console.log('[AuthContext] Fetching user profile from Firestore...');
           
-          const userSnap = await getDoc(userRef);
+          const userSnap = await fsDb.collection('users').doc(currentUser.uid).get();
           
-          if (userSnap.exists()) {
-            const userData = userSnap.data();
+          if (userSnap.exists) {
+            const userData = userSnap.data()!;
             const firestoreDisplayName = userData.displayName || '';
             const firestorePhotoURL = userData.photoURL || null;
             

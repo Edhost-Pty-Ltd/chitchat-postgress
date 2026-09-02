@@ -8,7 +8,7 @@ import { COLORS } from '../types/theme';
 import { AppBg } from '../context/ThemeContext';
 
 import auth, { getAuth, signOut as firebaseSignOut } from '@react-native-firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 
 import SplashScreen      from '../screens/SplashScreen';
@@ -78,19 +78,19 @@ export default function AppNavigator() {
       setProfileExists(null); // reset to loading state
       console.log('[AppNavigator] Checking profile existence for user:', currentUser.uid);
       
-      const userDocRef = doc(db, 'users', currentUser.uid);
+      const fsDb = db as ReturnType<typeof firestore>;
+      const userDocRef = fsDb.collection('users').doc(currentUser.uid);
       
-      // Attempt to get document with timeout handling
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Timeout')), 10000) // Reduced to 10 seconds
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Timeout')), 10000)
       );
       
       const userDoc = await Promise.race([
-        getDoc(userDocRef),
-        timeoutPromise
+        userDocRef.get(),
+        timeoutPromise,
       ]);
       
-      const exists = (userDoc as any).exists();
+      const exists = (userDoc as firestore.DocumentSnapshot).exists;
       console.log('[AppNavigator] Profile exists:', exists);
       setProfileExists(exists);
     } catch (error: any) {

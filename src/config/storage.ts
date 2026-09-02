@@ -1,10 +1,14 @@
 // ─── Firebase Storage Utilities ───────────────────────────────────────────────
-import { ref, uploadBytesResumable, getDownloadURL, deleteObject } from 'firebase/storage';
-import { storage as firebaseStorage } from './firebase';
+// Uses @react-native-firebase/storage on native (iOS/Android) and the
+// firebase/storage JS SDK on web — both accessed via the unified `storage`
+// export from ./firebase so callers never import from either SDK directly.
+
+import { Platform } from 'react-native';
+import { storage } from './firebase';
 
 export type UploadType = 'avatar' | 'chatMedia' | 'voice' | 'groupIcon' | 'status';
 
-// Build the correct Storage path for each media type
+// ── Build storage path ────────────────────────────────────────────────────────
 function buildPath(type: UploadType, params: {
   userId?:  string;
   chatId?:  string;
@@ -22,96 +26,101 @@ function buildPath(type: UploadType, params: {
 }
 
 // ── Upload any file and return download URL ───────────────────────────────────
-// React Native's XMLHttpRequest can create a Blob directly from a local URI
-// (file:// or content://) through the native layer without copying the entire
-// file into a JS string — so large videos won't cause an OOM error.
-// We then hand the Blob to Firebase Storage SDK's uploadBytesResumable which
-// supports progress reporting and automatic retries.
 export async function uploadFile(
-  localUri:  string,
-  type:      UploadType,
-  params:    { userId?: string; chatId?: string; fileName: string },
+  localUri:    string,
+  type:        UploadType,
+  params:      { userId?: string; chatId?: string; fileName: string },
   onProgress?: (pct: number) => void,
 ): Promise<string> {
   const path = buildPath(type, params);
   console.log('[Storage] Uploading file:', localUri, '→', path);
 
-  // Step 1: Obtain a Blob from the local URI without reading it as a string.
-  // The React Native XHR bridge handles this natively, keeping memory usage low.
-  const blob: Blob = await new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.onload  = () => resolve(xhr.response as Blob);
-    xhr.onerror = () => reject(new Error('Failed to read local file as blob'));
-    xhr.responseType = 'blob';
-    xhr.open('GET', localUri);
-    xhr.send();
-  });
+  if (Platform.OS !== 'web') {
+    // ── Native: @react-native-firebase/storage ──────────────────────────────
+    // putFile() streams directly from a local URI — no blob/XHR needed.
+    const nativeRef = (storage as ReturnType<typeof import('@react-native-firebase/storage').default>).ref(path);
+    const task = nativeRef.putFile(localUri, { contentType: getMimeType(localUri) });
 
-  // Step 2: Upload the Blob to Firebase Storage with progress reporting.
-  const storageRef = ref(firebaseStorage, path);
-  return new Promise((resolve, reject) => {
-    const task = uploadBytesResumable(storageRef, blob, {
-      contentType: getMimeType(localUri),
-    });
-
-    task.on(
-      'state_changed',
-      (snapshot) => {
-        if (onProgress && snapshot.totalBytes > 0) {
+    if (onProgress) {
+      task.on('state_changed', (snapshot: any) => {
+        if (snapshot.totalBytes > 0) {
           onProgress(Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100));
         }
-      },
-      (error) => reject(error),
-      async () => {
-        try {
-          const url = await getDownloadURL(task.snapshot.ref);
-          console.log('[Storage] Upload complete:', url);
-          resolve(url);
-        } catch (e) {
-          reject(e);
-        }
-      },
-    );
-  });
+      });
+    }
+
+    await task;
+    const url = await nativeRef.getDownloadURL();
+    console.log('[Storage] Upload complete:', url);
+    return url;
+  } else {
+    // ── Web: firebase/storage JS SDK ────────────────────────────────────────
+    const { ref, uploadBytesResumable, getDownloadURL } = await import('firebase/storage');
+
+    const blob: Blob = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.onload  = () => resolve(xhr.response as Blob);
+      xhr.onerror = () => reject(new Error('Failed to read local file as blob'));
+      xhr.responseType = 'blob';
+      xhr.open('GET', localUri);
+      xhr.send();
+    });
+
+    const storageRef = ref(storage as any, path);
+    return new Promise((resolve, reject) => {
+      const task = uploadBytesResumable(storageRef, blob, {
+        contentType: getMimeType(localUri),
+      });
+      task.on(
+        'state_changed',
+        (snapshot) => {
+          if (onProgress && snapshot.totalBytes > 0) {
+            onProgress(Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100));
+          }
+        },
+        reject,
+        async () => {
+          try {
+            resolve(await getDownloadURL(task.snapshot.ref));
+          } catch (e) {
+            reject(e);
+          }
+        },
+      );
+    });
+  }
 }
 
 // ── Delete a file from Storage ────────────────────────────────────────────────
 export async function deleteFile(downloadUrl: string): Promise<void> {
-  const fileRef = ref(firebaseStorage, downloadUrl);
-  await deleteObject(fileRef);
+  if (Platform.OS !== 'web') {
+    const nativeSt = storage as ReturnType<typeof import('@react-native-firebase/storage').default>;
+    await nativeSt.refFromURL(downloadUrl).delete();
+  } else {
+    const { ref, deleteObject } = await import('firebase/storage');
+    await deleteObject(ref(storage as any, downloadUrl));
+  }
 }
 
-// ── Generate a unique filename with timestamp ─────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 export function generateFileName(extension: string): string {
   const timestamp = Date.now();
   const random    = Math.random().toString(36).slice(2, 8);
   return `${timestamp}_${random}.${extension}`;
 }
 
-// ── Get file extension from URI ───────────────────────────────────────────────
 export function getFileExtension(uri: string): string {
   return uri.split('.').pop()?.toLowerCase() || 'jpg';
 }
 
-// ── Detect MIME type from file extension ──────────────────────────────────────
 export function getMimeType(uri: string): string {
-  const extension = getFileExtension(uri);
-
+  const ext = getFileExtension(uri);
   const mimeTypes: Record<string, string> = {
-    'jpg': 'image/jpeg',
-    'jpeg': 'image/jpeg',
-    'png': 'image/png',
-    'gif': 'image/gif',
-    'webp': 'image/webp',
-    'mp4': 'video/mp4',
-    'mov': 'video/quicktime',
-    'avi': 'video/x-msvideo',
-    'm4a': 'audio/mp4',
-    'mp3': 'audio/mpeg',
-    'wav': 'audio/wav',
-    'pdf': 'application/pdf',
-    'txt': 'text/plain',
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+    gif: 'image/gif', webp: 'image/webp',
+    mp4: 'video/mp4', mov: 'video/quicktime', avi: 'video/x-msvideo',
+    m4a: 'audio/mp4', mp3: 'audio/mpeg', wav: 'audio/wav',
+    pdf: 'application/pdf', txt: 'text/plain',
   };
-
-  return mimeTypes[extension] || 'application/octet-stream';
+  return mimeTypes[ext] || 'application/octet-stream';
 }

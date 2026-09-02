@@ -8,13 +8,15 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.edhost.chitchat.app",
+      "bundleIdentifier": "com.edhost.ChitChatBusiness",
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Chit-Chat needs access to your microphone to record voice notes.",
         "NSContactsUsageDescription": "Chit-Chat needs access to your contacts to help you find friends on the app.",
-        "NSUserNotificationsUsageDescription": "Chit-Chat needs permission to send you notifications for new messages, calls, and status updates."
-      }
+        "NSUserNotificationsUsageDescription": "Chit-Chat needs permission to send you notifications for new messages, calls, and status updates.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bitcode": false
     },
     "plugins": [
       [
@@ -29,7 +31,8 @@
             ]
           },
           "android": {
-            "enableProguardInReleaseBuilds": false
+            "enableProguardInReleaseBuilds": false,
+            "enableMinifyInReleaseBuilds": false
           }
         }
       ],
@@ -72,7 +75,8 @@
           "color": "#0A2463",
           "mode": "production"
         }
-      ]
+      ],
+      "@react-native-firebase/auth"
     ],
     "android": {
       "adaptiveIcon": {
@@ -95,7 +99,15 @@
         "android.permission.READ_MEDIA_VIDEO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.INTERNET",
-        "android.permission.ACCESS_NETWORK_STATE"
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WAKE_LOCK",
+        "android.permission.BLUETOOTH",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.ACCESS_MEDIA_LOCATION",
+        "android.permission.READ_MEDIA_AUDIO"
       ],
       "softwareKeyboardLayoutMode": "pan"
     },
@@ -104,8 +116,9 @@
     },
     "extra": {
       "eas": {
-        "projectId": "e68eeca5-8ee9-4c30-b23f-8cd3616b7c21"
+        "projectId": "5a60de81-ed09-49dd-9ab9-3e6d63f9436d"
       }
-    }
+    },
+    "owner": "alex_sly"
   }
 }

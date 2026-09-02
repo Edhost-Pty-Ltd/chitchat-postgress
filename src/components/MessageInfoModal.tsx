@@ -10,7 +10,7 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { Avatar } from './index';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
@@ -80,20 +80,19 @@ export function MessageInfoModal({
         const recipientsList: MessageInfo[] = [];
 
         for (const userId of readBy) {
-          if (userId === currentUserId) continue; // Skip sender
+          if (userId === currentUserId) continue;
 
           try {
-            const usersRef = collection(db, 'users');
-            const q = query(usersRef, where('__name__', '==', userId));
-            const snapshot = await getDocs(q);
+            const fsDb = db as ReturnType<typeof firestore>;
+            const userSnap = await fsDb.collection('users').doc(userId).get();
 
-            if (!snapshot.empty) {
-              const userData = snapshot.docs[0].data();
+            if (userSnap.exists) {
+              const userData = userSnap.data()!;
               recipientsList.push({
                 userId,
                 displayName: userData.displayName || userData.phone || 'Unknown',
                 photoURL: userData.photoURL || null,
-                status: 'read', // For now, assume all in readBy have read it
+                status: 'read',
                 timestamp: messageTimestamp || new Date(),
               });
             }

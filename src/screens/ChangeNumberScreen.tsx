@@ -14,7 +14,7 @@ import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { doc, updateDoc } from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { getAuth } from '@react-native-firebase/auth';
 import { db } from '../config/firebase';
 import { useAuth } from '../context/AuthContext';
@@ -142,8 +142,8 @@ export default function ChangeNumberScreen() {
         const authInstance = getAuth();
         const currentUser = authInstance.currentUser;
         if (currentUser) {
-          const userRef = doc(db, 'users', currentUser.uid);
-          await updateDoc(userRef, { phone: fullNumber });
+          const fsDb = db as ReturnType<typeof firestore>;
+          await fsDb.collection('users').doc(currentUser.uid).update({ phone: fullNumber });
           console.log('[ChangeNumberScreen] Updated phone number in Firestore');
         }
         
@@ -360,8 +360,8 @@ const styles = StyleSheet.create({
   backRow:     { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
   backRowText: { fontSize: 13, color: COLORS.blue, fontWeight: '600', marginLeft: 2 },
 
-  otpRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16 },
-  otpBox: { width: 46, height: 56, borderRadius: RADIUS.md, fontSize: 22, fontWeight: '700', color: COLORS.text, textAlign: 'center', textAlignVertical: 'center', lineHeight: 56, paddingVertical: 0, paddingHorizontal: 0, ...GLASS.input },
+  otpRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 6, marginBottom: 16 },
+  otpBox: { flex: 1, maxWidth: 52, aspectRatio: 0.85, borderRadius: RADIUS.md, fontSize: 22, fontWeight: '700', color: COLORS.text, textAlign: 'center', textAlignVertical: 'center', paddingVertical: 0, paddingHorizontal: 0, includeFontPadding: false, ...GLASS.input },
   otpBoxFilled: { borderColor: COLORS.blue, backgroundColor: 'rgba(30,156,240,0.10)' },
 
   resendRow:   { flexDirection: 'row', justifyContent: 'center', marginTop: 16 },

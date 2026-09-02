@@ -14,8 +14,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useWebRTC } from '../hooks/useWebRTC';
 import { useAuth } from '../hooks/useAuth';
 import { useFloatingCall } from '../context/FloatingCallContext';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
-import { doc, updateDoc, onSnapshot, getDoc } from 'firebase/firestore';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
 
 import { AppText, AppIcon, AppBg, useGlass } from '../context/ThemeContext';
@@ -97,8 +97,9 @@ export default function AudioCallScreen() {
     const setupCall = async () => {
       try {
         // Load stored duration from Firestore if continuing call
-        const callRef = doc(db, 'calls', callId);
-        const callSnapshot = await getDoc(callRef);
+        const fsDb = db as ReturnType<typeof firestore>;
+        const callRef = fsDb.collection('calls').doc(callId);
+        const callSnapshot = await callRef.get();
         const callData = callSnapshot.data();
         
         // Set duration from stored value if exists
@@ -120,13 +121,13 @@ export default function AudioCallScreen() {
           const offer = await createOffer(false);
           
           // Update call document with offer
-          await updateDoc(callRef, {
+          await callRef.update({
             offer: offer,
             status: 'ringing',
           });
 
           // Listen for answer from callee
-          unsubscribeCallRef.current = onSnapshot(callRef, (snapshot) => {
+          unsubscribeCallRef.current = callRef.onSnapshot((snapshot) => {
             const data = snapshot.data();
             if (data?.answer) {
               console.log('[AudioCall] Received answer, setting remote description...');
@@ -146,13 +147,13 @@ export default function AudioCallScreen() {
           // Callee: Listen for offer and create answer
           console.log('[AudioCall] Waiting for offer as callee...');
           
-          unsubscribeCallRef.current = onSnapshot(callRef, async (snapshot) => {
+          unsubscribeCallRef.current = callRef.onSnapshot(async (snapshot) => {
             const data = snapshot.data();
             if (data?.offer) {
               console.log('[AudioCall] Received offer, creating answer...');
               const answer = await createAnswer(data.offer);
               
-              await updateDoc(callRef, {
+              await callRef.update({
                 answer: answer,
                 status: 'active',
               });
@@ -220,8 +221,8 @@ export default function AudioCallScreen() {
   const hangUp = async () => {
     try {
       // End call in Firestore
-      const callRef = doc(db, 'calls', callId);
-      await updateDoc(callRef, {
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('calls').doc(callId).update({
         status: 'ended',
         endedAt: new Date(),
       });
@@ -262,8 +263,8 @@ export default function AudioCallScreen() {
     
     // Save current duration to Firestore before switching
     try {
-      const callRef = doc(db, 'calls', callId);
-      await updateDoc(callRef, {
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('calls').doc(callId).update({
         lastDuration: duration,
         videoUpgradeRequest: {
           requestedBy: user?.uid || 'unknown',

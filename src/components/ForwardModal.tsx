@@ -10,7 +10,7 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
-import { collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { Avatar } from './index';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
@@ -50,15 +50,14 @@ export function ForwardModal({ visible, onClose, onForward, currentUserId }: For
       try {
         console.log('[ForwardModal] Loading chats for user:', currentUserId);
 
-        const chatsRef = collection(db, 'chats');
-        const q = query(
-          chatsRef,
-          where('members', 'array-contains', currentUserId),
-          orderBy('lastMessage.timestamp', 'desc'),
-          limit(50)
-        );
+        const fsDb = db as ReturnType<typeof firestore>;
+        const snapshot = await fsDb
+          .collection('chats')
+          .where('members', 'array-contains', currentUserId)
+          .orderBy('lastMessage.timestamp', 'desc')
+          .limit(50)
+          .get();
 
-        const snapshot = await getDocs(q);
         const chatsList: Chat[] = [];
 
         for (const docSnap of snapshot.docs) {
@@ -69,20 +68,16 @@ export function ForwardModal({ visible, onClose, onForward, currentUserId }: For
           let isGroup = false;
 
           if (data.isGroup) {
-            // Group chat
             displayName = data.groupName || 'Unnamed Group';
             photoURL = data.groupPhoto || null;
             isGroup = true;
           } else {
-            // Direct chat - get other user's info
             const otherUserId = (data.members as string[]).find((id: string) => id !== currentUserId);
             if (otherUserId) {
               try {
-                const userDoc = await getDocs(
-                  query(collection(db, 'users'), where('__name__', '==', otherUserId), limit(1))
-                );
-                if (!userDoc.empty) {
-                  const userData = userDoc.docs[0].data();
+                const userDoc = await fsDb.collection('users').doc(otherUserId).get();
+                if (userDoc.exists) {
+                  const userData = userDoc.data()!;
                   displayName = userData.displayName || userData.phone || 'Unknown';
                   photoURL = userData.photoURL || null;
                 }

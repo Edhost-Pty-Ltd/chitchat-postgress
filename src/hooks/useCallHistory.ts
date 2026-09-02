@@ -1,63 +1,57 @@
 // ─── Hook: Call History ──────────────────────────────────────────────────────
-// Fetch and manage call history from Firestore
-
 import { useState, useEffect } from 'react';
-import {
-  collection, query, orderBy, onSnapshot, Timestamp,
-} from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import type { CallHistoryItem } from '../types/call';
 
+function toDate(raw: any): Date {
+  if (!raw) return new Date();
+  if (typeof raw.toDate === 'function') return raw.toDate();
+  return new Date(raw);
+}
+
 export function useCallHistory(userId: string | null) {
   const [callHistory, setCallHistory] = useState<CallHistoryItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loading,     setLoading]     = useState(true);
+  const [error,       setError]       = useState<string | null>(null);
 
   useEffect(() => {
-    if (!userId) {
-      setCallHistory([]);
-      setLoading(false);
-      return;
-    }
+    if (!userId) { setCallHistory([]); setLoading(false); return; }
 
     console.log('[useCallHistory] Setting up listener for user:', userId);
-    setLoading(true);
-    setError(null);
+    setLoading(true); setError(null);
 
-    const historyRef = collection(db, 'users', userId, 'callHistory');
-    const q = query(historyRef, orderBy('timestamp', 'desc'));
+    const fsDb = db as ReturnType<typeof firestore>;
 
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const history: CallHistoryItem[] = snapshot.docs.map((doc) => {
-          const data = doc.data();
-          return {
-            callId: data.callId,
-            otherParty: data.otherParty,
-            type: data.type,
-            direction: data.direction,
-            status: data.status,
-            duration: data.duration ?? null,
-            timestamp: data.timestamp ? (data.timestamp as Timestamp).toDate() : new Date(),
-          };
-        });
+    const unsub = fsDb
+      .collection('users').doc(userId).collection('callHistory')
+      .orderBy('timestamp', 'desc')
+      .onSnapshot(
+        (snapshot) => {
+          const history: CallHistoryItem[] = snapshot.docs.map((doc) => {
+            const data = doc.data();
+            return {
+              callId:     data.callId,
+              otherParty: data.otherParty,
+              type:       data.type,
+              direction:  data.direction,
+              status:     data.status,
+              duration:   data.duration ?? null,
+              timestamp:  toDate(data.timestamp),
+            };
+          });
+          console.log('[useCallHistory] Loaded', history.length, 'calls');
+          setCallHistory(history);
+          setLoading(false);
+        },
+        (err) => {
+          console.error('[useCallHistory] Error:', err);
+          setError(err.message);
+          setLoading(false);
+        },
+      );
 
-        console.log('[useCallHistory] Loaded', history.length, 'calls');
-        setCallHistory(history);
-        setLoading(false);
-      },
-      (err) => {
-        console.error('[useCallHistory] Error:', err);
-        setError(err.message);
-        setLoading(false);
-      }
-    );
-
-    return () => {
-      console.log('[useCallHistory] Cleaning up listener');
-      unsubscribe();
-    };
+    return () => { console.log('[useCallHistory] Cleaning up listener'); unsub(); };
   }, [userId]);
 
   return { callHistory, loading, error };

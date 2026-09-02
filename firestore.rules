@@ -1,0 +1,106 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions ────────────────────────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isChatMember(chatId) {
+      return isSignedIn() &&
+        request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members;
+    }
+
+    // ── Users ───────────────────────────────────────────────────────────────────
+    // Any signed-in user can read another user's profile (for contact search, etc.)
+    // Only the owner can write their own profile
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId);
+      allow delete: if isOwner(userId);
+
+      // Blocked contacts subcollection
+      match /blockedUsers/{blockedId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // Call history subcollection
+      match /callHistory/{callId} {
+        allow read: if isOwner(userId);
+        // Allow write if owner, OR if another signed-in user is saving call history
+        // for this user (e.g. the other call participant logging the call)
+        allow write: if isSignedIn();
+      }
+    }
+
+    // ── Chats ───────────────────────────────────────────────────────────────────
+    match /chats/{chatId} {
+      // Members can read the chat document
+      allow read: if isSignedIn() &&
+        request.auth.uid in resource.data.members;
+
+      // Any signed-in user can create a chat they are a member of
+      allow create: if isSignedIn() &&
+        request.auth.uid in request.resource.data.members;
+
+      // Only members can update (e.g. lastMessage, unreadCounts, typing)
+      allow update: if isSignedIn() &&
+        request.auth.uid in resource.data.members;
+
+      // Only members can delete
+      allow delete: if isSignedIn() &&
+        request.auth.uid in resource.data.members;
+
+      // Messages subcollection
+      match /messages/{messageId} {
+        allow read: if isChatMember(chatId);
+        allow create: if isChatMember(chatId) &&
+          request.auth.uid == request.resource.data.senderId;
+        allow update: if isChatMember(chatId);
+        allow delete: if isChatMember(chatId);
+      }
+    }
+
+    // ── Statuses ─────────────────────────────────────────────────────────────────
+    match /statuses/{statusId} {
+      // Any signed-in user can read statuses (contact visibility handled in app)
+      allow read: if isSignedIn();
+      // Only the owner can create/delete their status
+      allow create: if isSignedIn() &&
+        request.auth.uid == request.resource.data.userId;
+      // Allow update (e.g. viewedBy array union) by any signed-in user
+      allow update: if isSignedIn();
+      allow delete: if isSignedIn() &&
+        request.auth.uid == resource.data.userId;
+    }
+
+    // ── Signaling (WebRTC call setup) ────────────────────────────────────────────
+    match /calls/{callId} {
+      allow read: if isSignedIn() && (
+        request.auth.uid == resource.data.callerId ||
+        request.auth.uid == resource.data.calleeId
+      );
+      allow create: if isSignedIn() &&
+        request.auth.uid == request.resource.data.callerId;
+      allow update: if isSignedIn() && (
+        request.auth.uid == resource.data.callerId ||
+        request.auth.uid == resource.data.calleeId
+      );
+      allow delete: if isSignedIn() && (
+        request.auth.uid == resource.data.callerId ||
+        request.auth.uid == resource.data.calleeId
+      );
+
+      // ICE candidates subcollection
+      match /candidates/{candidateId} {
+        allow read, write: if isSignedIn();
+      }
+    }
+  }
+}

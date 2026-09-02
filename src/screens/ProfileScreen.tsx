@@ -7,7 +7,7 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
-import { doc, updateDoc, getDoc } from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { getAuth } from '@react-native-firebase/auth';
 import { db } from '../config/firebase';
 import { uploadFile, generateFileName } from '../config/storage';
@@ -90,10 +90,10 @@ export default function ProfileScreen() {
         const currentUser = authInstance.currentUser;
         if (!currentUser) return;
 
-        const userRef = doc(db, 'users', currentUser.uid);
-        const userSnap = await getDoc(userRef);
-        if (userSnap.exists()) {
-          const data = userSnap.data();
+        const fsDb = db as ReturnType<typeof firestore>;
+        const userSnap = await fsDb.collection('users').doc(currentUser.uid).get();
+        if (userSnap.exists) {
+          const data = userSnap.data()!;
           setEmail(data.email || '');
           setWebsite(data.website || '');
           if (data.workSchedule) setWorkSchedule(data.workSchedule);
@@ -120,8 +120,8 @@ export default function ProfileScreen() {
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
       if (currentUser) {
-        const userRef = doc(db, 'users', currentUser.uid);
-        await updateDoc(userRef, { displayName: trimmed });
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({ displayName: trimmed });
       }
     } catch (error) {
       console.error('[ProfileScreen] Error saving displayName:', error);
@@ -139,8 +139,8 @@ export default function ProfileScreen() {
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
       if (currentUser) {
-        const userRef = doc(db, 'users', currentUser.uid);
-        await updateDoc(userRef, { [field]: value });
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({ [field]: value });
       }
     } catch (error) {
       console.warn('[ProfileScreen] Error saving field:', error);
@@ -155,8 +155,8 @@ export default function ProfileScreen() {
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
       if (currentUser) {
-        const userRef = doc(db, 'users', currentUser.uid);
-        await updateDoc(userRef, { workSchedule: updated });
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({ workSchedule: updated });
       }
     } catch (err) {
       console.warn('[ProfileScreen] Error saving work schedule:', err);
@@ -240,8 +240,8 @@ export default function ProfileScreen() {
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
       if (currentUser) {
-        const userRef = doc(db, 'users', currentUser.uid);
-        await updateDoc(userRef, { catalog: updated });
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({ catalog: updated });
       }
     } catch (err) {
       console.warn('[ProfileScreen] Error saving catalog:', err);
@@ -256,8 +256,8 @@ export default function ProfileScreen() {
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
       if (currentUser) {
-        const userRef = doc(db, 'users', currentUser.uid);
-        await updateDoc(userRef, { catalog: updated });
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({ catalog: updated });
       }
     } catch (err) {
       console.warn('[ProfileScreen] Error removing catalog item:', err);
@@ -292,6 +292,7 @@ export default function ProfileScreen() {
           return;
         }
         
+        const fsDb = db as ReturnType<typeof firestore>;
         const fileName = generateFileName('jpg');
         const downloadURL = await uploadFile(uri, 'avatar', {
           userId: currentUser.uid,
@@ -302,8 +303,7 @@ export default function ProfileScreen() {
         
         await setAvatarUri(uri);
         
-        const userRef = doc(db, 'users', currentUser.uid);
-        await updateDoc(userRef, { photoURL: downloadURL });
+        await fsDb.collection('users').doc(currentUser.uid).update({ photoURL: downloadURL });
       } catch (error: any) {
         console.error('[ProfileScreen] Error saving avatar:', error);
         // Still save local URI for demo mode
