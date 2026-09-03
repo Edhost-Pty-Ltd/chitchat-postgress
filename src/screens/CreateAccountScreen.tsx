@@ -207,7 +207,7 @@ export default function CreateAccountScreen() {
       }
     }
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: 'images',
       allowsEditing: true, aspect: [1, 1], quality: 0.85,
     });
     if (!result.canceled && result.assets[0]) {
@@ -237,23 +237,6 @@ export default function CreateAccountScreen() {
       website: website.trim() || undefined,
     });
     // Screen transition handled by useEffect watching registrationStep
-  };
-
-  // ── Demo sign-in — skip OTP, go straight to chats ──────────────────────────
-  const handleDemoSignIn = async () => {
-    setLoading(true);
-    setErrorMsg('');
-    try {
-      const demoName = name.trim() || 'Demo Business';
-      await signIn('+0000000000');
-      await setDisplayName(demoName);
-      // AppNavigator will react to isSignedIn + profileExists and navigate to Chats
-    } catch (err: any) {
-      console.warn('[CreateAccount] Demo sign-in error:', err);
-      setErrorMsg('Demo sign-in failed. Please try again.');
-    } finally {
-      setLoading(false);
-    }
   };
 
   // ── Step 2: Verify OTP → biometric ──────────────────────────────────────
@@ -457,12 +440,6 @@ export default function CreateAccountScreen() {
                   </LinearGradient>
                 </TouchableOpacity>
 
-                {/* Demo mode — skip auth for testing */}
-                <TouchableOpacity onPress={handleDemoSignIn} activeOpacity={0.85} style={{ marginTop: 14 }}>
-                  <View style={styles.secondaryBtn}>
-                    <AppText style={styles.secondaryBtnText}>Continue as Demo</AppText>
-                  </View>
-                </TouchableOpacity>
               </>
             ) : step === 'otp' ? (
               <>

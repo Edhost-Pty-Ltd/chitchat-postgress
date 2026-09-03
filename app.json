@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Chit-Chat",
+    "name": "ChitChat Business",
     "slug": "Chit-Chat",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -11,9 +11,9 @@
       "bundleIdentifier": "com.edhost.ChitChatBusiness",
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Chit-Chat needs access to your microphone to record voice notes.",
-        "NSContactsUsageDescription": "Chit-Chat needs access to your contacts to help you find friends on the app.",
-        "NSUserNotificationsUsageDescription": "Chit-Chat needs permission to send you notifications for new messages, calls, and status updates.",
+        "NSMicrophoneUsageDescription": "ChitChat Business needs access to your microphone to record voice notes.",
+        "NSContactsUsageDescription": "ChitChat Business needs access to your contacts to help you find friends on the app.",
+        "NSUserNotificationsUsageDescription": "ChitChat Business needs permission to send you notifications for new messages, calls, and status updates.",
         "ITSAppUsesNonExemptEncryption": false
       },
       "bitcode": false
@@ -43,28 +43,28 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Chit-Chat needs access to your microphone to record voice notes."
+          "microphonePermission": "ChitChat Business needs access to your microphone to record voice notes."
         }
       ],
       [
         "expo-image-picker",
         {
-          "photoPermission": "Chit-Chat needs access to your photos to share images in chats.",
-          "cameraPermission": "Chit-Chat needs camera access to take photos and videos."
+          "photoPermission": "ChitChat Business needs access to your photos to share images in chats.",
+          "cameraPermission": "ChitChat Business needs camera access to take photos and videos."
         }
       ],
       [
         "expo-camera",
         {
-          "cameraPermission": "Chit-Chat needs camera access to take photos and videos.",
-          "microphonePermission": "Chit-Chat needs microphone access to record videos with sound."
+          "cameraPermission": "ChitChat Business needs camera access to take photos and videos.",
+          "microphonePermission": "ChitChat Business needs microphone access to record videos with sound."
         }
       ],
       [
         "expo-media-library",
         {
-          "photosPermission": "Chit-Chat needs access to your photos to share images in chats.",
-          "savePhotosPermission": "Chit-Chat needs permission to save photos to your gallery.",
+          "photosPermission": "ChitChat Business needs access to your photos to share images in chats.",
+          "savePhotosPermission": "ChitChat Business needs permission to save photos to your gallery.",
           "isAccessMediaLocationEnabled": true
         }
       ],

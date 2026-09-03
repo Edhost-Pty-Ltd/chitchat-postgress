@@ -68,21 +68,38 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     webTimerRef.current = setTimeout(async () => { await doSignOut(); }, remainingMs);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const isSigningOutRef = useRef(false);
+
   const doSignOut = async () => {
+    if (isSigningOutRef.current) return;
+    isSigningOutRef.current = true;
+
     clearWebTimer();
+
+    // Clear persisted session first — prevents the onAuthStateChanged listener
+    // from triggering a recursive doSignOut call when fbSignOut fires.
+    await AsyncStorage.multiRemove([
+      KEYS.phone, KEYS.signedIn, KEYS.lastActive, KEYS.displayName, KEYS.avatarUri,
+    ]);
+
+    // Update React state before fbSignOut so unmounting components see a clean slate
+    setPhone('');
+    setDisplayNameState('');
+    setAvatarUriState(null);
+    setIsSignedIn(false);
+
     try {
       const currentUser = getAuth().currentUser;
       if (currentUser) await writePresence(currentUser.uid, false);
     } catch {}
+
     stopStatusCleanupService();
-    await fbSignOut(getAuth());
-    await AsyncStorage.multiRemove([
-      KEYS.phone, KEYS.signedIn, KEYS.lastActive, KEYS.displayName, KEYS.avatarUri,
-    ]);
-    setPhone('');
-    setIsSignedIn(false);
-    setDisplayNameState('');
-    setAvatarUriState(null);
+
+    try {
+      await fbSignOut(getAuth());
+    } catch {}
+
+    isSigningOutRef.current = false;
   };
 
   // ── Hydrate on mount ──────────────────────────────────────────────────────

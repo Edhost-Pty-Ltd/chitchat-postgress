@@ -87,18 +87,18 @@ service cloud.firestore {
     // ── Signaling (WebRTC call setup) ────────────────────────────────────────────
     match /calls/{callId} {
       allow read: if isSignedIn() && (
-        request.auth.uid == resource.data.callerId ||
-        request.auth.uid == resource.data.calleeId
+        request.auth.uid == resource.data.caller.userId ||
+        request.auth.uid == resource.data.callee.userId
       );
       allow create: if isSignedIn() &&
-        request.auth.uid == request.resource.data.callerId;
+        request.auth.uid == request.resource.data.caller.userId;
       allow update: if isSignedIn() && (
-        request.auth.uid == resource.data.callerId ||
-        request.auth.uid == resource.data.calleeId
+        request.auth.uid == resource.data.caller.userId ||
+        request.auth.uid == resource.data.callee.userId
       );
       allow delete: if isSignedIn() && (
-        request.auth.uid == resource.data.callerId ||
-        request.auth.uid == resource.data.calleeId
+        request.auth.uid == resource.data.caller.userId ||
+        request.auth.uid == resource.data.callee.userId
       );
 
       // ICE candidates subcollection
