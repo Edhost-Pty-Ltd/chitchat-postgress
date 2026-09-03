@@ -1,5 +1,5 @@
 // ─── Screen: Chats ───────────────────────────────────────────────────────────
-import React, { useState, useRef, useMemo, useEffect } from 'react';
+import React, { useState, useRef, useMemo, useEffect, useCallback, memo } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
   TextInput, Modal, Pressable, ScrollView, Animated,
@@ -19,6 +19,7 @@ import { useStatus } from '../hooks/useStatus';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
 import { resolveDisplayName } from '../utils/resolveDisplayName';
 import { db } from '../config/firebase';
+import firestore from '@react-native-firebase/firestore';
 import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
 import { RootStackParamList } from '../types';
 
@@ -69,7 +70,7 @@ interface ChatAvatarProps {
   hasStatus?: boolean;
 }
 
-function ChatAvatar({ displayName, contactPhotoUri, firebasePhotoURL, isSavedContact, hasStatus = false }: ChatAvatarProps) {
+const ChatAvatar = memo(function ChatAvatar({ displayName, contactPhotoUri, firebasePhotoURL, isSavedContact, hasStatus = false }: ChatAvatarProps) {
   const color = stringToColor(displayName);
   const initials = getInitials(displayName);
   
@@ -103,7 +104,83 @@ function ChatAvatar({ displayName, contactPhotoUri, firebasePhotoURL, isSavedCon
   }
 
   return avatarContent;
+});
+
+// ─── ChatRow — memoized list row ──────────────────────────────────────────────
+// Receives all resolved data as props so React.memo can do a shallow compare
+// and skip re-rendering rows whose data hasn't changed.
+interface ChatRowProps {
+  item:             ChatPreview;
+  displayName:      string;
+  isGroup:          boolean;
+  otherMemberId?:   string;
+  contactPhotoUri?: string;
+  firebasePhotoURL?:string;
+  isSavedContact:   boolean;
+  hasStatus:        boolean;
+  userId:           string | null;
+  bevel:            object;
+  textColor:        string;
+  fontFamily:       string;
+  FGsecondary:      string;
+  onPress:          () => void;
+  senderInfo?:      { displayName: string } | undefined;
 }
+
+const ChatRow = memo(function ChatRow({
+  item, displayName, isGroup, contactPhotoUri, firebasePhotoURL,
+  isSavedContact, hasStatus, userId, bevel, textColor, fontFamily,
+  FGsecondary, onPress, senderInfo,
+}: ChatRowProps) {
+  const isVoiceNote = item.lastMessage === '[Voice Note]';
+
+  const senderPrefix = (() => {
+    if (!item.lastSenderId) return '';
+    if (item.lastSenderId === userId) return 'You: ';
+    if (isGroup && senderInfo) return `${senderInfo.displayName.split(' ')[0]}: `;
+    return '';
+  })();
+
+  return (
+    <TouchableOpacity style={[styles.chatCard, bevel]} activeOpacity={0.75} onPress={onPress}>
+      <View style={styles.chatAvatarWrap}>
+        <ChatAvatar
+          displayName={displayName}
+          contactPhotoUri={contactPhotoUri}
+          firebasePhotoURL={firebasePhotoURL}
+          isSavedContact={isSavedContact}
+          hasStatus={hasStatus}
+        />
+      </View>
+      <View style={styles.chatMeta}>
+        <View style={styles.chatTopRow}>
+          <Text style={[styles.chatName, { color: textColor, fontFamily }]} numberOfLines={1}>
+            {displayName}
+          </Text>
+          <Text style={[styles.chatTime, { color: FGsecondary }]}>{formatTime(item.timestamp)}</Text>
+        </View>
+        <View style={styles.chatBottomRow}>
+          {isVoiceNote ? (
+            <View style={styles.voiceNotePreview}>
+              {senderPrefix ? <Text style={styles.chatPreview}>{senderPrefix}</Text> : null}
+              <Ionicons name="mic" size={14} color={COLORS.sub} style={{ marginRight: 3 }} />
+              <Text style={styles.chatPreview}>Voice Note</Text>
+            </View>
+          ) : (
+            <Text style={styles.chatPreview} numberOfLines={2}>
+              {senderPrefix}{item.lastMessage}
+            </Text>
+          )}
+          {item.unreadCount > 0 && (
+            <View style={styles.badge}>
+              <Text style={styles.badgeText}>{item.unreadCount}</Text>
+            </View>
+          )}
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+});
 
 // ─── Dial-pad keypad ──────────────────────────────────────────────────────────
 const KEY_ROWS = [
@@ -208,18 +285,13 @@ function NewGroupSheet({
     if (!contacts.length) { setPrivacyLoading(false); return; }
     let cancelled = false;
     (async () => {
+      const fsDb = db as ReturnType<typeof firestore>;
       const map = new Map<string, string>();
       await Promise.all(
         contacts.map(async (c) => {
           try {
-            const snap = await (await import('firebase/firestore')).getDoc(
-              (await import('firebase/firestore')).doc(db, 'users', c.userId)
-            );
-            if (snap.exists()) {
-              map.set(c.userId, snap.data().privacyGroups ?? 'Everyone');
-            } else {
-              map.set(c.userId, 'Everyone');
-            }
+            const snap = await fsDb.collection('users').doc(c.userId).get();
+            map.set(c.userId, snap.exists ? (snap.data()!.privacyGroups ?? 'Everyone') : 'Everyone');
           } catch {
             map.set(c.userId, 'Everyone');
           }
@@ -592,9 +664,12 @@ export default function ChatsScreen() {
   const navigation  = useNavigation<NavProp>();
   const { user }    = useAuth();
   const userId      = user?.uid ?? null;
-  const { FG } = useForeground();
-  const { fontFamily, textColor, iconColor } = useTypography();
-  const { bevel, iconButton } = useGlass();
+
+  // Three theme hooks — each subscribes to ThemeContext once.
+  // They are memoized in the provider so they won't cause unnecessary re-renders.
+  const { FG }                         = useForeground();
+  const { fontFamily, textColor }      = useTypography();
+  const { bevel, iconButton }          = useGlass();
   const insets = useSafeAreaInsets();
 
   const { chats, loading: chatsLoading } = useChats(userId);
@@ -610,12 +685,7 @@ export default function ChatsScreen() {
     return map;
   }, [contactStatuses]);
 
-  // Log contacts state
-  useEffect(() => {
-    if (contacts.length > 0) {
-      console.log(`[ChatsScreen] Loaded ${contacts.length} contacts with photos`);
-    }
-  }, [contacts]);
+  // Log contacts state — removed for production performance
 
   const [tab,        setTab]        = useState<TabType>('Chats');
   const [query,      setQuery]      = useState('');
@@ -679,21 +749,20 @@ export default function ChatsScreen() {
     if (unknownIds.size === 0) return;
 
     (async () => {
-      const { doc, getDoc } = await import('firebase/firestore');
+      const fsDb = db as ReturnType<typeof firestore>;
       const newInfo = new Map(memberInfo);
       const newPrivacy = new Map(privacyPhotoMap);
 
       for (const uid of unknownIds) {
         try {
-          const userDoc = await getDoc(doc(db, 'users', uid));
-          if (userDoc.exists()) {
-            const data = userDoc.data();
+          const snap = await fsDb.collection('users').doc(uid).get();
+          if (snap.exists) {
+            const data = snap.data()!;
             newInfo.set(uid, {
               displayName: data.displayName ?? data.phone ?? uid,
               phone: data.phone ?? '',
               photoURL: data.photoURL || null,
             });
-            // Cache the profilePhoto privacy setting
             newPrivacy.set(uid, data.privacyProfilePhoto ?? 'Contacts');
           }
         } catch (_) {}
@@ -729,29 +798,20 @@ export default function ChatsScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contacts]);
 
-  // Resolve display name for a chat
-  const getDisplayName = (chat: ChatPreview): string => {
-    if (!userId) return 'Unknown';
-    return resolveDisplayName(chat, userId, contactsMap, firestoreUsersMap);
-  };
-
-  /** Return the photo URI for another user, hiding it if their privacy setting blocks the viewer. */
-  const getVisiblePhoto = (uid: string | null | undefined, rawPhoto: string | null | undefined): string | null => {
-    if (!uid || !rawPhoto) return null;
-    const setting = privacyPhotoMap.get(uid) ?? 'Contacts';
-    // All people in the chat list are already contacts of the viewer
-    if (!isVisibleTo(setting as any, true)) return null;
-    return rawPhoto;
-  };
-
   // Filter chats by tab
   const directChats = useMemo(() => chats.filter((c) => c.type === 'direct'), [chats]);
   const groupChats  = useMemo(() => chats.filter((c) => c.type === 'group'), [chats]);
 
-  const base = tab === 'Chats' ? directChats : groupChats;
-  const data = query.trim()
-    ? base.filter((c) => getDisplayName(c).toLowerCase().includes(query.toLowerCase()))
-    : base;
+  // Memoize the filtered + searched list so FlatList only re-renders when it changes
+  const data = useMemo(() => {
+    const base = tab === 'Chats' ? directChats : groupChats;
+    if (!query.trim()) return base;
+    const q = query.toLowerCase();
+    return base.filter((c) => {
+      if (!userId) return false;
+      return resolveDisplayName(c, userId, contactsMap, firestoreUsersMap).toLowerCase().includes(q);
+    });
+  }, [tab, directChats, groupChats, query, userId, contactsMap, firestoreUsersMap]);
 
   const openSearch = () => {
     setSearchOpen(true);
@@ -770,7 +830,7 @@ export default function ChatsScreen() {
   };
 
   // Called when a contact is tapped in the sheet
-  const handleSelectContact = async (contact: AppContact) => {
+  const handleSelectContact = useCallback(async (contact: AppContact) => {
     if (!userId) return;
     setSheetOpen(false);
     try {
@@ -782,100 +842,54 @@ export default function ChatsScreen() {
         otherUserId: contact.userId,
         otherUserPhoto: contact.photoUri || contact.firebasePhotoURL || null,
       });
-    } catch (err) {
-      console.error('Failed to create/get chat:', err);
-    }
-  };
+    } catch {}
+  }, [userId, navigation]);
 
   // Called when a group is created
-  const handleNavigateToGroup = (chatId: string, groupName: string) => {
+  const handleNavigateToGroup = useCallback((chatId: string, groupName: string) => {
     if (!userId) return;
-    navigation.navigate('Chat', {
-      chatId,
-      displayName: groupName,
-      isGroup: true,
-    });
-  };
+    navigation.navigate('Chat', { chatId, displayName: groupName, isGroup: true });
+  }, [userId, navigation]);
 
-  const renderChat = ({ item }: { item: ChatPreview }) => {
-    const displayName = getDisplayName(item);
-    const isGroup = item.type === 'group';
-    const isVoiceNote = item.lastMessage === '[Voice Note]';
-    
-    // Get photo data for the avatar
-    const otherMemberId = isGroup ? null : item.members.find((id) => id !== userId);
-    const otherUser = otherMemberId ? firestoreUsersMap.get(otherMemberId) : null;
+  // renderItem is stable — only re-runs when the resolved row data changes
+  const renderChat = useCallback(({ item }: { item: ChatPreview }) => {
+    const displayName     = userId ? resolveDisplayName(item, userId, contactsMap, firestoreUsersMap) : 'Unknown';
+    const isGroup         = item.type === 'group';
+    const otherMemberId   = isGroup ? null : item.members.find((id) => id !== userId);
+    const otherUser       = otherMemberId ? firestoreUsersMap.get(otherMemberId) : null;
     const contactPhotoUri = otherUser?.contactPhotoUri;
-    const firebasePhotoURL = getVisiblePhoto(otherMemberId, otherUser?.photoURL);
-    const isSavedContact = !!(contactPhotoUri || (otherUser && contactsMap.has(otherUser.phone)));
-    
-    // Check if user has active status
-    const hasStatus = otherMemberId ? userStatusMap.get(otherMemberId) || false : false;
-
-    const getSenderPrefix = (): string => {
-      if (!item.lastSenderId) return '';
-      if (item.lastSenderId === userId) return 'You: ';
-      if (isGroup) {
-        const senderInfo = firestoreUsersMap.get(item.lastSenderId);
-        if (senderInfo) return `${senderInfo.displayName.split(' ')[0]}: `;
-      }
-      return '';
-    };
-
-    const renderLastMessagePreview = () => {
-      if (isVoiceNote) {
-        const prefix = getSenderPrefix();
-        return (
-          <View style={styles.voiceNotePreview}>
-            {prefix ? <Text style={styles.chatPreview}>{prefix}</Text> : null}
-            <Ionicons name="mic" size={14} color={COLORS.sub} style={{ marginRight: 3 }} />
-            <Text style={styles.chatPreview}>Voice Note</Text>
-          </View>
-        );
-      }
-      return <Text style={styles.chatPreview} numberOfLines={2}>{item.lastMessage}</Text>;
-    };
+    const rawPhoto        = otherUser?.photoURL;
+    const photoSetting    = otherMemberId ? (privacyPhotoMap.get(otherMemberId) ?? 'Contacts') : 'Contacts';
+    const firebasePhotoURL = (rawPhoto && isVisibleTo(photoSetting as any, true)) ? rawPhoto : null;
+    const isSavedContact  = !!(contactPhotoUri || (otherUser && contactsMap.has(otherUser.phone)));
+    const hasStatus       = otherMemberId ? (userStatusMap.get(otherMemberId) ?? false) : false;
 
     return (
-      <TouchableOpacity style={[styles.chatCard, bevel]} activeOpacity={0.75}
-        onPress={() => navigation.navigate('Chat', { 
-          chatId: item.chatId, 
-          displayName, 
+      <ChatRow
+        item={item}
+        displayName={displayName}
+        isGroup={isGroup}
+        otherMemberId={otherMemberId ?? undefined}
+        contactPhotoUri={contactPhotoUri}
+        firebasePhotoURL={firebasePhotoURL ?? undefined}
+        isSavedContact={isSavedContact}
+        hasStatus={hasStatus}
+        userId={userId}
+        bevel={bevel}
+        textColor={textColor}
+        fontFamily={fontFamily}
+        FGsecondary={FG.secondary}
+        onPress={() => navigation.navigate('Chat', {
+          chatId: item.chatId,
+          displayName,
           isGroup,
           otherUserId: otherMemberId || undefined,
           otherUserPhoto: firebasePhotoURL || contactPhotoUri || null,
-        })}>
-        {/* Avatar with status ring */}
-        <View style={styles.chatAvatarWrap}>
-          <ChatAvatar 
-            displayName={displayName} 
-            contactPhotoUri={contactPhotoUri}
-            firebasePhotoURL={firebasePhotoURL ?? undefined}
-            isSavedContact={isSavedContact}
-            hasStatus={hasStatus}
-          />
-        </View>
-
-        {/* Name + preview */}
-        <View style={styles.chatMeta}>
-          <View style={styles.chatTopRow}>
-            <AppText style={[styles.chatName, { color: textColor, fontFamily }]} numberOfLines={1}>
-              {displayName}
-            </AppText>
-            <AppText style={[styles.chatTime, { color: FG.secondary }]}>{formatTime(item.timestamp)}</AppText>
-          </View>
-          <View style={styles.chatBottomRow}>
-            {renderLastMessagePreview()}
-            {item.unreadCount > 0 && (
-              <View style={styles.badge}>
-                <AppText fixedColor style={styles.badgeText}>{item.unreadCount}</AppText>
-              </View>
-            )}
-          </View>
-        </View>
-      </TouchableOpacity>
+        })}
+        senderInfo={item.lastSenderId && isGroup ? firestoreUsersMap.get(item.lastSenderId) : undefined}
+      />
     );
-  };
+  }, [userId, contactsMap, firestoreUsersMap, privacyPhotoMap, userStatusMap, bevel, textColor, fontFamily, FG.secondary, navigation]);
 
   return (
     <View style={styles.root}>
@@ -982,6 +996,10 @@ export default function ChatsScreen() {
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.listContent}
           ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+          removeClippedSubviews
+          maxToRenderPerBatch={10}
+          windowSize={10}
+          initialNumToRender={12}
           ListEmptyComponent={
             <View style={styles.emptyWrap}>
               <AppIcon name="chatbubbles-outline" size={52} color={COLORS.sub} />

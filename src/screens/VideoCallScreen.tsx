@@ -17,7 +17,7 @@ import {
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useWebRTC } from '../hooks/useWebRTC';
+import { useCallContext } from '../context/CallContext';
 import { useOutgoingCall } from '../hooks/useOutgoingCall';
 import { useIncomingCallAnswer } from '../hooks/useIncomingCallAnswer';
 import { useAuth } from '../hooks/useAuth';
@@ -198,7 +198,7 @@ export default function VideoCallScreen() {
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [showCameraToggle, setShowCameraToggle] = useState(false);
 
-  // WebRTC hook for managing peer connection and streams
+  // Shared WebRTC instance — sourced from CallContext (single instance across all components)
   const {
     localStream,
     remoteStream,
@@ -214,36 +214,31 @@ export default function VideoCallScreen() {
     switchCamera: switchCameraWebRTC,
     startNetworkMonitoring,
     cleanup: cleanupWebRTC,
-  } = useWebRTC({
-    onLocalStream: useCallback((stream: any) => {
-      console.log('[VideoCall] Local stream ready:', stream.id);
-    }, []),
-    onRemoteStream: useCallback((stream: any) => {
-      console.log('[VideoCall] Remote stream received:', stream.id);
-      setCallStatus('connected');
-    }, []),
-    onConnectionStateChange: useCallback((state: string) => {
-      console.log('[VideoCall] Connection state:', state);
-      if (state === 'connected') {
-        setCallStatus('connected');
-      } else if (state === 'disconnected' || state === 'failed') {
-        setCallStatus('disconnected');
-      }
-    }, []),
-    onNetworkQualityChange: useCallback((quality: string) => {
-      console.log('[VideoCall] Network quality:', quality);
-      if (quality === 'poor' || quality === 'fair') {
-        setShowQuality(true);
-        setTimeout(() => setShowQuality(false), 3000);
-      }
-    }, []),
-  });
+  } = useCallContext();
 
   // Outgoing call hook (if this is the caller)
   const { initiateCall: initiateOutgoingCall } = useOutgoingCall();
 
   // Incoming call answer hook (if this is the receiver)
   const { answerCall } = useIncomingCallAnswer();
+
+  // Sync connection state → local callStatus
+  useEffect(() => {
+    if (connectionState === 'connected') {
+      setCallStatus('connected');
+    } else if (connectionState === 'disconnected' || connectionState === 'failed') {
+      setCallStatus('disconnected');
+    }
+  }, [connectionState]);
+
+  // Sync network quality → quality notification
+  useEffect(() => {
+    if (networkQuality === 'poor' || networkQuality === 'fair') {
+      setShowQuality(true);
+      const t = setTimeout(() => setShowQuality(false), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [networkQuality]);
 
   // Build initial participant list:
   // • Other party + local "You"

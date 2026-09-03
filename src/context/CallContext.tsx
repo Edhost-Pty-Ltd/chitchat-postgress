@@ -34,6 +34,7 @@ interface CallContextValue extends CallState {
   addIceCandidate: (candidate: RTCIceCandidateInit) => Promise<void>;
   toggleMute: (muted: boolean) => void;
   toggleVideo: (enabled: boolean) => void;
+  switchCamera: (facingMode: 'user' | 'environment') => Promise<void>;
   startNetworkMonitoring: () => void;
   stopNetworkMonitoring: () => void;
   cleanup: () => void;
@@ -158,6 +159,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
     addIceCandidate: webrtc.addIceCandidate,
     toggleMute: webrtc.toggleMute,
     toggleVideo: webrtc.toggleVideo,
+    switchCamera: webrtc.switchCamera,
     startNetworkMonitoring: webrtc.startNetworkMonitoring,
     stopNetworkMonitoring: webrtc.stopNetworkMonitoring,
     cleanup: webrtc.cleanup,

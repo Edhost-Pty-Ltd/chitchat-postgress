@@ -166,6 +166,7 @@ export default function StatusScreen() {
     await createStatus(
       displayName, photoURL, mediaType, mediaUri, caption, backgroundColor, textColor,
       user?.phoneNumber ?? null,
+      durationMs,
     );
   };
 

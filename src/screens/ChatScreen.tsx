@@ -1071,8 +1071,8 @@ export default function ChatScreen() {
   };
 
   // ── Voice call handler ──────────────────────────────────────────
-  // Uses WebRTC signaling for 1:1 calls — navigates to AudioCall or VideoCall screen.
-  const startCall = useCallback(async (callType: 'audio' | 'video') => {
+  // Uses WebRTC signaling for 1:1 calls — navigates to AudioCall screen.
+  const startCall = useCallback(async () => {
     if (!userId || !otherUserId) {
       Alert.alert('Cannot make call', 'User information not available.');
       return;
@@ -1107,12 +1107,11 @@ export default function ChatScreen() {
         otherUserId,
         callerInfo,
         calleeInfo,
-        callType,
+        'audio',
       );
 
       if (callId) {
-        const screen = callType === 'video' ? 'VideoCall' : 'AudioCall';
-        navigation.navigate(screen, {
+        navigation.navigate('AudioCall', {
           callId,
           isOutgoing: true,
           otherParty: calleeInfo,
@@ -1126,10 +1125,7 @@ export default function ChatScreen() {
     }
   }, [userId, otherUserId, isGroup, displayName, user, outgoingCall, navigation, otherUserPhoto]);
 
-  const handleVoiceCall = useCallback(() => startCall('audio'), [startCall]);
-
-  // ── Video call handler ──────────────────────────────────────────────────────
-  const handleVideoCall = useCallback(() => startCall('video'), [startCall]);
+  const handleVoiceCall = useCallback(() => startCall(), [startCall]);
 
   // ── PanResponder for mic button ─────────────────────────────────
   const micPanResponder = useMemo(() => PanResponder.create({
@@ -2041,10 +2037,6 @@ export default function ChatScreen() {
               <AppIcon name="call" size={20} color={COLORS.blue} fixedColor />
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.iconBtn} onPress={handleVideoCall} disabled={outgoingCall.isInitiating}>
-              <AppIcon name="videocam" size={20} color={COLORS.blue} fixedColor />
-            </TouchableOpacity>
-
             <TouchableOpacity style={styles.iconBtn} onPress={() => setMenuOpen((v) => !v)}>
               <AppIcon name="ellipsis-vertical" size={20} color={COLORS.blue} fixedColor />
             </TouchableOpacity>
@@ -2669,7 +2661,6 @@ export default function ChatScreen() {
                 <View style={styles.profileActions}>
                   {[
                     { icon: 'call-outline' as const, label: 'Audio Call', onPress: () => { setProfileModalOpen(false); handleVoiceCall(); } },
-                    { icon: 'videocam-outline' as const, label: 'Video Call', onPress: () => { setProfileModalOpen(false); handleVideoCall(); } },
                   ].map((a) => (
                     <TouchableOpacity 
                       key={a.label} 

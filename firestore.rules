@@ -27,7 +27,11 @@ service cloud.firestore {
 
       // Blocked contacts subcollection
       match /blockedUsers/{blockedId} {
-        allow read, write: if isOwner(userId);
+        // Owner can read/write their own blocked list.
+        // A user can also read the single document that is about themselves
+        // (so they can detect if the other party has blocked them).
+        allow read: if isOwner(userId) || (isSignedIn() && request.auth.uid == blockedId);
+        allow write: if isOwner(userId);
       }
 
       // Call history subcollection
