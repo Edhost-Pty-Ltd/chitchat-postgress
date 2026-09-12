@@ -64,7 +64,7 @@ export function Avatar({ initials, color, size = 44, status: _status, style, ima
 }
 
 // ─── BottomNav ────────────────────────────────────────────────────────────────
-type TabKey = 'chats' | 'calls' | 'status' | 'settings';
+type TabKey = 'chats' | 'calender' | 'calls' | 'status' | 'settings';
 const TABS: {
   id: TabKey;
   icon: React.ComponentProps<typeof Ionicons>['name'];
@@ -74,6 +74,7 @@ const TABS: {
 }[] = [
   { id: 'status',   icon: 'aperture-outline',    iconActive: 'aperture',    label: 'Updates', screen: 'Status'   },
   { id: 'calls',    icon: 'call-outline',        iconActive: 'call',        label: 'Calls',   screen: 'Calls'    },
+  { id: 'calender',    icon: 'calendar', iconActive: 'calendar', label: 'Calender',   screen: 'Calender'    },
   { id: 'chats',    icon: 'chatbubbles-outline', iconActive: 'chatbubbles', label: 'Chats',   screen: 'Chats'    },
   { id: 'settings', icon: 'person-outline',      iconActive: 'person',      label: 'You',     screen: 'Settings' },
 ];

@@ -12,28 +12,30 @@ import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 
 // ── Eager imports for screens that are in the critical render path ────────────
-import SplashScreen        from '../screens/SplashScreen';
-import SignInScreen        from '../screens/SignInScreen';
+import SplashScreen from '../screens/SplashScreen';
+import SignInScreen from '../screens/SignInScreen';
 import CreateAccountScreen from '../screens/CreateAccountScreen';
-import ChatsScreen         from '../screens/ChatsScreen';
+import ChatsScreen from '../screens/ChatsScreen';
+
 
 // ── Lazy imports — only parsed/executed when first navigated to ───────────────
-const ChatScreen         = lazy(() => import('../screens/ChatScreen'));
-const CallsScreen        = lazy(() => import('../screens/CallsScreen'));
-const StatusScreen       = lazy(() => import('../screens/StatusScreen'));
-const ContactsScreen     = lazy(() => import('../screens/ContactsScreen'));
-const SettingsScreen     = lazy(() => import('../screens/SettingsScreen'));
-const AppearanceScreen   = lazy(() => import('../screens/AppearanceScreen'));
-const ProfileScreen      = lazy(() => import('../screens/ProfileScreen'));
-const VideoCallScreen    = lazy(() => import('../screens/VideoCallScreen'));
-const AudioCallScreen    = lazy(() => import('../screens/AudioCallScreen'));
-const AccountSettingsScreen      = lazy(() => import('../screens/AccountSettingsScreen'));
-const PrivacySettingsScreen      = lazy(() => import('../screens/PrivacySettingsScreen'));
+const ChatScreen = lazy(() => import('../screens/ChatScreen'));
+const CallsScreen = lazy(() => import('../screens/CallsScreen'));
+const CalendarScreen = lazy(() => import('../screens/CalenderScreen'));
+const StatusScreen = lazy(() => import('../screens/StatusScreen'));
+const ContactsScreen = lazy(() => import('../screens/ContactsScreen'));
+const SettingsScreen = lazy(() => import('../screens/SettingsScreen'));
+const AppearanceScreen = lazy(() => import('../screens/AppearanceScreen'));
+const ProfileScreen = lazy(() => import('../screens/ProfileScreen'));
+const VideoCallScreen = lazy(() => import('../screens/VideoCallScreen'));
+const AudioCallScreen = lazy(() => import('../screens/AudioCallScreen'));
+const AccountSettingsScreen = lazy(() => import('../screens/AccountSettingsScreen'));
+const PrivacySettingsScreen = lazy(() => import('../screens/PrivacySettingsScreen'));
 const NotificationSettingsScreen = lazy(() => import('../screens/NotificationSettingsScreen'));
-const ChangeNumberScreen         = lazy(() => import('../screens/ChangeNumberScreen'));
-const NotificationsScreen        = lazy(() => import('../screens/NotificationsScreen'));
-const LinkedDevicesScreen        = lazy(() => import('../screens/LinkedDevicesScreen'));
-const BlockedContactsScreen      = lazy(() => import('../screens/BlockedContactsScreen'));
+const ChangeNumberScreen = lazy(() => import('../screens/ChangeNumberScreen'));
+const NotificationsScreen = lazy(() => import('../screens/NotificationsScreen'));
+const LinkedDevicesScreen = lazy(() => import('../screens/LinkedDevicesScreen'));
+const BlockedContactsScreen = lazy(() => import('../screens/BlockedContactsScreen'));
 
 import { IncomingCallManager } from '../components';
 
@@ -64,7 +66,7 @@ export default function AppNavigator() {
   const { isSignedIn, loading, phone, displayName } = useAuth();
 
   // profileExists: null = still checking, true/false = done
-  const [profileExists, setProfileExists]   = useState<boolean | null>(null);
+  const [profileExists, setProfileExists] = useState<boolean | null>(null);
   const [profileCheckError, setProfileCheckError] = useState(false);
 
   // ── Profile existence check ─────────────────────────────────────────────
@@ -177,35 +179,36 @@ export default function AppNavigator() {
           {authenticated ? (
             <>
               {/* Core screens — eager */}
-              <Stack.Screen name="Chats"    component={ChatsScreen}    />
+              <Stack.Screen name="Chats" component={ChatsScreen} />
               {/* Secondary screens — lazy */}
-              <Stack.Screen name="Chat"     component={ChatScreen as any}     />
-              <Stack.Screen name="Calls"    component={CallsScreen as any}    />
-              <Stack.Screen name="Status"   component={StatusScreen as any}   />
+              <Stack.Screen name="Chat" component={ChatScreen as any} />
+              <Stack.Screen name="Calender" component={CalendarScreen as any} />
+              <Stack.Screen name="Calls" component={CallsScreen as any} />
+              <Stack.Screen name="Status" component={StatusScreen as any} />
               <Stack.Screen name="Contacts" component={ContactsScreen as any} />
 
               {/* Settings group */}
-              <Stack.Screen name="Settings"  component={SettingsScreen as any}  options={modalOptions} />
+              <Stack.Screen name="Settings" component={SettingsScreen as any} options={modalOptions} />
               <Stack.Screen name="Appearance" component={AppearanceScreen as any} options={modalOptions} />
-              <Stack.Screen name="Profile"    component={ProfileScreen as any}    options={modalOptions} />
+              <Stack.Screen name="Profile" component={ProfileScreen as any} options={modalOptions} />
 
               {/* Call screens — full-screen modal */}
               <Stack.Screen name="VideoCall" component={VideoCallScreen as any} options={modalOptions} />
               <Stack.Screen name="AudioCall" component={AudioCallScreen as any} options={modalOptions} />
 
               {/* Account sub-screens */}
-              <Stack.Screen name="AccountSettings"      component={AccountSettingsScreen as any}      />
-              <Stack.Screen name="PrivacySettings"      component={PrivacySettingsScreen as any}      />
+              <Stack.Screen name="AccountSettings" component={AccountSettingsScreen as any} />
+              <Stack.Screen name="PrivacySettings" component={PrivacySettingsScreen as any} />
               <Stack.Screen name="NotificationSettings" component={NotificationSettingsScreen as any} />
-              <Stack.Screen name="ChangeNumber"         component={ChangeNumberScreen as any}         />
-              <Stack.Screen name="Notifications"        component={NotificationsScreen as any}        />
-              <Stack.Screen name="LinkedDevices"        component={LinkedDevicesScreen as any}        />
-              <Stack.Screen name="BlockedContacts"      component={BlockedContactsScreen as any}      />
+              <Stack.Screen name="ChangeNumber" component={ChangeNumberScreen as any} />
+              <Stack.Screen name="Notifications" component={NotificationsScreen as any} />
+              <Stack.Screen name="LinkedDevices" component={LinkedDevicesScreen as any} />
+              <Stack.Screen name="BlockedContacts" component={BlockedContactsScreen as any} />
             </>
           ) : (
             <>
-              <Stack.Screen name="Splash"        component={SplashScreen}        options={{ animation: 'fade' }} />
-              <Stack.Screen name="SignIn"        component={SignInScreen}         />
+              <Stack.Screen name="Splash" component={SplashScreen} options={{ animation: 'fade' }} />
+              <Stack.Screen name="SignIn" component={SignInScreen} />
               <Stack.Screen name="CreateAccount" component={CreateAccountScreen} />
             </>
           )}
@@ -219,8 +222,8 @@ export default function AppNavigator() {
 
 const styles = StyleSheet.create({
   splash: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  errorText:    { color: COLORS.text, fontSize: 18, fontWeight: '600', marginBottom: 8 },
-  errorSubtext: { color: COLORS.sub,  fontSize: 14, textAlign: 'center', marginBottom: 24, paddingHorizontal: 40 },
-  retryButton:  { backgroundColor: COLORS.blue, paddingHorizontal: 32, paddingVertical: 12, borderRadius: 8 },
+  errorText: { color: COLORS.text, fontSize: 18, fontWeight: '600', marginBottom: 8 },
+  errorSubtext: { color: COLORS.sub, fontSize: 14, textAlign: 'center', marginBottom: 24, paddingHorizontal: 40 },
+  retryButton: { backgroundColor: COLORS.blue, paddingHorizontal: 32, paddingVertical: 12, borderRadius: 8 },
   retryButtonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
 });

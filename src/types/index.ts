@@ -113,6 +113,7 @@ export type RootStackParamList = {
   SignIn: undefined;
   Chats: undefined;
   Chat: { chatId: string; displayName: string; isGroup: boolean; otherUserId?: string; otherUserPhoto?: string | null };
+  Calender:undefined;
   Calls: undefined;
   Status: undefined;
   Contacts: undefined;

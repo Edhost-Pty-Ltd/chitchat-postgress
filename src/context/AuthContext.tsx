@@ -13,7 +13,7 @@ import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { startStatusCleanupService, stopStatusCleanupService } from '../services/statusCleanupService';
 import { writePresence } from '../hooks/usePresence';
-
+import { FirebaseAuthTypes } from '@react-native-firebase/auth'; // Add this import at the top
 const WEB_SESSION_TIMEOUT_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 const KEYS = {
@@ -23,7 +23,7 @@ const KEYS = {
   displayName: 'auth_display_name',
   avatarUri:   'auth_avatar_uri',
 } as const;
-
+ 
 interface AuthContextValue {
   isSignedIn:   boolean;
   phone:        string;
@@ -35,6 +35,9 @@ interface AuthContextValue {
   signOut:      () => Promise<void>;
   refreshActivity: () => void;
   loading:      boolean;
+   
+  user:         FirebaseAuthTypes.User | null; 
+  userId:       string | null;
 }
 
 const AuthContext = createContext<AuthContextValue>({
@@ -48,6 +51,8 @@ const AuthContext = createContext<AuthContextValue>({
   signOut: async () => {},
   refreshActivity: () => {},
   loading: true,
+  user:null,
+  userId:'' 
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -56,11 +61,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [displayName,   setDisplayNameState]  = useState('');
   const [avatarUri,     setAvatarUriState]    = useState<string | null>(null);
   const [loading,       setLoading]           = useState(true);
+  const [user,          setUser]              = useState<FirebaseAuthTypes.User | null>(null);
   const webTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearWebTimer = () => {
     if (webTimerRef.current) clearTimeout(webTimerRef.current);
   };
+
 
   const scheduleWebExpiry = useCallback((remainingMs: number) => {
     if (Platform.OS !== 'web') return;
@@ -68,7 +75,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     webTimerRef.current = setTimeout(async () => { await doSignOut(); }, remainingMs);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const isSigningOutRef = useRef(false);
+  const isSigningOutRef = useRef(false); 
 
   const doSignOut = async () => {
     if (isSigningOutRef.current) return;
@@ -87,6 +94,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setDisplayNameState('');
     setAvatarUriState(null);
     setIsSignedIn(false);
+    setUser(null);
 
     try {
       const currentUser = getAuth().currentUser;
@@ -140,9 +148,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     })();
 
-    const unsubscribe = onAuthStateChanged(getAuth(), async (user) => {
+    const unsubscribe = onAuthStateChanged(getAuth(), async (firebaseUser) => {
+      setUser(firebaseUser);
       try {
-        if (!user) {
+        if (!firebaseUser) {
           const signedIn = await AsyncStorage.getItem(KEYS.signedIn);
           if (signedIn === 'true') await doSignOut();
         }
@@ -231,7 +240,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     isSignedIn, phone, displayName, setDisplayName,
     avatarUri, setAvatarUri,
     signIn, signOut, refreshActivity, loading,
-  }), [isSignedIn, phone, displayName, avatarUri, loading, signIn, signOut, setDisplayName, setAvatarUri, refreshActivity]);
+    user,
+    userId: user?.uid ?? null,
+  }), [isSignedIn, phone, displayName, avatarUri, loading, signIn, signOut, setDisplayName, setAvatarUri, refreshActivity, user]);
 
   return (
     <AuthContext.Provider value={value}>
@@ -241,5 +252,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 }
 
 export function useAuth() {
+
   return useContext(AuthContext);
 }
