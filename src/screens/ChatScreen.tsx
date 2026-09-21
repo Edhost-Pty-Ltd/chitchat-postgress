@@ -343,6 +343,9 @@ export default function ChatScreen() {
 
 
   const [input, setInput] = useState('');
+  const isSendingRef = useRef(false);
+  const [isSending, setIsSending] = useState(false);
+  const [editingMessage, setEditingMessage] = useState<any | null>(null);
   const listRef = useRef<FlatList>(null);
   const [showEmoji, setShowEmoji] = useState(false);
   const [showAttach, setShowAttach] = useState(false);
@@ -836,14 +839,33 @@ export default function ChatScreen() {
 
   // ── Send handler ────────────────────────────────────────────────
   const handleSend = async (text?: string) => {
+    if (isSendingRef.current) return; // prevent duplicate sends from rapid taps
     const trimmed = (text ?? input).trim();
     if (!trimmed) return;
 
-    // Stop typing indicator immediately on send
+    isSendingRef.current = true;
+    setIsSending(true);
     setTyping(false);
 
     try {
-      // If replying to a message, include reply metadata
+      // ── Edit existing message ────────────────────────────────────
+      if (editingMessage) {
+        const fsDbEdit = db as ReturnType<typeof firestore>;
+        await fsDbEdit
+          .collection('chats').doc(chatId)
+          .collection('messages').doc(editingMessage.messageId)
+          .update({
+            text: trimmed,
+            edited: true,
+            editedAt: firestore.FieldValue.serverTimestamp(),
+          });
+        setEditingMessage(null);
+        setInput('');
+        setShowEmoji(false);
+        return;
+      }
+
+      // ── Reply branch ─────────────────────────────────────────────
       if (replyingTo) {
         const fsDbReply = db as ReturnType<typeof firestore>;
         await fsDbReply.collection('chats').doc(chatId).collection('messages').add({
@@ -862,7 +884,6 @@ export default function ChatScreen() {
           },
         });
 
-        // Update chat's lastMessage
         await fsDbReply.collection('chats').doc(chatId).update({
           'lastMessage.text': trimmed,
           'lastMessage.senderId': userId,
@@ -873,8 +894,6 @@ export default function ChatScreen() {
         setInput('');
         setShowEmoji(false);
       } else {
-        // Regular message without reply
-        // If either party has blocked the other, send message but mark it as blocked
         if (isBlocked) {
           const fsDbBlocked = db as ReturnType<typeof firestore>;
           await fsDbBlocked.collection('chats').doc(chatId).collection('messages').add({
@@ -887,7 +906,6 @@ export default function ChatScreen() {
             blockedMessage: true,
           });
 
-          // Update chat's lastMessage
           await fsDbBlocked.collection('chats').doc(chatId).update({
             'lastMessage.text': trimmed,
             'lastMessage.senderId': userId,
@@ -897,7 +915,6 @@ export default function ChatScreen() {
           setInput('');
           setShowEmoji(false);
         } else {
-          // Normal send
           const success = await sendMessage(trimmed);
           if (success) {
             setInput('');
@@ -908,6 +925,9 @@ export default function ChatScreen() {
     } catch (error) {
       console.error('[ChatScreen] Error sending message:', error);
       Alert.alert('Error', 'Failed to send message');
+    } finally {
+      isSendingRef.current = false;
+      setIsSending(false);
     }
   };
 
@@ -921,6 +941,21 @@ export default function ChatScreen() {
   const handleClearSelection = () => {
     setSelectedMessageId(null);
     setShowMessageActions(false);
+  };
+
+  const handleEditMessage = () => {
+    if (!selectedMessageId) return;
+    const message = messages.find(m => m.messageId === selectedMessageId);
+    // Only own text messages can be edited
+    if (message && message.senderId === userId && message.type === 'text') {
+      setEditingMessage(message);
+      setInput(message.text ?? '');
+      setShowEmoji(false);
+      handleClearSelection();
+    } else {
+      Alert.alert('Cannot edit', 'You can only edit your own text messages.');
+      handleClearSelection();
+    }
   };
 
   const handleDeleteMessage = async () => {
@@ -2182,6 +2217,15 @@ export default function ChatScreen() {
                   <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Reply</AppText>
                 </TouchableOpacity>
 
+                {/* Edit — only shown for own text messages */}
+                {messages.find(m => m.messageId === selectedMessageId)?.senderId === userId &&
+                 messages.find(m => m.messageId === selectedMessageId)?.type === 'text' && (
+                  <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleEditMessage}>
+                    <AppIcon name="pencil-outline" size={22} color={COLORS.blue} />
+                    <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Edit</AppText>
+                  </TouchableOpacity>
+                )}
+
                 <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleForwardMessage}>
                   <AppIcon name="arrow-redo-outline" size={22} color={COLORS.blue} />
                   <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Forward</AppText>
@@ -2224,7 +2268,29 @@ export default function ChatScreen() {
             </View>
           )}
 
-          {/* ── Reply Preview ── */}
+          {/* ── Edit Preview ── */}
+          {editingMessage && (
+            <View style={[styles.replyPreview, { backgroundColor: FG.glassBg, borderTopColor: FG.glassBorder }]}>
+              <View style={[styles.replyPreviewBar, { backgroundColor: '#f59e0b' }]} />
+              <View style={styles.replyPreviewContent}>
+                <View style={{ flex: 1 }}>
+                  <AppText style={[styles.replyPreviewLabel, { color: '#f59e0b' }]}>
+                    Editing message
+                  </AppText>
+                  <AppText style={[styles.replyPreviewText, { color: FG.secondary }]} numberOfLines={1}>
+                    {editingMessage.text}
+                  </AppText>
+                </View>
+                <TouchableOpacity
+                  onPress={() => { setEditingMessage(null); setInput(''); }}
+                  style={styles.replyPreviewClose}
+                >
+                  <AppIcon name="close-circle" size={22} color={FG.secondary} />
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
           {replyingTo && (
             <View style={[styles.replyPreview, { backgroundColor: FG.glassBg, borderTopColor: FG.glassBorder }]}>
               <View style={styles.replyPreviewBar} />
@@ -2330,9 +2396,11 @@ export default function ChatScreen() {
 
                 {/* Mic / Send button */}
                 {input.trim() ? (
-                  <TouchableOpacity onPress={() => handleSend()} activeOpacity={0.85} style={styles.sendBtn}>
+                  <TouchableOpacity onPress={() => handleSend()} activeOpacity={0.85} style={[styles.sendBtn, isSending && { opacity: 0.5 }]} disabled={isSending}>
                     <LinearGradient colors={GRADIENTS.primary} style={styles.sendBtnInner}>
-                      <AppIcon name="send" size={19} color="#fff" fixedColor />
+                      {isSending
+                        ? <ActivityIndicator size="small" color="#fff" />
+                        : <AppIcon name="send" size={19} color="#fff" fixedColor />}
                     </LinearGradient>
                   </TouchableOpacity>
                 ) : (
@@ -2394,9 +2462,11 @@ export default function ChatScreen() {
 
             {/* Mic / Send button */}
             {input.trim() ? (
-              <TouchableOpacity onPress={() => handleSend()} activeOpacity={0.85} style={styles.sendBtn}>
+              <TouchableOpacity onPress={() => handleSend()} activeOpacity={0.85} style={[styles.sendBtn, isSending && { opacity: 0.5 }]} disabled={isSending}>
                 <LinearGradient colors={GRADIENTS.primary} style={styles.sendBtnInner}>
-                  <AppIcon name="send" size={19} color="#fff" fixedColor />
+                  {isSending
+                    ? <ActivityIndicator size="small" color="#fff" />
+                    : <AppIcon name="send" size={19} color="#fff" fixedColor />}
                 </LinearGradient>
               </TouchableOpacity>
             ) : (
