@@ -1,11 +1,6 @@
 // ─── useBlockedContacts Hook ──────────────────────────────────────────────────
-// Manages blocked contacts list with real-time updates and block notifications
-
 import { useState, useEffect, useCallback } from 'react';
-import {
-  collection, doc, setDoc, deleteDoc, onSnapshot,
-  query, getDocs, Timestamp, addDoc, updateDoc, serverTimestamp, writeBatch, getDoc,
-} from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 
 export interface BlockedContact {
@@ -14,339 +9,202 @@ export interface BlockedContact {
   photoURL: string | null;
   phone?: string;
   blockedAt: Date;
-  lastSeenAtBlock?: Date; // Frozen last seen at time of blocking
+  lastSeenAtBlock?: Date;
 }
 
-// ─── Helper: Send block notification to chat ─────────────────────────────────
+const fsDb = () => db as ReturnType<typeof firestore>;
+
+function toDate(raw: any): Date {
+  if (!raw) return new Date();
+  if (typeof raw.toDate === 'function') return raw.toDate();
+  return new Date(raw);
+}
+
 async function sendBlockNotifications(
-  blockerId: string,
-  blockedId: string,
-  blockerName: string,
-  blockedName: string
+  blockerId: string, blockedId: string,
+  blockerName: string, blockedName: string,
 ) {
   try {
-    // Find the chat between these two users
-    const chatsRef = collection(db, 'chats');
-    const chatsSnapshot = await getDocs(query(chatsRef));
-    
+    const chatsSnap = await fsDb().collection('chats').get();
     let chatId: string | null = null;
 
-    for (const chatDoc of chatsSnapshot.docs) {
-      const data = chatDoc.data();
+    for (const chatDoc of chatsSnap.docs) {
+      const data    = chatDoc.data();
       const members = data.members || [];
-      
-      // Check if this is a 1-on-1 chat between these two users
-      if (!data.isGroup && members.length === 2 && 
+      if (!data.isGroup && members.length === 2 &&
           members.includes(blockerId) && members.includes(blockedId)) {
-        chatId = chatDoc.id;
-        break;
+        chatId = chatDoc.id; break;
       }
     }
+    if (!chatId) return;
 
-    if (!chatId) {
-      console.log('[sendBlockNotifications] No chat found between users');
-      return;
-    }
+    const batch = fsDb().batch();
 
-    const batch = writeBatch(db);
+    const blockerSnap = await fsDb().collection('users').doc(blockerId).get();
+    const blockerLastSeen = blockerSnap.exists ? blockerSnap.data()!.lastSeen : null;
 
-    // Get blocker's current lastSeen to freeze it for blocked user
-    const blockerRef = doc(db, 'users', blockerId);
-    const blockerSnap = await getDoc(blockerRef);
-    const blockerLastSeen = blockerSnap.exists() ? blockerSnap.data().lastSeen : null;
+    const blockedUserRef = fsDb().collection('users').doc(blockerId).collection('blockedUsers').doc(blockedId);
+    batch.update(blockedUserRef, { lastSeenAtBlock: blockerLastSeen || firestore.FieldValue.serverTimestamp() });
 
-    // Store the frozen last seen in the blocked user's document
-    const blockedUserRef = doc(db, 'users', blockerId, 'blockedUsers', blockedId);
-    batch.update(blockedUserRef, {
-      lastSeenAtBlock: blockerLastSeen || serverTimestamp(),
-    });
-
-    // Add system message with personalized text for each user
-    const msgRef = doc(collection(db, 'chats', chatId, 'messages'));
+    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
     batch.set(msgRef, {
-      messageId: msgRef.id,
-      senderId: 'system',
+      messageId: msgRef.id, senderId: 'system',
       text: `BLOCK:${blockerId}:${blockedId}:${blockerName}:${blockedName}`,
-      imageUrl: null,
-      voiceUrl: null,
-      videoUrl: null,
-      fileUrl: null,
-      type: 'system',
-      timestamp: serverTimestamp(),
-      readBy: [],
-      deliveredTo: [],
-      duration: null,
-      fileName: null,
-      fileSize: null,
-      mimeType: null,
-      thumbnailUrl: null,
-      location: null,
-      isLiveLocation: false,
-      replyTo: null,
+      imageUrl: null, voiceUrl: null, videoUrl: null, fileUrl: null,
+      type: 'system', timestamp: firestore.FieldValue.serverTimestamp(),
+      readBy: [], deliveredTo: [], duration: null, fileName: null,
+      fileSize: null, mimeType: null, thumbnailUrl: null,
+      location: null, isLiveLocation: false, replyTo: null,
     });
 
-    // Update chat's lastMessage (show blocker's perspective in chat list)
-    const chatRef = doc(db, 'chats', chatId);
-    batch.update(chatRef, {
-      'lastMessage.text': `You blocked ${blockedName}`,
-      'lastMessage.senderId': 'system',
-      'lastMessage.timestamp': serverTimestamp(),
+    batch.update(fsDb().collection('chats').doc(chatId), {
+      'lastMessage.text':      `You blocked ${blockedName}`,
+      'lastMessage.senderId':  'system',
+      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
     });
 
-    // Create notification for blocked user
-    const notificationRef = doc(collection(db, 'users', blockedId, 'notifications'));
-    batch.set(notificationRef, {
-      id: notificationRef.id,
-      type: 'blocked',
-      title: 'You were blocked',
-      message: `${blockerName} blocked you`,
-      fromUserId: blockerId,
-      fromUserName: blockerName,
-      timestamp: serverTimestamp(),
-      read: false,
+    const notifRef = fsDb().collection('users').doc(blockedId).collection('notifications').doc();
+    batch.set(notifRef, {
+      id: notifRef.id, type: 'blocked',
+      title: 'You were blocked', message: `${blockerName} blocked you`,
+      fromUserId: blockerId, fromUserName: blockerName,
+      timestamp: firestore.FieldValue.serverTimestamp(), read: false,
     });
 
     await batch.commit();
-    console.log('[sendBlockNotifications] Block notifications sent to chat:', chatId);
   } catch (error) {
-    console.error('[sendBlockNotifications] Error sending notifications:', error);
-    // Non-critical - don't throw
+    console.error('[sendBlockNotifications] Error:', error);
   }
 }
 
-// ─── Helper: Send unblock notification to chat ───────────────────────────────
 async function sendUnblockNotifications(
-  unblockerId: string,
-  unblockedId: string,
-  unblockerName: string,
-  unblockedName: string
+  unblockerId: string, unblockedId: string,
+  unblockerName: string, unblockedName: string,
 ) {
   try {
-    // Find the chat between these two users
-    const chatsRef = collection(db, 'chats');
-    const chatsSnapshot = await getDocs(query(chatsRef));
-    
+    const chatsSnap = await fsDb().collection('chats').get();
     let chatId: string | null = null;
 
-    for (const chatDoc of chatsSnapshot.docs) {
-      const data = chatDoc.data();
+    for (const chatDoc of chatsSnap.docs) {
+      const data    = chatDoc.data();
       const members = data.members || [];
-      
-      // Check if this is a 1-on-1 chat between these two users
-      if (!data.isGroup && members.length === 2 && 
+      if (!data.isGroup && members.length === 2 &&
           members.includes(unblockerId) && members.includes(unblockedId)) {
-        chatId = chatDoc.id;
-        break;
+        chatId = chatDoc.id; break;
       }
     }
+    if (!chatId) return;
 
-    if (!chatId) {
-      console.log('[sendUnblockNotifications] No chat found between users');
-      return;
-    }
-
-    const batch = writeBatch(db);
-
-    // Add system message with personalized text for each user
-    const msgRef = doc(collection(db, 'chats', chatId, 'messages'));
+    const batch  = fsDb().batch();
+    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
     batch.set(msgRef, {
-      messageId: msgRef.id,
-      senderId: 'system',
+      messageId: msgRef.id, senderId: 'system',
       text: `UNBLOCK:${unblockerId}:${unblockedId}:${unblockerName}:${unblockedName}`,
-      imageUrl: null,
-      voiceUrl: null,
-      videoUrl: null,
-      fileUrl: null,
-      type: 'system',
-      timestamp: serverTimestamp(),
-      readBy: [],
-      deliveredTo: [],
-      duration: null,
-      fileName: null,
-      fileSize: null,
-      mimeType: null,
-      thumbnailUrl: null,
-      location: null,
-      isLiveLocation: false,
-      replyTo: null,
+      imageUrl: null, voiceUrl: null, videoUrl: null, fileUrl: null,
+      type: 'system', timestamp: firestore.FieldValue.serverTimestamp(),
+      readBy: [], deliveredTo: [], duration: null, fileName: null,
+      fileSize: null, mimeType: null, thumbnailUrl: null,
+      location: null, isLiveLocation: false, replyTo: null,
     });
-
-    // Update chat's lastMessage (show unblocker's perspective in chat list)
-    const chatRef = doc(db, 'chats', chatId);
-    batch.update(chatRef, {
-      'lastMessage.text': `You unblocked ${unblockedName}`,
-      'lastMessage.senderId': 'system',
-      'lastMessage.timestamp': serverTimestamp(),
+    batch.update(fsDb().collection('chats').doc(chatId), {
+      'lastMessage.text':      `You unblocked ${unblockedName}`,
+      'lastMessage.senderId':  'system',
+      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
     });
-
     await batch.commit();
-    console.log('[sendUnblockNotifications] Unblock notifications sent to chat:', chatId);
   } catch (error) {
-    console.error('[sendUnblockNotifications] Error sending notifications:', error);
-    // Non-critical - don't throw
+    console.error('[sendUnblockNotifications] Error:', error);
   }
 }
 
 export function useBlockedContacts(currentUserId: string | null) {
   const [blockedContacts, setBlockedContacts] = useState<BlockedContact[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error,   setError]   = useState<string | null>(null);
 
-  // ── Real-time listener for blocked contacts ───────────────────────
   useEffect(() => {
-    if (!currentUserId) {
-      setBlockedContacts([]);
-      setLoading(false);
-      return;
-    }
-
+    if (!currentUserId) { setBlockedContacts([]); setLoading(false); return; }
     setLoading(true);
 
-    const blockedRef = collection(db, 'users', currentUserId, 'blockedUsers');
-    
-    const unsubscribe = onSnapshot(
-      blockedRef,
-      (snapshot) => {
-        const contacts: BlockedContact[] = snapshot.docs.map((doc) => {
-          const data = doc.data();
-          return {
-            userId: doc.id,
-            displayName: data.displayName || 'Unknown',
-            photoURL: data.photoURL || null,
-            phone: data.phone || undefined,
-            blockedAt: data.blockedAt instanceof Timestamp
-              ? data.blockedAt.toDate()
-              : new Date(data.blockedAt),
-            lastSeenAtBlock: data.lastSeenAtBlock instanceof Timestamp
-              ? data.lastSeenAtBlock.toDate()
-              : data.lastSeenAtBlock instanceof Date
-                ? data.lastSeenAtBlock
-                : undefined,
-          };
-        });
+    const unsub = fsDb()
+      .collection('users').doc(currentUserId).collection('blockedUsers')
+      .onSnapshot(
+        (snapshot) => {
+          const contacts: BlockedContact[] = snapshot.docs.map((doc) => {
+            const data = doc.data();
+            return {
+              userId:         doc.id,
+              displayName:    data.displayName || 'Unknown',
+              photoURL:       data.photoURL || null,
+              phone:          data.phone || undefined,
+              blockedAt:      toDate(data.blockedAt),
+              lastSeenAtBlock: data.lastSeenAtBlock ? toDate(data.lastSeenAtBlock) : undefined,
+            };
+          });
+          setBlockedContacts(contacts);
+          setLoading(false);
+        },
+        (err) => { setError(err.message); setLoading(false); },
+      );
 
-        console.log('[useBlockedContacts] Blocked contacts updated:', contacts.length);
-        setBlockedContacts(contacts);
-        setLoading(false);
-      },
-      (err) => {
-        console.error('[useBlockedContacts] Error fetching blocked contacts:', err);
-        setError(err.message);
-        setLoading(false);
-      }
-    );
-
-    return () => unsubscribe();
+    return () => unsub();
   }, [currentUserId]);
 
-  // ── Block a contact ────────────────────────────────────────────────
   const blockContact = useCallback(
     async (
-      userId: string,
-      displayName: string,
-      photoURL?: string | null,
-      phone?: string,
-      blockerDisplayName?: string
+      userId: string, displayName: string,
+      photoURL?: string | null, phone?: string, blockerDisplayName?: string,
     ): Promise<{ success: boolean; error?: string }> => {
-      if (!currentUserId) {
-        return { success: false, error: 'Not authenticated' };
-      }
-
+      if (!currentUserId) return { success: false, error: 'Not authenticated' };
       try {
-        console.log('[useBlockedContacts] Blocking contact:', userId);
+        const currentUserSnap = await fsDb().collection('users').doc(currentUserId).get();
+        const currentLastSeen = currentUserSnap.exists ? currentUserSnap.data()!.lastSeen : null;
 
-        // Get current user's lastSeen to freeze it for blocked user
-        const currentUserRef = doc(db, 'users', currentUserId);
-        const currentUserSnap = await getDoc(currentUserRef);
-        const currentLastSeen = currentUserSnap.exists() ? currentUserSnap.data().lastSeen : null;
+        await fsDb()
+          .collection('users').doc(currentUserId).collection('blockedUsers').doc(userId)
+          .set({
+            displayName, photoURL: photoURL || null,
+            phone: phone || null, blockedAt: new Date(),
+            lastSeenAtBlock: currentLastSeen || new Date(),
+          });
 
-        const blockedRef = doc(db, 'users', currentUserId, 'blockedUsers', userId);
-        
-        await setDoc(blockedRef, {
-          displayName,
-          photoURL: photoURL || null,
-          phone: phone || null,
-          blockedAt: new Date(),
-          lastSeenAtBlock: currentLastSeen || new Date(), // Freeze last seen at block time
-        });
-
-        // Send system message to both users' chats
-        await sendBlockNotifications(
-          currentUserId,
-          userId,
-          blockerDisplayName || 'You',
-          displayName
-        );
-
-        console.log('[useBlockedContacts] Contact blocked successfully with notifications');
+        await sendBlockNotifications(currentUserId, userId, blockerDisplayName || 'You', displayName);
         return { success: true };
       } catch (err: any) {
-        console.error('[useBlockedContacts] Error blocking contact:', err);
         return { success: false, error: err.message };
       }
     },
-    [currentUserId]
+    [currentUserId],
   );
 
-  // ── Unblock a contact ──────────────────────────────────────────────
   const unblockContact = useCallback(
     async (
-      userId: string,
-      displayName?: string,
-      unblockerDisplayName?: string
+      userId: string, displayName?: string, unblockerDisplayName?: string,
     ): Promise<{ success: boolean; error?: string }> => {
-      if (!currentUserId) {
-        return { success: false, error: 'Not authenticated' };
-      }
-
+      if (!currentUserId) return { success: false, error: 'Not authenticated' };
       try {
-        console.log('[useBlockedContacts] Unblocking contact:', userId);
-
-        // Get contact info before deleting
-        const blockedRef = doc(db, 'users', currentUserId, 'blockedUsers', userId);
-        const blockedSnap = await getDoc(blockedRef);
-        
+        const blockedRef  = fsDb().collection('users').doc(currentUserId).collection('blockedUsers').doc(userId);
+        const blockedSnap = await blockedRef.get();
         let contactDisplayName = displayName;
-        if (!contactDisplayName && blockedSnap.exists()) {
-          contactDisplayName = blockedSnap.data().displayName || 'Unknown';
+        if (!contactDisplayName && blockedSnap.exists) {
+          contactDisplayName = blockedSnap.data()!.displayName || 'Unknown';
         }
-
-        await deleteDoc(blockedRef);
-
-        // Send unblock notification
+        await blockedRef.delete();
         if (contactDisplayName) {
-          await sendUnblockNotifications(
-            currentUserId,
-            userId,
-            unblockerDisplayName || 'You',
-            contactDisplayName
-          );
+          await sendUnblockNotifications(currentUserId, userId, unblockerDisplayName || 'You', contactDisplayName);
         }
-
-        console.log('[useBlockedContacts] Contact unblocked successfully with notifications');
         return { success: true };
       } catch (err: any) {
-        console.error('[useBlockedContacts] Error unblocking contact:', err);
         return { success: false, error: err.message };
       }
     },
-    [currentUserId]
+    [currentUserId],
   );
 
-  // ── Check if a contact is blocked ──────────────────────────────────
   const isContactBlocked = useCallback(
-    (userId: string): boolean => {
-      return blockedContacts.some((contact) => contact.userId === userId);
-    },
-    [blockedContacts]
+    (userId: string) => blockedContacts.some((c) => c.userId === userId),
+    [blockedContacts],
   );
 
-  return {
-    blockedContacts,
-    loading,
-    error,
-    blockContact,
-    unblockContact,
-    isContactBlocked,
-  };
+  return { blockedContacts, loading, error, blockContact, unblockContact, isContactBlocked };
 }

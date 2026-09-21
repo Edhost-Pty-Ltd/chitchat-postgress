@@ -1,137 +1,162 @@
 // ─── useContacts Hook ─────────────────────────────────────────────────────────
-// Fetches phone contacts, normalizes numbers to E.164 format,
-// then cross-references with Firestore users collection to find
-// which contacts are registered on SkyConnect.
+// Fetches ALL phone contacts and optionally checks which ones are registered in Firestore.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { getContactsAsync, requestPermissionsAsync, Fields } from 'expo-contacts/legacy';
-import {
-  collection, query, where, getDocs,
-} from 'firebase/firestore';
-import { db } from '../config/firebase';
+import firestore from '@react-native-firebase/firestore';
 import { normalizePhone, chunkArray } from '../utils/phoneUtils';
 
 export interface AppContact {
-  userId:      string;       // Firestore user ID
-  phone:       string;       // normalized E.164 phone number
-  displayName: string;       // contact name from phone book, or phone number if not saved
-  isSaved:     boolean;      // true = found in phone contacts
-  photoUri?:   string;       // contact photo from phone book
-  firebasePhotoURL?: string; // Firebase profile photo
+  userId:            string;        // Normalized phone number (used as unique key)
+  phone:             string;
+  displayName:       string;
+  isSaved:           boolean;       // true if registered in Firestore
+  photoUri?:         string;
+  firebasePhotoURL?: string;
 }
 
+type PermState = 'granted' | 'denied' | 'undetermined';
+
 export function useContacts() {
-  const [contacts,    setContacts]    = useState<AppContact[]>([]);
-  const [loading,     setLoading]     = useState(true);
-  const [error,       setError]       = useState<string | null>(null);
-  const [hasPermission, setHasPermission] = useState(false);
+  const [contacts,      setContacts]      = useState<AppContact[]>([]);
+  const [loading,       setLoading]       = useState(true);
+  const [error,         setError]         = useState<string | null>(null);
+  const [permission,    setPermission]    = useState<PermState>('undetermined');
+  const [canAskAgain,   setCanAskAgain]   = useState(true);
 
-  useEffect(() => {
-    loadContacts();
-  }, []);
-
-  async function loadContacts() {
+  const loadContacts = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
 
-      // ── 1. Request contacts permission ──────────────────────────
-      const { status } = await requestPermissionsAsync();
-      
+      // ── 1. Permission ──────────────────────────────────────────────────
+      const perm = await requestPermissionsAsync();
+      const status = perm.status as PermState;
+      setPermission(status);
+      setCanAskAgain(perm.canAskAgain ?? true);
+      console.log('[useContacts] permission:', status, 'canAskAgain:', perm.canAskAgain);
+
       if (status !== 'granted') {
-        setError('Contacts permission denied');
-        setLoading(false);
+        setError(
+          status === 'denied'
+            ? 'Contacts permission denied. Enable it in Settings to invite friends.'
+            : 'Contacts permission required.'
+        );
+        setContacts([]);
         return;
       }
-      setHasPermission(true);
 
-      // ── 2. Fetch all phone contacts ──────────────────────────────
+      // ── 2. Device contacts ─────────────────────────────────────────────
       const { data } = await getContactsAsync({
-        fields: [
-          Fields.Name,
-          Fields.PhoneNumbers,
-          Fields.Image,
-        ],
+        fields: [Fields.Name, Fields.PhoneNumbers, Fields.Image],
       });
+      console.log('[useContacts] raw device contacts:', data.length);
 
-      // ── 3. Build a map of normalized phone → contact name ────────
-      const phoneToName = new Map<string, string>();
-      const phoneToPhoto = new Map<string, string>();
+      // Build a map of all contacts from the phone (one entry per unique phone number)
+      const contactsByPhone = new Map<string, {
+        name: string;
+        photoUri?: string;
+        contactId: string;
+        rawPhone: string;  // Original phone number for uniqueness
+      }>();
 
       for (const contact of data) {
         if (!contact.phoneNumbers) continue;
         for (const pn of contact.phoneNumbers) {
           if (!pn.number) continue;
           const normalized = normalizePhone(pn.number);
-          const name = contact.name || pn.number;
-          phoneToName.set(normalized, name);
-          if (contact.imageAvailable && contact.image?.uri) {
-            phoneToPhoto.set(normalized, contact.image.uri);
+          if (!normalized) continue;
+          
+          // Use normalized phone as key to avoid duplicates
+          // If same normalized number appears twice, first one wins
+          if (!contactsByPhone.has(normalized)) {
+            contactsByPhone.set(normalized, {
+              name: contact.name || pn.number,
+              photoUri: contact.imageAvailable && contact.image?.uri ? contact.image.uri : undefined,
+              contactId: contact.id || normalized,
+              rawPhone: pn.number,
+            });
           }
         }
       }
+      console.log('[useContacts] unique normalized phones:', contactsByPhone.size);
 
-      if (phoneToName.size === 0) {
+      if (contactsByPhone.size === 0) {
+        setError('No contacts found on this device.');
         setContacts([]);
-        setLoading(false);
         return;
       }
 
-      // ── 4. Query Firestore for registered users ───────────────────
-      // Firestore "in" query supports max 30 items per query
-      const phones   = Array.from(phoneToName.keys());
-      const chunks   = chunkArray(phones, 30);
-      const appContacts: AppContact[] = [];
+      // ── 3. Check Firestore to see which contacts are registered ────────
+      const phones = Array.from(contactsByPhone.keys());
+      const chunks = chunkArray(phones, 30);
+      const registeredUsers = new Map<string, { userId: string; photoURL?: string }>();
 
       for (const chunk of chunks) {
-        const q = query(
-          collection(db, 'users'),
-          where('phone', 'in', chunk),
-        );
-        const snap = await getDocs(q);
+        const snap = await firestore()
+          .collection('users')
+          .where('phone', 'in', chunk)
+          .get();
 
         for (const doc of snap.docs) {
-          const data = doc.data();
-          const phone = data.phone as string;
-          const contactName = phoneToName.get(phone);
+          const data          = doc.data();
+          const phone         = data.phone as string;
+          const photoPrivacy  = data.privacyProfilePhoto ?? 'Contacts';
+          const firebasePhotoURL = photoPrivacy === 'Nobody' ? null : (data.photoURL || null);
 
-          // Respect the user's profile-photo privacy. These contacts are all
-          // saved in the viewer's phone book, so 'Everyone' and 'Contacts' both
-          // allow the photo; only 'Nobody' hides the Firebase profile photo.
-          // (The device contact photo, photoUri, is the viewer's own data and
-          // always shows.)
-          const photoPrivacy = data.privacyProfilePhoto ?? 'Contacts';
-          const firebasePhotoURL =
-            photoPrivacy === 'Nobody' ? null : (data.photoURL || null);
-
-          // All users in this result are in phone contacts (isSaved: true)
-          // Use the contact name from phoneToName
-          appContacts.push({
-            userId:      doc.id,
-            phone,
-            displayName: contactName ?? phone,
-            isSaved:     true, // Always true since we queried for phones in contacts
-            photoUri:    phoneToPhoto.get(phone), // Contact photo from device
-            firebasePhotoURL, // Firebase profile photo (privacy-filtered)
+          registeredUsers.set(phone, {
+            userId: doc.id,
+            photoURL: firebasePhotoURL ?? undefined,
           });
         }
       }
 
-      // Sort: saved contacts first (by name), then unsaved (by number)
-      appContacts.sort((a, b) => {
-        if (a.isSaved && !b.isSaved) return -1;
-        if (!a.isSaved && b.isSaved) return 1;
-        return a.displayName.localeCompare(b.displayName);
-      });
+      console.log('[useContacts] registered users found:', registeredUsers.size);
 
+      // ── 4. Build final contacts list (ALL contacts, marking registered ones) ──
+      const appContacts: AppContact[] = [];
+
+      for (const [phone, contactInfo] of contactsByPhone.entries()) {
+        const registeredUser = registeredUsers.get(phone);
+
+        appContacts.push({
+          // Use the Firebase UID for registered users so that Firestore
+          // `participants` array contains UIDs, matching the
+          // `where('participants', 'array-contains', user.uid)` query.
+          // Fall back to phone number for unregistered contacts.
+          userId:           registeredUser?.userId ?? phone,
+          phone,
+          displayName:      contactInfo.name,
+          isSaved:          !!registeredUser,
+          photoUri:         contactInfo.photoUri,
+          firebasePhotoURL: registeredUser?.photoURL,
+        });
+      }
+
+      // Sort by display name
+      appContacts.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      
+      console.log('[useContacts] total contacts returned:', appContacts.length);
+      console.log('[useContacts] registered users:', appContacts.filter(c => c.isSaved).length);
+      
       setContacts(appContacts);
     } catch (err: any) {
-      setError(err.message ?? 'Failed to load contacts');
+      console.error('[useContacts] load failed:', err);
+      setError(err?.message ?? 'Failed to load contacts');
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
-  return { contacts, loading, error, hasPermission, reload: loadContacts };
+  useEffect(() => { loadContacts(); }, [loadContacts]);
+
+  return {
+    contacts,
+    loading,
+    error,
+    permission,
+    canAskAgain,
+    hasPermission: permission === 'granted',
+    reload: loadContacts,
+  };
 }
-

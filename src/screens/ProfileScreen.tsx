@@ -3,11 +3,12 @@ import React, { useRef, useState, useEffect } from 'react';
 import {
   View, TouchableOpacity, StyleSheet, ScrollView,
   Image, Alert, Platform, TextInput, FlatList, Modal,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
-import { doc, updateDoc, getDoc } from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { getAuth } from '@react-native-firebase/auth';
 import { db } from '../config/firebase';
 import { uploadFile, generateFileName } from '../config/storage';
@@ -90,10 +91,10 @@ export default function ProfileScreen() {
         const currentUser = authInstance.currentUser;
         if (!currentUser) return;
 
-        const userRef = doc(db, 'users', currentUser.uid);
-        const userSnap = await getDoc(userRef);
-        if (userSnap.exists()) {
-          const data = userSnap.data();
+        const fsDb = db as ReturnType<typeof firestore>;
+        const userSnap = await fsDb.collection('users').doc(currentUser.uid).get();
+        if (userSnap.exists) {
+          const data = userSnap.data()!;
           setEmail(data.email || '');
           setWebsite(data.website || '');
           if (data.workSchedule) setWorkSchedule(data.workSchedule);
@@ -120,8 +121,8 @@ export default function ProfileScreen() {
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
       if (currentUser) {
-        const userRef = doc(db, 'users', currentUser.uid);
-        await updateDoc(userRef, { displayName: trimmed });
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({ displayName: trimmed });
       }
     } catch (error) {
       console.error('[ProfileScreen] Error saving displayName:', error);
@@ -139,8 +140,8 @@ export default function ProfileScreen() {
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
       if (currentUser) {
-        const userRef = doc(db, 'users', currentUser.uid);
-        await updateDoc(userRef, { [field]: value });
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({ [field]: value });
       }
     } catch (error) {
       console.warn('[ProfileScreen] Error saving field:', error);
@@ -155,8 +156,8 @@ export default function ProfileScreen() {
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
       if (currentUser) {
-        const userRef = doc(db, 'users', currentUser.uid);
-        await updateDoc(userRef, { workSchedule: updated });
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({ workSchedule: updated });
       }
     } catch (err) {
       console.warn('[ProfileScreen] Error saving work schedule:', err);
@@ -203,7 +204,7 @@ export default function ProfileScreen() {
       }
     }
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: 'images',
       allowsEditing: true,
       aspect: [1, 1],
       quality: 0.7,
@@ -240,8 +241,8 @@ export default function ProfileScreen() {
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
       if (currentUser) {
-        const userRef = doc(db, 'users', currentUser.uid);
-        await updateDoc(userRef, { catalog: updated });
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({ catalog: updated });
       }
     } catch (err) {
       console.warn('[ProfileScreen] Error saving catalog:', err);
@@ -256,8 +257,8 @@ export default function ProfileScreen() {
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
       if (currentUser) {
-        const userRef = doc(db, 'users', currentUser.uid);
-        await updateDoc(userRef, { catalog: updated });
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({ catalog: updated });
       }
     } catch (err) {
       console.warn('[ProfileScreen] Error removing catalog item:', err);
@@ -274,7 +275,7 @@ export default function ProfileScreen() {
       }
     }
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: 'images',
       allowsEditing: true,
       aspect: [1, 1],
       quality: 0.85,
@@ -292,6 +293,7 @@ export default function ProfileScreen() {
           return;
         }
         
+        const fsDb = db as ReturnType<typeof firestore>;
         const fileName = generateFileName('jpg');
         const downloadURL = await uploadFile(uri, 'avatar', {
           userId: currentUser.uid,
@@ -302,8 +304,7 @@ export default function ProfileScreen() {
         
         await setAvatarUri(uri);
         
-        const userRef = doc(db, 'users', currentUser.uid);
-        await updateDoc(userRef, { photoURL: downloadURL });
+        await fsDb.collection('users').doc(currentUser.uid).update({ photoURL: downloadURL });
       } catch (error: any) {
         console.error('[ProfileScreen] Error saving avatar:', error);
         // Still save local URI for demo mode
@@ -565,86 +566,97 @@ export default function ProfileScreen() {
         animationType="slide"
         onRequestClose={() => setCatalogModalOpen(false)}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHandle} />
-            
-            {/* Header row */}
-            <View style={styles.modalHeaderRow}>
-              <AppText style={[styles.modalTitle, { color: textColor, fontFamily }]}>
-                New Item
-              </AppText>
-              <TouchableOpacity
-                onPress={() => { setCatalogModalOpen(false); setNewItemName(''); setNewItemPrice(''); setNewItemDesc(''); setNewItemImage(null); }}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalSheet}>
+              <View style={styles.modalHandle} />
+
+              {/* Header row */}
+              <View style={styles.modalHeaderRow}>
+                <AppText style={[styles.modalTitle, { color: textColor, fontFamily }]}>
+                  New Item
+                </AppText>
+                <TouchableOpacity
+                  onPress={() => { setCatalogModalOpen(false); setNewItemName(''); setNewItemPrice(''); setNewItemDesc(''); setNewItemImage(null); }}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <AppIcon name="close" size={22} color={COLORS.sub} />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                contentContainerStyle={{ paddingBottom: 16 }}
               >
-                <AppIcon name="close" size={22} color={COLORS.sub} />
-              </TouchableOpacity>
-            </View>
+                {/* Item Image */}
+                <TouchableOpacity onPress={pickItemImage} style={styles.itemImagePicker} activeOpacity={0.8}>
+                  {newItemImage ? (
+                    <Image source={{ uri: newItemImage }} style={styles.itemImagePreview} />
+                  ) : (
+                    <View style={styles.itemImagePlaceholder}>
+                      <AppIcon name="image-outline" size={28} color={COLORS.blue} fixedColor />
+                    </View>
+                  )}
+                </TouchableOpacity>
+                <AppText style={[styles.photoHint, { color: COLORS.sub, fontFamily }]}>
+                  {newItemImage ? 'Tap to change' : 'Tap to add photo'}
+                </AppText>
 
-            {/* Item Image */}
-            <TouchableOpacity onPress={pickItemImage} style={styles.itemImagePicker} activeOpacity={0.8}>
-              {newItemImage ? (
-                <Image source={{ uri: newItemImage }} style={styles.itemImagePreview} />
-              ) : (
-                <View style={styles.itemImagePlaceholder}>
-                  <AppIcon name="image-outline" size={28} color={COLORS.blue} fixedColor />
+                {/* Item Name */}
+                <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Name</AppText>
+                <View style={styles.modalInput}>
+                  <TextInput
+                    style={[styles.modalInputText, { color: textColor, fontFamily }]}
+                    placeholder="e.g. Haircut, T-shirt, Web Design"
+                    placeholderTextColor={COLORS.textFaint}
+                    value={newItemName}
+                    onChangeText={setNewItemName}
+                    returnKeyType="next"
+                  />
                 </View>
-              )}
-            </TouchableOpacity>
-            <AppText style={[styles.photoHint, { color: COLORS.sub, fontFamily }]}>
-              {newItemImage ? 'Tap to change' : 'Tap to add photo'}
-            </AppText>
 
-            {/* Item Name */}
-            <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Name</AppText>
-            <View style={styles.modalInput}>
-              <TextInput
-                style={[styles.modalInputText, { color: textColor, fontFamily }]}
-                placeholder="e.g. Haircut, T-shirt, Web Design"
-                placeholderTextColor={COLORS.textFaint}
-                value={newItemName}
-                onChangeText={setNewItemName}
-                returnKeyType="next"
-              />
+                {/* Item Price */}
+                <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Price</AppText>
+                <View style={styles.modalInput}>
+                  <TextInput
+                    style={[styles.modalInputText, { color: textColor, fontFamily }]}
+                    placeholder="e.g. R150, $25, or Free"
+                    placeholderTextColor={COLORS.textFaint}
+                    value={newItemPrice}
+                    onChangeText={setNewItemPrice}
+                    returnKeyType="next"
+                  />
+                </View>
+
+                {/* Item Description */}
+                <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Description</AppText>
+                <View style={[styles.modalInput, { minHeight: 80 }]}>
+                  <TextInput
+                    style={[styles.modalInputText, { color: textColor, fontFamily, textAlignVertical: 'top', minHeight: 60 }]}
+                    placeholder="Optional — what customers should know"
+                    placeholderTextColor={COLORS.textFaint}
+                    value={newItemDesc}
+                    onChangeText={setNewItemDesc}
+                    multiline
+                    numberOfLines={3}
+                  />
+                </View>
+
+                {/* Add Button */}
+                <TouchableOpacity onPress={addCatalogItem} activeOpacity={0.85} style={{ marginTop: 12 }}>
+                  <LinearGradient colors={GRADIENTS.primary} style={styles.modalPrimaryBtn}>
+                    <AppIcon name="add-circle-outline" size={18} color="#fff" fixedColor style={{ marginRight: 6 }} />
+                    <AppText fixedColor style={styles.modalPrimaryBtnText}>Add to Catalog</AppText>
+                  </LinearGradient>
+                </TouchableOpacity>
+              </ScrollView>
             </View>
-
-            {/* Item Price */}
-            <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Price</AppText>
-            <View style={styles.modalInput}>
-              <TextInput
-                style={[styles.modalInputText, { color: textColor, fontFamily }]}
-                placeholder="e.g. R150, $25, or Free"
-                placeholderTextColor={COLORS.textFaint}
-                value={newItemPrice}
-                onChangeText={setNewItemPrice}
-                returnKeyType="next"
-              />
-            </View>
-
-            {/* Item Description */}
-            <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Description</AppText>
-            <View style={[styles.modalInput, { minHeight: 80 }]}>
-              <TextInput
-                style={[styles.modalInputText, { color: textColor, fontFamily, textAlignVertical: 'top', minHeight: 60 }]}
-                placeholder="Optional — what customers should know"
-                placeholderTextColor={COLORS.textFaint}
-                value={newItemDesc}
-                onChangeText={setNewItemDesc}
-                multiline
-                numberOfLines={3}
-              />
-            </View>
-
-            {/* Add Button */}
-            <TouchableOpacity onPress={addCatalogItem} activeOpacity={0.85} style={{ marginTop: 6 }}>
-              <LinearGradient colors={GRADIENTS.primary} style={styles.modalPrimaryBtn}>
-                <AppIcon name="add-circle-outline" size={18} color="#fff" fixedColor style={{ marginRight: 6 }} />
-                <AppText fixedColor style={styles.modalPrimaryBtnText}>Add to Catalog</AppText>
-              </LinearGradient>
-            </TouchableOpacity>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ── Work Hours Modal ── */}
@@ -880,8 +892,9 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 28,
     paddingHorizontal: 24,
     paddingTop: 12,
-    paddingBottom: 40,
+    paddingBottom: Platform.OS === 'ios' ? 34 : 24,
     backgroundColor: '#fff',
+    maxHeight: '90%',
   },
   modalHandle: {
     width: 40, height: 4, borderRadius: 2,

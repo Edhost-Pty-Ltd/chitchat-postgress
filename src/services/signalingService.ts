@@ -1,12 +1,17 @@
 // ─── Signaling Service ───────────────────────────────────────────────────────
 // Uses Firestore for WebRTC signaling (offer/answer/ICE candidates exchange)
 
-import {
-  doc, setDoc, updateDoc, onSnapshot, arrayUnion,
-  serverTimestamp, getDoc, Timestamp,
-} from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import type { Call, CallStatus, CallParticipant, CallType } from '../types/call';
+
+const fsDb = () => db as ReturnType<typeof firestore>;
+
+function toDate(raw: any): Date {
+  if (!raw) return new Date();
+  if (typeof raw.toDate === 'function') return raw.toDate();
+  return new Date(raw);
+}
 
 export class SignalingService {
   // ── Create a new call document ─────────────────────────────────────────────
@@ -17,10 +22,11 @@ export class SignalingService {
     calleeInfo: CallParticipant,
     type: CallType = 'audio',
   ): Promise<string> {
-    const callRef = doc(db, 'calls', `${callerId}_${calleeId}_${Date.now()}`);
-    
-    await setDoc(callRef, {
-      callId: callRef.id,
+    const callId = `${callerId}_${calleeId}_${Date.now()}`;
+    const callRef = fsDb().collection('calls').doc(callId);
+
+    await callRef.set({
+      callId,
       caller: callerInfo,
       callee: calleeInfo,
       status: 'ringing',
@@ -32,148 +38,121 @@ export class SignalingService {
       answer: null,
       callerIceCandidates: [],
       calleeIceCandidates: [],
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+      createdAt: firestore.FieldValue.serverTimestamp(),
+      updatedAt: firestore.FieldValue.serverTimestamp(),
     });
-    
-    console.log('[SignalingService] Call created:', callRef.id);
-    return callRef.id;
+
+    console.log('[SignalingService] Call created:', callId);
+    return callId;
   }
-  
+
   // ── Save WebRTC offer ───────────────────────────────────────────────────────
-  static async saveOffer(
-    callId: string,
-    offer: RTCSessionDescriptionInit,
-  ): Promise<void> {
-    const callRef = doc(db, 'calls', callId);
-    await updateDoc(callRef, {
+  static async saveOffer(callId: string, offer: RTCSessionDescriptionInit): Promise<void> {
+    await fsDb().collection('calls').doc(callId).update({
       offer,
-      updatedAt: serverTimestamp(),
+      updatedAt: firestore.FieldValue.serverTimestamp(),
     });
     console.log('[SignalingService] Offer saved for call:', callId);
   }
-  
+
   // ── Save WebRTC answer ──────────────────────────────────────────────────────
-  static async saveAnswer(
-    callId: string,
-    answer: RTCSessionDescriptionInit,
-  ): Promise<void> {
-    const callRef = doc(db, 'calls', callId);
-    await updateDoc(callRef, {
+  static async saveAnswer(callId: string, answer: RTCSessionDescriptionInit): Promise<void> {
+    await fsDb().collection('calls').doc(callId).update({
       answer,
       status: 'accepted',
-      startTime: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+      startTime: firestore.FieldValue.serverTimestamp(),
+      updatedAt: firestore.FieldValue.serverTimestamp(),
     });
     console.log('[SignalingService] Answer saved for call:', callId);
   }
-  
+
   // ── Add ICE candidate ───────────────────────────────────────────────────────
   static async addIceCandidate(
     callId: string,
     candidate: RTCIceCandidateInit,
     isCallee: boolean,
   ): Promise<void> {
-    const callRef = doc(db, 'calls', callId);
     const field = isCallee ? 'calleeIceCandidates' : 'callerIceCandidates';
-    
-    await updateDoc(callRef, {
-      [field]: arrayUnion(candidate),
-      updatedAt: serverTimestamp(),
+    await fsDb().collection('calls').doc(callId).update({
+      [field]: firestore.FieldValue.arrayUnion(candidate),
+      updatedAt: firestore.FieldValue.serverTimestamp(),
     });
     console.log('[SignalingService] ICE candidate added:', { callId, isCallee });
   }
-  
+
   // ── Update call status ──────────────────────────────────────────────────────
   static async updateCallStatus(
     callId: string,
     status: CallStatus,
     duration?: number,
   ): Promise<void> {
-    const callRef = doc(db, 'calls', callId);
     const updates: any = {
       status,
-      updatedAt: serverTimestamp(),
+      updatedAt: firestore.FieldValue.serverTimestamp(),
     };
-    
+
     if (status === 'ended' || status === 'rejected' || status === 'missed') {
-      updates.endTime = serverTimestamp();
-      if (duration !== undefined) {
-        updates.duration = duration;
-      }
+      updates.endTime = firestore.FieldValue.serverTimestamp();
+      if (duration !== undefined) updates.duration = duration;
     }
-    
+
     if (status === 'connected') {
-      updates.startTime = serverTimestamp();
+      updates.startTime = firestore.FieldValue.serverTimestamp();
     }
-    
-    await updateDoc(callRef, updates);
+
+    await fsDb().collection('calls').doc(callId).update(updates);
     console.log('[SignalingService] Call status updated:', { callId, status });
   }
-  
+
   // ── Listen for call updates ─────────────────────────────────────────────────
-  static onCallUpdated(
-    callId: string,
-    callback: (call: Call | null) => void,
-  ): () => void {
-    const callRef = doc(db, 'calls', callId);
-    
-    return onSnapshot(callRef, (snap) => {
-      if (!snap.exists()) {
-        callback(null);
-        return;
-      }
-      
-      const data = snap.data();
-      const call: Call = {
-        callId: snap.id,
-        caller: data.caller,
-        callee: data.callee,
-        status: data.status,
-        type: data.type,
-        startTime: data.startTime ? (data.startTime as Timestamp).toDate() : null,
-        endTime: data.endTime ? (data.endTime as Timestamp).toDate() : null,
-        duration: data.duration ?? null,
-        offer: data.offer ?? null,
-        answer: data.answer ?? null,
-        callerIceCandidates: data.callerIceCandidates ?? [],
-        calleeIceCandidates: data.calleeIceCandidates ?? [],
-        createdAt: data.createdAt ? (data.createdAt as Timestamp).toDate() : new Date(),
-        updatedAt: data.updatedAt ? (data.updatedAt as Timestamp).toDate() : new Date(),
-      };
-      
-      callback(call);
+  static onCallUpdated(callId: string, callback: (call: Call | null) => void): () => void {
+    return fsDb().collection('calls').doc(callId).onSnapshot((snap) => {
+      if (!snap.exists) { callback(null); return; }
+
+      const data = snap.data()!;
+      callback({
+        callId:               snap.id,
+        caller:               data.caller,
+        callee:               data.callee,
+        status:               data.status,
+        type:                 data.type,
+        startTime:            data.startTime  ? toDate(data.startTime)  : null,
+        endTime:              data.endTime    ? toDate(data.endTime)    : null,
+        duration:             data.duration   ?? null,
+        offer:                data.offer      ?? null,
+        answer:               data.answer     ?? null,
+        callerIceCandidates:  data.callerIceCandidates ?? [],
+        calleeIceCandidates:  data.calleeIceCandidates ?? [],
+        createdAt:            toDate(data.createdAt),
+        updatedAt:            toDate(data.updatedAt),
+      });
     });
   }
-  
+
   // ── Get call document ───────────────────────────────────────────────────────
   static async getCall(callId: string): Promise<Call | null> {
-    const callRef = doc(db, 'calls', callId);
-    const snap = await getDoc(callRef);
-    
-    if (!snap.exists()) {
-      return null;
-    }
-    
-    const data = snap.data();
+    const snap = await fsDb().collection('calls').doc(callId).get();
+    if (!snap.exists) return null;
+
+    const data = snap.data()!;
     return {
-      callId: snap.id,
-      caller: data.caller,
-      callee: data.callee,
-      status: data.status,
-      type: data.type,
-      startTime: data.startTime ? (data.startTime as Timestamp).toDate() : null,
-      endTime: data.endTime ? (data.endTime as Timestamp).toDate() : null,
-      duration: data.duration ?? null,
-      offer: data.offer ?? null,
-      answer: data.answer ?? null,
-      callerIceCandidates: data.callerIceCandidates ?? [],
-      calleeIceCandidates: data.calleeIceCandidates ?? [],
-      createdAt: data.createdAt ? (data.createdAt as Timestamp).toDate() : new Date(),
-      updatedAt: data.updatedAt ? (data.updatedAt as Timestamp).toDate() : new Date(),
+      callId:               snap.id,
+      caller:               data.caller,
+      callee:               data.callee,
+      status:               data.status,
+      type:                 data.type,
+      startTime:            data.startTime  ? toDate(data.startTime)  : null,
+      endTime:              data.endTime    ? toDate(data.endTime)    : null,
+      duration:             data.duration   ?? null,
+      offer:                data.offer      ?? null,
+      answer:               data.answer     ?? null,
+      callerIceCandidates:  data.callerIceCandidates ?? [],
+      calleeIceCandidates:  data.calleeIceCandidates ?? [],
+      createdAt:            toDate(data.createdAt),
+      updatedAt:            toDate(data.updatedAt),
     };
   }
-  
+
   // ── Save call to history ────────────────────────────────────────────────────
   static async saveToCallHistory(
     userId: string,
@@ -184,18 +163,17 @@ export class SignalingService {
     status: 'completed' | 'missed' | 'rejected' | 'busy' | 'failed',
     duration: number | null,
   ): Promise<void> {
-    const historyRef = doc(db, 'users', userId, 'callHistory', callId);
-    
-    await setDoc(historyRef, {
-      callId,
-      otherParty,
-      type,
-      direction,
-      status,
-      duration,
-      timestamp: serverTimestamp(),
-    });
-    
+    await fsDb()
+      .collection('users').doc(userId).collection('callHistory').doc(callId)
+      .set({
+        callId,
+        otherParty,
+        type,
+        direction,
+        status,
+        duration,
+        timestamp: firestore.FieldValue.serverTimestamp(),
+      });
     console.log('[SignalingService] Call saved to history:', { userId, callId });
   }
 }

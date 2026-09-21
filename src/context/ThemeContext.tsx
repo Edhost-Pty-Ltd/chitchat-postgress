@@ -1,6 +1,6 @@
 // ─── Theme / Background & Typography Context ─────────────────────────────────
 import React, {
-  createContext, useContext, useEffect, useMemo, useState,
+  createContext, useContext, useEffect, useMemo, useState, memo,
 } from 'react';
 import {
   ImageBackground, StyleSheet, View, ViewStyle,
@@ -286,11 +286,14 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     return preset?.hex ?? FG.icon;
   }, [typography.iconColorId, FG.icon]);
 
+  // ── Memoized provider value — only re-creates when derived values change ──
+  const value = useMemo<ThemeContextValue>(() => ({
+    background, setBackground, isDark, FG,
+    typography, setTypography, fontFamily, textColor, iconColor,
+  }), [background, isDark, FG, typography, fontFamily, textColor, iconColor]);
+
   return (
-    <ThemeContext.Provider value={{
-      background, setBackground, isDark, FG,
-      typography, setTypography, fontFamily, textColor, iconColor,
-    }}>
+    <ThemeContext.Provider value={value}>
       {children}
     </ThemeContext.Provider>
   );
@@ -313,22 +316,18 @@ export function useTypography() {
 }
 
 // ─── useGlass ─────────────────────────────────────────────────────────────────
-// Returns ready-to-spread style objects for the app's card surfaces.
-// The glass/bevel look has been replaced app-wide with clean, flat cards:
-// a soft white surface with a subtle border. Adapts to light/dark.
 export function useGlass() {
   const { FG } = useContext(ThemeContext);
+  const isDark = FG.icon.includes('255');
 
-  const isDark = FG.icon.includes('255'); // dark background → light FG tokens
-
-  // Clean flat card surface — solid, no glass rim.
-  const bevel = {
+  // Memoized style objects — stable references prevent unnecessary re-renders
+  // in consumers that spread these into style props.
+  const bevel = useMemo(() => ({
     backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.85)',
     borderWidth: 0,
-  };
+  }), [isDark]);
 
-  // Circular flat icon button.
-  const iconButton = {
+  const iconButton = useMemo(() => ({
     width: 38,
     height: 38,
     borderRadius: 19,
@@ -336,42 +335,28 @@ export function useGlass() {
     justifyContent: 'center' as const,
     backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(30,156,240,0.10)',
     borderWidth: 0,
-  };
+  }), [isDark]);
 
   return { bevel, iconButton, FG };
 }
 
 // ─── AppText ─────────────────────────────────────────────────────────────────
-// Drop-in for <Text>. Applies user's fontFamily always.
-// Applies user's textColor unless fixedColor={true} is passed
-// (use fixedColor for white-on-blue bubbles, error reds, etc.)
+interface AppTextProps extends TextProps { fixedColor?: boolean; }
 
-interface AppTextProps extends TextProps {
-  fixedColor?: boolean;
-}
-
-export function AppText({ style, children, fixedColor, ...rest }: AppTextProps) {
+export const AppText = memo(function AppText({ style, children, fixedColor, ...rest }: AppTextProps) {
   const { fontFamily, textColor } = useContext(ThemeContext);
   const flat = StyleSheet.flatten(style) as TextStyle | undefined;
   return (
     <Text
-      style={[
-        flat,
-        { fontFamily },
-        fixedColor ? undefined : { color: textColor },
-      ]}
+      style={[flat, { fontFamily }, fixedColor ? undefined : { color: textColor }]}
       {...rest}
     >
       {children}
     </Text>
   );
-}
+});
 
 // ─── AppIcon ─────────────────────────────────────────────────────────────────
-// Drop-in for <Ionicons>. Applies user's iconColor automatically.
-// Pass fixedColor={true} to keep the explicit `color` prop as-is.
-// Pass glass={true} to wrap the icon in a 3D frosted-glass tile.
-
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 
 interface AppIconProps {
@@ -379,65 +364,44 @@ interface AppIconProps {
   size?:       number;
   color?:      string;
   fixedColor?: boolean;
-  /** Wrap the icon in a frosted-glass 3D tile */
   glass?:      boolean;
-  /** Tile size when glass={true} (default 40) */
   tileSize?:   number;
   style?:      object;
 }
 
-export function AppIcon({
+export const AppIcon = memo(function AppIcon({
   name, size = 22, color, fixedColor, glass, tileSize = 40, style,
 }: AppIconProps) {
   const { iconColor, FG } = useContext(ThemeContext);
   const resolvedColor = fixedColor ? (color ?? iconColor) : iconColor;
-
   const icon = <Ionicons name={name} size={size} color={resolvedColor} style={glass ? undefined : style} />;
-
   if (!glass) return icon;
-
-  const isDark = FG.icon.includes('255'); // dark background → light FG tokens
-
-  // Clean flat tile — soft tinted background, no bevel/glass rim.
+  const isDark = FG.icon.includes('255');
   return (
-    <View style={[
-      {
-        width: tileSize,
-        height: tileSize,
-        borderRadius: tileSize * 0.28,
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(30,156,240,0.10)',
-      },
-      style,
-    ]}>
+    <View style={[{
+      width: tileSize, height: tileSize, borderRadius: tileSize * 0.28,
+      alignItems: 'center', justifyContent: 'center',
+      backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(30,156,240,0.10)',
+    }, style]}>
       {icon}
     </View>
   );
-}
+});
 
 // ─── AppBg ───────────────────────────────────────────────────────────────────
+interface AppBgProps { style?: ViewStyle; children?: React.ReactNode; }
 
-interface AppBgProps {
-  style?:    ViewStyle;
-  children?: React.ReactNode;
-}
-
-export function AppBg({ style, children }: AppBgProps) {
+export const AppBg = memo(function AppBg({ style, children }: AppBgProps) {
   const { background } = useContext(ThemeContext);
-
   if (background.type === 'image' && background.imageUri) {
     return (
       <ImageBackground
         source={{ uri: background.imageUri }}
         style={[StyleSheet.absoluteFill, style]}
         resizeMode="cover"
-      >
-        {children}
-      </ImageBackground>
+      >{children}</ImageBackground>
     );
   }
-
   if (background.type === 'color' && background.color) {
     return (
       <View style={[StyleSheet.absoluteFill, { backgroundColor: background.color }, style]}>
@@ -445,11 +409,10 @@ export function AppBg({ style, children }: AppBgProps) {
       </View>
     );
   }
-
   const preset = GRADIENT_PRESETS.find((p) => p.id === background.gradientId) ?? GRADIENT_PRESETS[0];
   return (
     <LinearGradient colors={preset.colors} style={[StyleSheet.absoluteFill, style]}>
       {children}
     </LinearGradient>
   );
-}
+});

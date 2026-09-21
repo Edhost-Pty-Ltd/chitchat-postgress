@@ -1,4 +1,3 @@
-import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { storage } from '../config/firebase';
 
 export interface UploadProgress {

@@ -1,95 +1,62 @@
 // ─── useLastSeen Hook ─────────────────────────────────────────────────────────
-// Returns the last seen timestamp for a user, respecting block privacy
-// If the user has blocked the viewer, return the frozen lastSeenAtBlock timestamp
+// Returns last seen for a user, respecting block privacy.
 
 import { useState, useEffect } from 'react';
-import { doc, getDoc, onSnapshot, Timestamp } from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 
+function toDate(raw: any): Date | null {
+  if (!raw) return null;
+  if (typeof raw.toDate === 'function') return raw.toDate();
+  return new Date(raw);
+}
+
 export function useLastSeen(
-  userId: string | null,
-  viewerId: string | null
+  userId:   string | null,
+  viewerId: string | null,
 ): { lastSeen: Date | null; loading: boolean } {
   const [lastSeen, setLastSeen] = useState<Date | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading,  setLoading]  = useState(true);
 
   useEffect(() => {
     if (!userId || !viewerId || userId === viewerId) {
-      setLastSeen(null);
-      setLoading(false);
-      return;
+      setLastSeen(null); setLoading(false); return;
     }
 
     setLoading(true);
+    const fsDb = db as ReturnType<typeof firestore>;
+    let unsubFn: (() => void) | undefined;
 
-    // Check if the user has blocked the viewer
-    const checkBlockAndGetLastSeen = async () => {
+    (async () => {
       try {
-        // Check if userId has blocked viewerId
-        const blockedRef = doc(db, 'users', userId, 'blockedUsers', viewerId);
-        const blockedSnap = await getDoc(blockedRef);
+        const blockedSnap = await fsDb
+          .collection('users').doc(userId).collection('blockedUsers').doc(viewerId)
+          .get();
 
-        if (blockedSnap.exists()) {
-          // Viewer is blocked - return frozen lastSeenAtBlock
-          const data = blockedSnap.data();
-          const frozenLastSeen = data.lastSeenAtBlock;
-          
-          if (frozenLastSeen instanceof Timestamp) {
-            setLastSeen(frozenLastSeen.toDate());
-          } else if (frozenLastSeen instanceof Date) {
-            setLastSeen(frozenLastSeen);
-          } else {
-            setLastSeen(null);
-          }
+        if (blockedSnap.exists) {
+          setLastSeen(toDate(blockedSnap.data()!.lastSeenAtBlock));
           setLoading(false);
           return;
         }
 
-        // Not blocked - listen to real-time lastSeen
-        const userRef = doc(db, 'users', userId);
-        const unsubscribe = onSnapshot(
-          userRef,
-          (snapshot) => {
-            if (snapshot.exists()) {
-              const data = snapshot.data();
-              const userLastSeen = data.lastSeen;
-
-              if (userLastSeen instanceof Timestamp) {
-                setLastSeen(userLastSeen.toDate());
-              } else if (userLastSeen instanceof Date) {
-                setLastSeen(userLastSeen);
-              } else {
-                setLastSeen(null);
-              }
-            } else {
-              setLastSeen(null);
-            }
+        unsubFn = fsDb.collection('users').doc(userId).onSnapshot(
+          (snap) => {
+            if (snap.exists) setLastSeen(toDate(snap.data()!.lastSeen));
+            else setLastSeen(null);
             setLoading(false);
           },
-          (error) => {
-            console.error('[useLastSeen] Error fetching last seen:', error);
-            setLastSeen(null);
-            setLoading(false);
-          }
+          (err) => {
+            console.error('[useLastSeen] Error:', err);
+            setLastSeen(null); setLoading(false);
+          },
         );
-
-        return unsubscribe;
-      } catch (error) {
-        console.error('[useLastSeen] Error checking block status:', error);
-        setLastSeen(null);
-        setLoading(false);
+      } catch (err) {
+        console.error('[useLastSeen] Error checking block status:', err);
+        setLastSeen(null); setLoading(false);
       }
-    };
+    })();
 
-    const unsubscribePromise = checkBlockAndGetLastSeen();
-
-    return () => {
-      unsubscribePromise?.then((unsub) => {
-        if (typeof unsub === 'function') {
-          unsub();
-        }
-      });
-    };
+    return () => { unsubFn?.(); };
   }, [userId, viewerId]);
 
   return { lastSeen, loading };

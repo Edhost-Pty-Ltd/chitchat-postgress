@@ -3,10 +3,7 @@
 // Each chat shows the last message, timestamp, and unread count.
 
 import { useState, useEffect } from 'react';
-import {
-  collection, query, where, orderBy,
-  onSnapshot, Timestamp,
-} from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 
 export interface ChatPreview {
@@ -34,45 +31,41 @@ export function useChats(userId: string | null) {
 
     setLoading(true);
 
-    // Real-time listener — simplified query (no orderBy) for debugging
-    const q = query(
-      collection(db, 'chats'),
-      where('members', 'array-contains', userId),
-    );
-
     console.log('[useChats] Subscribing for userId:', userId);
 
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        console.log('[useChats] Snapshot received, docs:', snap.docs.length);
-        const result: ChatPreview[] = snap.docs.map((doc) => {
-          const d = doc.data();
-          const lm = d.lastMessage;
-          return {
-            chatId:       doc.id,
-            type:         d.type ?? 'direct',
-            members:      d.members ?? [],
-            groupName:    d.groupName ?? null,
-            lastMessage:  lm?.text ?? '',
-            lastSenderId: lm?.senderId ?? '',
-            timestamp:    lm?.timestamp
-              ? (lm.timestamp as Timestamp).toDate()
-              : null,
-            unreadCount: getUnreadCount(d.unreadCounts, userId),
-          };
-        });
-        setChats(result);
-        setLoading(false);
-      },
-      (err) => {
-        console.error('[useChats] Error:', err.code, err.message);
-        setError(err.message);
-        setLoading(false);
-      },
-    );
+    const unsub = (db as ReturnType<typeof firestore>)
+      .collection('chats')
+      .where('members', 'array-contains', userId)
+      .onSnapshot(
+        (snap) => {
+          console.log('[useChats] Snapshot received, docs:', snap.docs.length);
+          const result: ChatPreview[] = snap.docs.map((doc) => {
+            const d = doc.data();
+            const lm = d.lastMessage;
+            return {
+              chatId:       doc.id,
+              type:         d.type ?? 'direct',
+              members:      d.members ?? [],
+              groupName:    d.groupName ?? null,
+              lastMessage:  lm?.text ?? '',
+              lastSenderId: lm?.senderId ?? '',
+              timestamp:    lm?.timestamp
+                ? (lm.timestamp as firestore.Timestamp).toDate()
+                : null,
+              unreadCount: getUnreadCount(d.unreadCounts, userId),
+            };
+          });
+          setChats(result);
+          setLoading(false);
+        },
+        (err) => {
+          console.error('[useChats] Error:', err.code, err.message);
+          setError(err.message);
+          setLoading(false);
+        },
+      );
 
-    return () => unsub(); // cleanup on unmount
+    return () => unsub();
   }, [userId]);
 
   return { chats, loading, error };

@@ -1,0 +1,66 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ── Helpers ─────────────────────────────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function isVideo() {
+      return request.resource.contentType.matches('video/.*');
+    }
+
+    function isAudio() {
+      return request.resource.contentType.matches('audio/.*');
+    }
+
+    function isValidMediaSize() {
+      // Max 50 MB for any upload
+      return request.resource.size <= 50 * 1024 * 1024;
+    }
+
+    // ── User avatars ─────────────────────────────────────────────────────────
+    match /avatars/{userId}/{fileName} {
+      allow read:   if isSignedIn();
+      allow write:  if isOwner(userId) && isImage() && isValidMediaSize();
+      allow delete: if isOwner(userId);
+    }
+
+    // ── Chat media ───────────────────────────────────────────────────────────
+    match /chats/{chatId}/media/{fileName} {
+      allow read:   if isSignedIn();
+      allow write:  if isSignedIn() && (isImage() || isVideo()) && isValidMediaSize();
+      allow delete: if isSignedIn();
+    }
+
+    // ── Voice messages ───────────────────────────────────────────────────────
+    match /chats/{chatId}/voice/{fileName} {
+      allow read:   if isSignedIn();
+      allow write:  if isSignedIn() && isAudio() && isValidMediaSize();
+      allow delete: if isSignedIn();
+    }
+
+    // ── Group icons ──────────────────────────────────────────────────────────
+    match /groups/{chatId}/{fileName} {
+      allow read:   if isSignedIn();
+      allow write:  if isSignedIn() && isImage() && isValidMediaSize();
+      allow delete: if isSignedIn();
+    }
+
+    // ── Status media ─────────────────────────────────────────────────────────
+    match /status/{userId}/{fileName} {
+      allow read:   if isSignedIn();
+      allow write:  if isOwner(userId) && (isImage() || isVideo()) && isValidMediaSize();
+      allow delete: if isOwner(userId);
+    }
+  }
+}

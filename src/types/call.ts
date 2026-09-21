@@ -69,4 +69,4 @@ export interface CallState {
   isMuted: boolean;
   isSpeakerOn: boolean;
   callDuration: number; // seconds
-}
+} 

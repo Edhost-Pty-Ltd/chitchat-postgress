@@ -34,9 +34,11 @@ interface CallContextValue extends CallState {
   addIceCandidate: (candidate: RTCIceCandidateInit) => Promise<void>;
   toggleMute: (muted: boolean) => void;
   toggleVideo: (enabled: boolean) => void;
+  switchCamera: (facingMode: 'user' | 'environment') => Promise<void>;
   startNetworkMonitoring: () => void;
   stopNetworkMonitoring: () => void;
   cleanup: () => void;
+  getPeerConnection: () => import('../utils/webrtc-platform').RTCPeerConnectionType | null;
 }
 
 const CallContext = createContext<CallContextValue | undefined>(undefined);
@@ -158,9 +160,11 @@ export function CallProvider({ children }: { children: ReactNode }) {
     addIceCandidate: webrtc.addIceCandidate,
     toggleMute: webrtc.toggleMute,
     toggleVideo: webrtc.toggleVideo,
+    switchCamera: webrtc.switchCamera,
     startNetworkMonitoring: webrtc.startNetworkMonitoring,
     stopNetworkMonitoring: webrtc.stopNetworkMonitoring,
     cleanup: webrtc.cleanup,
+    getPeerConnection: webrtc.getPeerConnection,
   };
 
   return <CallContext.Provider value={value}>{children}</CallContext.Provider>;

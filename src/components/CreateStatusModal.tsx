@@ -97,7 +97,7 @@ export function CreateStatusModal({ visible, onClose, onCreate }: CreateStatusMo
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: type === 'image' ? ImagePicker.MediaTypeOptions.Images : ImagePicker.MediaTypeOptions.Videos,
+        mediaTypes: type === 'image' ? 'images' : 'videos',
         allowsEditing: true,
         quality: 0.8,
         videoMaxDuration: 30, // WhatsApp allows 30s videos

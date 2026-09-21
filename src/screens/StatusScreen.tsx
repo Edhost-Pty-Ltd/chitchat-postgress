@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { View, FlatList, TouchableOpacity, StyleSheet, Platform, ActivityIndicator, Image } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { doc, getDoc } from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { BottomNav, UserAvatar, StatusViewer, CreateStatusModal } from '../components';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
@@ -95,9 +95,10 @@ export default function StatusScreen() {
       await Promise.all(
         allMissing.map(async (uid) => {
           try {
-            const snap = await getDoc(doc(db, 'users', uid));
-            if (snap.exists()) {
-              const data = snap.data();
+            const fsDb = db as ReturnType<typeof firestore>;
+            const snap = await fsDb.collection('users').doc(uid).get();
+            if (snap.exists) {
+              const data = snap.data()!;
               const phone = data.phone ?? '';
               if (phone && !phoneMap.has(uid)) phoneUpdates.set(uid, phone);
               privacyUpdates.set(uid, data.privacyProfilePhoto ?? 'Contacts');
@@ -165,6 +166,7 @@ export default function StatusScreen() {
     await createStatus(
       displayName, photoURL, mediaType, mediaUri, caption, backgroundColor, textColor,
       user?.phoneNumber ?? null,
+      durationMs,
     );
   };
 

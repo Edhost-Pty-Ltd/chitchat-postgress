@@ -4,10 +4,10 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Platform } from 'react-native';
 import {
-  RTCPeerConnection,
-  RTCSessionDescription,
-  RTCIceCandidate,
-  mediaDevices,
+  getRTCPeerConnection,
+  getRTCSessionDescription,
+  getRTCIceCandidate,
+  getMediaDevices,
   MediaStream,
 } from '../utils/webrtc-platform';
 
@@ -50,11 +50,11 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
       console.log('[useWebRTC] Initializing peer connection... Video:', isVideo);
       
       // Create peer connection
-      const pc = new RTCPeerConnection(ICE_SERVERS);
+      const pc = new (getRTCPeerConnection())(ICE_SERVERS);
       peerConnectionRef.current = pc;
 
       // Get local stream (audio + video if requested)
-      const stream = await mediaDevices.getUserMedia({
+      const stream = await getMediaDevices().getUserMedia({
         audio: true,
         video: isVideo ? {
           width: { ideal: 1280 },
@@ -68,7 +68,7 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
       handlers?.onLocalStream?.(stream);
 
       // Add local stream tracks to peer connection
-      stream.getTracks().forEach((track) => {
+      stream.getTracks().forEach((track:any) => {
         pc.addTrack(track, stream);
         console.log('[useWebRTC] Added track:', track.kind);
       });
@@ -159,7 +159,7 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
         if (!pc) throw new Error('Peer connection not initialized');
 
         console.log('[useWebRTC] Setting remote description (offer)...');
-        await pc.setRemoteDescription(new RTCSessionDescription(offer as any));
+        await pc.setRemoteDescription(new (getRTCSessionDescription())(offer as any));
 
         console.log('[useWebRTC] Creating answer...');
         const answer = await pc.createAnswer();
@@ -194,7 +194,7 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
         }
 
         console.log('[useWebRTC] Setting remote description (answer)...');
-        await pc.setRemoteDescription(new RTCSessionDescription(answer as any));
+        await pc.setRemoteDescription(new (getRTCSessionDescription())(answer as any));
         console.log('[useWebRTC] Remote answer set successfully');
       } catch (error) {
         console.error('[useWebRTC] Failed to set remote answer:', error);
@@ -221,7 +221,7 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
           return;
         }
 
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        await pc.addIceCandidate(new (getRTCIceCandidate())(candidate));
         console.log('[useWebRTC] ICE candidate added');
       } catch (error) {
         console.error('[useWebRTC] Failed to add ICE candidate:', error);
@@ -272,7 +272,7 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
       const wasEnabled = oldVideoTrack.enabled;
 
       // Get new video stream with different facing mode
-      const newStream = await mediaDevices.getUserMedia({
+      const newStream = await getMediaDevices().getUserMedia({
         video: {
           width: { ideal: 1280 },
           height: { ideal: 720 },
@@ -457,6 +457,8 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
     startNetworkMonitoring,
     stopNetworkMonitoring,
     cleanup,
+    /** Returns the live RTCPeerConnection instance (used for screen-share sender replacement). */
+    getPeerConnection: () => peerConnectionRef.current,
   };
 }
 

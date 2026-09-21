@@ -1,29 +1,20 @@
 // ─── Auth Context ─────────────────────────────────────────────────────────────
 //
-// Behaviour:
-//   Mobile  – once signed in, the session is persisted indefinitely via
-//             AsyncStorage. The user never has to sign in again unless they
-//             explicitly sign out.
-//
-//   Web     – session expires after WEB_SESSION_TIMEOUT_MS ms of inactivity
-//             (default: 4 hours).  Every auth-guarded interaction refreshes
-//             the "last active" timestamp.  When the tab regains focus or the
-//             app mounts, we check whether the timeout has elapsed and redirect
-//             to Sign In if so.
+// Mobile  — session persisted indefinitely via AsyncStorage.
+// Web     — session expires after WEB_SESSION_TIMEOUT_MS ms of inactivity.
 //
 import React, {
-  createContext, useContext, useEffect, useState, useCallback, useRef,
+  createContext, useContext, useEffect, useState, useCallback, useRef, useMemo,
 } from 'react';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getAuth, onAuthStateChanged, signOut as fbSignOut } from '@react-native-firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { startStatusCleanupService, stopStatusCleanupService } from '../services/statusCleanupService';
 import { writePresence } from '../hooks/usePresence';
-
-// 4 hours in milliseconds
-const WEB_SESSION_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+import { FirebaseAuthTypes } from '@react-native-firebase/auth'; // Add this import at the top
+const WEB_SESSION_TIMEOUT_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 const KEYS = {
   phone:       'auth_phone',
@@ -32,18 +23,21 @@ const KEYS = {
   displayName: 'auth_display_name',
   avatarUri:   'auth_avatar_uri',
 } as const;
-
+ 
 interface AuthContextValue {
-  isSignedIn: boolean;
-  phone: string;
-  displayName: string;
+  isSignedIn:   boolean;
+  phone:        string;
+  displayName:  string;
   setDisplayName: (name: string) => Promise<void>;
-  avatarUri: string | null;
+  avatarUri:    string | null;
   setAvatarUri: (uri: string) => Promise<void>;
-  signIn: (phone: string) => Promise<void>;
-  signOut: () => Promise<void>;
+  signIn:       (phone: string) => Promise<void>;
+  signOut:      () => Promise<void>;
   refreshActivity: () => void;
-  loading: boolean;
+  loading:      boolean;
+   
+  user:         FirebaseAuthTypes.User | null; 
+  userId:       string | null;
 }
 
 const AuthContext = createContext<AuthContextValue>({
@@ -57,63 +51,68 @@ const AuthContext = createContext<AuthContextValue>({
   signOut: async () => {},
   refreshActivity: () => {},
   loading: true,
+  user:null,
+  userId:'' 
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [isSignedIn, setIsSignedIn]         = useState(false);
-  const [phone, setPhone]                   = useState('');
-  const [displayName, setDisplayNameState]  = useState('');
-  const [avatarUri, setAvatarUriState]      = useState<string | null>(null);
-  const [loading, setLoading]               = useState(true);
-  const webTimerRef                 = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // ── Helpers ──────────────────────────────────────────────────────────────
+  const [isSignedIn,    setIsSignedIn]        = useState(false);
+  const [phone,         setPhone]             = useState('');
+  const [displayName,   setDisplayNameState]  = useState('');
+  const [avatarUri,     setAvatarUriState]    = useState<string | null>(null);
+  const [loading,       setLoading]           = useState(true);
+  const [user,          setUser]              = useState<FirebaseAuthTypes.User | null>(null);
+  const webTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearWebTimer = () => {
     if (webTimerRef.current) clearTimeout(webTimerRef.current);
   };
 
+
   const scheduleWebExpiry = useCallback((remainingMs: number) => {
     if (Platform.OS !== 'web') return;
     clearWebTimer();
-    webTimerRef.current = setTimeout(async () => {
-      await doSignOut();
-    }, remainingMs);
+    webTimerRef.current = setTimeout(async () => { await doSignOut(); }, remainingMs);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const isSigningOutRef = useRef(false); 
+
   const doSignOut = async () => {
+    if (isSigningOutRef.current) return;
+    isSigningOutRef.current = true;
+
     clearWebTimer();
-    // Mark the user offline before clearing auth
+
+    // Clear persisted session first — prevents the onAuthStateChanged listener
+    // from triggering a recursive doSignOut call when fbSignOut fires.
+    await AsyncStorage.multiRemove([
+      KEYS.phone, KEYS.signedIn, KEYS.lastActive, KEYS.displayName, KEYS.avatarUri,
+    ]);
+
+    // Update React state before fbSignOut so unmounting components see a clean slate
+    setPhone('');
+    setDisplayNameState('');
+    setAvatarUriState(null);
+    setIsSignedIn(false);
+    setUser(null);
+
     try {
       const currentUser = getAuth().currentUser;
       if (currentUser) await writePresence(currentUser.uid, false);
     } catch {}
-    // Stop status cleanup service
+
     stopStatusCleanupService();
-    // Sign out from Firebase Auth
-    await fbSignOut(getAuth());
-    // Clear AsyncStorage session data
-    await AsyncStorage.multiRemove([
-      KEYS.phone,
-      KEYS.signedIn,
-      KEYS.lastActive,
-      KEYS.displayName,
-      KEYS.avatarUri,
-    ]);
-    setPhone('');
-    setIsSignedIn(false);
-    setDisplayNameState('');
-    setAvatarUriState(null);
+
+    try {
+      await fbSignOut(getAuth());
+    } catch {}
+
+    isSigningOutRef.current = false;
   };
 
   // ── Hydrate on mount ──────────────────────────────────────────────────────
-
   useEffect(() => {
-    // Set a maximum loading timeout to prevent infinite loading
-    const maxLoadingTimeout = setTimeout(() => {
-      console.warn('[AuthContext] Maximum loading time reached, forcing app to open');
-      setLoading(false);
-    }, 10000); // 10 seconds max loading time
+    const maxLoadingTimeout = setTimeout(() => setLoading(false), 10000);
 
     (async () => {
       try {
@@ -130,12 +129,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         if (signedIn === 'true' && storedPhone) {
           if (Platform.OS === 'web') {
-            // Check inactivity timeout
             const lastActive = lastActiveStr ? parseInt(lastActiveStr, 10) : 0;
             const elapsed    = Date.now() - lastActive;
-
             if (elapsed >= WEB_SESSION_TIMEOUT_MS) {
-              // Session expired — clean up and show Sign In
               await doSignOut();
             } else {
               setPhone(storedPhone);
@@ -143,7 +139,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               scheduleWebExpiry(WEB_SESSION_TIMEOUT_MS - elapsed);
             }
           } else {
-            // Mobile — no expiry
             setPhone(storedPhone);
             setIsSignedIn(true);
           }
@@ -153,49 +148,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     })();
 
-    // Listen to Firebase auth state changes
-    const unsubscribe = onAuthStateChanged(getAuth(), async (user) => {
+    const unsubscribe = onAuthStateChanged(getAuth(), async (firebaseUser) => {
+      setUser(firebaseUser);
       try {
-        console.log('[AuthContext] Firebase auth state changed:', user?.uid);
-        
-        if (!user) {
-          // User signed out in Firebase, sync with local state
+        if (!firebaseUser) {
           const signedIn = await AsyncStorage.getItem(KEYS.signedIn);
-          if (signedIn === 'true') {
-            console.log('[AuthContext] Firebase signed out but local state says signed in, cleaning up...');
-            await doSignOut();
-          }
-        } else {
-          // User signed in to Firebase
-          const signedIn = await AsyncStorage.getItem(KEYS.signedIn);
-          if (signedIn !== 'true') {
-            console.log('[AuthContext] Firebase signed in but local state not updated');
-            // This case is handled by explicit signIn() call
-          }
+          if (signedIn === 'true') await doSignOut();
         }
-      } catch (error: any) {
-        // Catch and log any errors from auth state listener
-        // Don't let these crash the app
-        console.error('[AuthContext] Error in auth state listener:', error);
-      }
+        // Signed-in case is handled by the explicit signIn() call
+      } catch {}
     });
 
-    // On web, also check whenever the tab becomes visible again
     if (Platform.OS === 'web') {
       const handleVisibilityChange = async () => {
-        if (document.visibilityState === 'visible') {
-          const [signedIn, lastActiveStr] = await Promise.all([
-            AsyncStorage.getItem(KEYS.signedIn),
-            AsyncStorage.getItem(KEYS.lastActive),
-          ]);
-          if (signedIn === 'true' && lastActiveStr) {
-            const elapsed = Date.now() - parseInt(lastActiveStr, 10);
-            if (elapsed >= WEB_SESSION_TIMEOUT_MS) {
-              await doSignOut();
-            } else {
-              scheduleWebExpiry(WEB_SESSION_TIMEOUT_MS - elapsed);
-            }
-          }
+        if (document.visibilityState !== 'visible') return;
+        const [signedIn, lastActiveStr] = await Promise.all([
+          AsyncStorage.getItem(KEYS.signedIn),
+          AsyncStorage.getItem(KEYS.lastActive),
+        ]);
+        if (signedIn === 'true' && lastActiveStr) {
+          const elapsed = Date.now() - parseInt(lastActiveStr, 10);
+          if (elapsed >= WEB_SESSION_TIMEOUT_MS) await doSignOut();
+          else scheduleWebExpiry(WEB_SESSION_TIMEOUT_MS - elapsed);
         }
       };
       document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -205,128 +179,79 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         unsubscribe();
       };
     }
-    
-    return () => {
-      clearTimeout(maxLoadingTimeout);
-      unsubscribe();
-    };
+    return () => { clearTimeout(maxLoadingTimeout); unsubscribe(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Public API ────────────────────────────────────────────────────────────
+  const signIn = useCallback(async (phoneNumber: string) => {
+    const now = Date.now().toString();
 
-  const signIn = async (phoneNumber: string) => {
-    try {
-      console.log('[AuthContext] Starting signIn for:', phoneNumber);
-      const now = Date.now().toString();
-      
-      // Save basic session data to AsyncStorage
-      await AsyncStorage.multiSet([
-        [KEYS.phone,      phoneNumber],
-        [KEYS.signedIn,   'true'],
-        [KEYS.lastActive, now],
-      ]);
-      console.log('[AuthContext] Session data saved to AsyncStorage');
-      
-      // Fetch user profile from Firestore and populate displayName and avatarUri
-      try {
-        const currentUser = getAuth().currentUser;
-        
-        console.log('[AuthContext] Current Firebase user:', currentUser?.uid);
-        
-        if (currentUser) {
-          const userRef = doc(db, 'users', currentUser.uid);
-          console.log('[AuthContext] Fetching user profile from Firestore...');
-          
-          const userSnap = await getDoc(userRef);
-          
-          if (userSnap.exists()) {
-            const userData = userSnap.data();
-            const firestoreDisplayName = userData.displayName || '';
-            const firestorePhotoURL = userData.photoURL || null;
-            
-            console.log('[AuthContext] Profile found in Firestore:', {
-              displayName: firestoreDisplayName,
-              photoURL: firestorePhotoURL,
-            });
-            
-            // Update state
-            if (firestoreDisplayName) {
-              setDisplayNameState(firestoreDisplayName);
-              await AsyncStorage.setItem(KEYS.displayName, firestoreDisplayName);
-            }
-            
-            if (firestorePhotoURL) {
-              setAvatarUriState(firestorePhotoURL);
-              await AsyncStorage.setItem(KEYS.avatarUri, firestorePhotoURL);
-            }
-          } else {
-            console.log('[AuthContext] No user profile found in Firestore');
-          }
-        } else {
-          console.warn('[AuthContext] No Firebase user found after sign-in');
-        }
-      } catch (error: any) {
-        console.error('[AuthContext] Error fetching user profile from Firestore:', error);
-        // Check if it's an offline error
-        if (error?.code === 'unavailable' || error?.message?.includes('offline')) {
-          console.warn('[AuthContext] Firestore offline - continuing with sign-in');
-        }
-        // Continue with sign-in even if profile fetch fails
-      }
-      
-      setPhone(phoneNumber);
-      setIsSignedIn(true);
-      console.log('[AuthContext] Sign-in completed successfully - isSignedIn state updated to true');
-      console.log('[AuthContext] Current state - phone:', phoneNumber, 'isSignedIn:', true);
-      
-      // Mark the user online
-      const currentUser = getAuth().currentUser;
-      if (currentUser) writePresence(currentUser.uid, true).catch(() => {});
+    // Persist session immediately — navigator can respond right away
+    await AsyncStorage.multiSet([
+      [KEYS.phone,      phoneNumber],
+      [KEYS.signedIn,   'true'],
+      [KEYS.lastActive, now],
+    ]);
 
-      // Start status cleanup service
+    setPhone(phoneNumber);
+    setIsSignedIn(true);
+
+    // Fire-and-forget: fetch displayName/avatar in background — does NOT block navigation
+    const currentUser = getAuth().currentUser;
+    if (currentUser) {
+      const fsDb = db as ReturnType<typeof firestore>;
+      fsDb.collection('users').doc(currentUser.uid).get().then((snap) => {
+        if (!snap.exists) return;
+        const data = snap.data()!;
+        const name  = data.displayName || '';
+        const photo = data.photoURL    || null;
+        if (name)  { setDisplayNameState(name);  AsyncStorage.setItem(KEYS.displayName, name); }
+        if (photo) { setAvatarUriState(photo);   AsyncStorage.setItem(KEYS.avatarUri, photo); }
+      }).catch(() => {});
+
+      // Mark online and start cleanup — non-blocking
+      writePresence(currentUser.uid, true).catch(() => {});
       startStatusCleanupService();
-      
-      if (Platform.OS === 'web') {
-        scheduleWebExpiry(WEB_SESSION_TIMEOUT_MS);
-      }
-    } catch (error: any) {
-      console.error('[AuthContext] Critical error during signIn:', error);
-      throw error; // Re-throw to let SignInScreen handle it
     }
-  };
 
-  const setDisplayName = async (name: string) => {
+    if (Platform.OS === 'web') scheduleWebExpiry(WEB_SESSION_TIMEOUT_MS);
+  }, [scheduleWebExpiry]);
+
+  const setDisplayName = useCallback(async (name: string) => {
     setDisplayNameState(name);
     await AsyncStorage.setItem(KEYS.displayName, name);
-  };
+  }, []);
 
-  const setAvatarUri = async (uri: string) => {
+  const setAvatarUri = useCallback(async (uri: string) => {
     setAvatarUriState(uri);
     await AsyncStorage.setItem(KEYS.avatarUri, uri);
-  };
+  }, []);
 
-  const signOut = async () => {
-    await doSignOut();
-  };
+  const signOut = useCallback(async () => { await doSignOut(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const refreshActivity = useCallback(() => {
     if (Platform.OS !== 'web' || !isSignedIn) return;
-    const now = Date.now().toString();
-    AsyncStorage.setItem(KEYS.lastActive, now);
+    AsyncStorage.setItem(KEYS.lastActive, Date.now().toString());
     scheduleWebExpiry(WEB_SESSION_TIMEOUT_MS);
   }, [isSignedIn, scheduleWebExpiry]);
 
+  // ── Memoized context value — only re-creates when a meaningful value changes
+  const value = useMemo<AuthContextValue>(() => ({
+    isSignedIn, phone, displayName, setDisplayName,
+    avatarUri, setAvatarUri,
+    signIn, signOut, refreshActivity, loading,
+    user,
+    userId: user?.uid ?? null,
+  }), [isSignedIn, phone, displayName, avatarUri, loading, signIn, signOut, setDisplayName, setAvatarUri, refreshActivity, user]);
+
   return (
-    <AuthContext.Provider value={{
-      isSignedIn, phone, displayName, setDisplayName,
-      avatarUri, setAvatarUri,
-      signIn, signOut, refreshActivity, loading,
-    }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );
 }
 
 export function useAuth() {
+
   return useContext(AuthContext);
 }

@@ -11,7 +11,7 @@
 //
 import { useState, useRef, useMemo } from 'react';
 import {
-  View, TextInput, TouchableOpacity, Image,
+  View, Text, TextInput, TouchableOpacity, Image,
   StyleSheet, ScrollView, KeyboardAvoidingView,
   Platform, ActivityIndicator, Modal, FlatList,
 } from 'react-native';
@@ -133,12 +133,12 @@ export default function SignInScreen() {
   const [country, setCountry] = useState<Country>(DEFAULT_COUNTRY);
   const [localNumber, setLocalNumber] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [otp, setOtp] = useState(['', '', '', '', '', '']);
+  const [otp, setOtp] = useState('');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [resendTimer, setResendTimer] = useState(0);
 
-  const otpRefs = useRef<Array<TextInput | null>>([null, null, null, null, null, null]);
+  const otpInputRef = useRef<TextInput>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const rawDigits = localNumber.replace(/\D/g, '');
@@ -186,7 +186,7 @@ export default function SignInScreen() {
   // ── Step 2: Verify OTP ────────────────────────────────────────────────────
 
   const handleVerifyOtp = async () => {
-    const code = otp.join('');
+    const code = otp;
     if (code.length < 6) { setErrorMsg('Enter all 6 digits.'); return; }
     setErrorMsg('');
     setLoading(true);
@@ -215,8 +215,8 @@ export default function SignInScreen() {
       } else {
         console.log('[SignInScreen] OTP verification failed:', authError);
         setErrorMsg(authError || 'Incorrect code. Please try again.');
-        setOtp(['', '', '', '', '', '']);
-        otpRefs.current[0]?.focus();
+        setOtp('');
+        otpInputRef.current?.focus();
         setLoading(false);
       }
     } catch (err: any) {
@@ -226,29 +226,16 @@ export default function SignInScreen() {
     }
   };
 
-  // ── OTP input helpers ─────────────────────────────────────────────────────
-
-  const handleOtpChange = (text: string, index: number) => {
-    const digit = text.replace(/\D/g, '').slice(-1);
-    const next = [...otp];
-    next[index] = digit;
-    setOtp(next);
-    if (digit && index < 5) otpRefs.current[index + 1]?.focus();
-    if (!digit && index > 0 && text === '') otpRefs.current[index - 1]?.focus();
-  };
-
-  const handleOtpKeyPress = (key: string, index: number) => {
-    if (key === 'Backspace' && !otp[index] && index > 0) {
-      const next = [...otp];
-      next[index - 1] = '';
-      setOtp(next);
-      otpRefs.current[index - 1]?.focus();
-    }
+  // ── OTP input helper ──────────────────────────────────────────────────────
+  const handleOtpChange = (text: string) => {
+    const digits = text.replace(/\D/g, '').slice(0, 6);
+    setOtp(digits);
+    if (digits.length === 6) handleVerifyOtp();
   };
 
   const handleResend = async () => {
     if (resendTimer > 0) return;
-    setOtp(['', '', '', '', '', '']);
+    setOtp('');
     setErrorMsg('');
     setLoading(true);
     try {
@@ -345,7 +332,7 @@ export default function SignInScreen() {
                 </>
               ) : (
                 <>
-                  <TouchableOpacity style={styles.backRow} onPress={() => { setStep('phone'); setErrorMsg(''); setOtp(['', '', '', '', '', '']); }}>
+                  <TouchableOpacity style={styles.backRow} onPress={() => { setStep('phone'); setErrorMsg(''); setOtp(''); }}>
                     <AppIcon name="chevron-back" size={18} color={COLORS.blue} fixedColor />
                     <AppText style={styles.backText}>Change number</AppText>
                   </TouchableOpacity>
@@ -356,22 +343,41 @@ export default function SignInScreen() {
                     <AppText style={styles.phoneHighlight}>{fullNumber}</AppText>
                   </AppText>
 
-                  <View style={styles.otpRow}>
-                    {otp.map((digit, i) => (
-                      <TextInput
-                        key={i}
-                        ref={(el) => { otpRefs.current[i] = el; }}
-                        style={[styles.otpBox, digit ? styles.otpBoxFilled : null]}
-                        value={digit}
-                        onChangeText={(t) => handleOtpChange(t, i)}
-                        onKeyPress={({ nativeEvent }) => handleOtpKeyPress(nativeEvent.key, i)}
-                        keyboardType="number-pad"
-                        maxLength={1}
-                        textAlign="center"
-                        selectTextOnFocus
-                      />
-                    ))}
-                  </View>
+                  {/* Single hidden input captures all 6 digits + autofill */}
+                  <TextInput
+                    ref={otpInputRef}
+                    style={styles.otpHiddenInput}
+                    value={otp}
+                    onChangeText={handleOtpChange}
+                    keyboardType="number-pad"
+                    maxLength={6}
+                    autoComplete="one-time-code"
+                    textContentType="oneTimeCode"
+                    autoFocus
+                  />
+
+                  <TouchableOpacity
+                    activeOpacity={1}
+                    style={styles.otpRow}
+                    onPress={() => otpInputRef.current?.focus()}
+                  >
+                    {[0,1,2,3,4,5].map((i) => {
+                      const digit = otp[i] || '';
+                      const isFocused = otp.length === i;
+                      return (
+                        <View
+                          key={i}
+                          style={[styles.otpBox, digit ? styles.otpBoxFilled : (isFocused ? styles.otpBoxFocused : null)]}
+                        >
+                          {digit ? (
+                            <Text style={styles.otpDigitText}>{digit}</Text>
+                          ) : (
+                            <View style={[styles.otpCaret, !isFocused && { opacity: 0 }]} />
+                          )}
+                        </View>
+                      );
+                    })}
+                  </TouchableOpacity>
 
                   {errorMsg ? <AppText style={styles.error}>{errorMsg}</AppText> : null}
 
@@ -547,29 +553,46 @@ const styles = StyleSheet.create({
   otpRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    gap: 6,
     marginBottom: 16,
   },
   otpBox: {
-    width: 48,
-    height: 58,
+    width: 46,
+    height: 54,
     borderRadius: RADIUS.md,
-    fontSize: 24,
-    fontWeight: '700',
-    color: COLORS.text,
-    textAlign: 'center',
-    textAlignVertical: 'center',
-    lineHeight: 58,
-    paddingVertical: 0,
-    paddingHorizontal: 0,
     backgroundColor: 'rgba(30,156,240,0.06)',
     borderWidth: 1,
     borderColor: 'rgba(30,156,240,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
   },
   otpBoxFilled: {
     borderColor: COLORS.blue,
     backgroundColor: 'rgba(30,156,240,0.12)',
-    shadowColor: COLORS.blue,
-    shadowOpacity: 0.30,
+  },
+  otpBoxFocused: {
+    borderColor: COLORS.blue,
+    borderWidth: 2,
+  },
+  otpHiddenInput: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+  },
+  otpDigitText: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: COLORS.text,
+    lineHeight: 24,
+    includeFontPadding: false,
+  } as any,
+  otpCaret: {
+    width: 2,
+    height: 20,
+    backgroundColor: COLORS.blue,
+    borderRadius: 1,
   },
 
   resendRow: { flexDirection: 'row', justifyContent: 'center', marginTop: 16 },

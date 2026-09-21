@@ -1,44 +1,28 @@
 // ─── useNotificationSync Hook ─────────────────────────────────────────────────
-// Syncs real-time events from Firestore to the notification system.
-// Listens for:
-//   • New messages in all user's chats
-//   • Incoming calls (missed/rejected)
-//   • System events (optional)
+// Syncs real-time Firestore events to the notification system.
 
 import { useEffect, useRef } from 'react';
-import {
-  collection, query, where, orderBy,
-  onSnapshot, Timestamp, Unsubscribe, doc, getDoc,
-} from 'firebase/firestore';
+import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
-import type { AppNotification, NotifType } from '../context/NotificationContext';
+import type { AppNotification } from '../context/NotificationContext';
 import { resolveNotificationName } from '../utils/resolveNotificationName';
 
-interface LastMessageTimestamp {
-  [chatId: string]: Date;
-}
-
+interface LastMessageTimestamp { [chatId: string]: Date; }
 type PushNotificationFn = (n: Omit<AppNotification, 'id' | 'time' | 'read'>) => void;
 
 export function useNotificationSync(userId: string | null, pushNotification: PushNotificationFn) {
+  const pushNotificationRef      = useRef(pushNotification);
+  const lastMessageTimestamps    = useRef<LastMessageTimestamp>({});
+  const unsubscribers            = useRef<(() => void)[]>([]);
+  const isInitialLoad            = useRef(true);
 
-  // ── Keep a ref to always have the latest pushNotification ────────
-  const pushNotificationRef = useRef(pushNotification);
-  useEffect(() => {
-    pushNotificationRef.current = pushNotification;
-  });
-
-  const lastMessageTimestamps = useRef<LastMessageTimestamp>({});
-  const unsubscribers = useRef<Unsubscribe[]>([]);
-  const isInitialLoad = useRef(true);
+  useEffect(() => { pushNotificationRef.current = pushNotification; });
 
   useEffect(() => {
     console.log('[useNotificationSync] Effect triggered, userId:', userId);
-    
+
     if (!userId) {
-      console.log('[useNotificationSync] No userId, cleaning up');
-      // Cleanup all listeners
-      unsubscribers.current.forEach(unsub => unsub());
+      unsubscribers.current.forEach((u) => u());
       unsubscribers.current = [];
       lastMessageTimestamps.current = {};
       isInitialLoad.current = true;
@@ -47,211 +31,132 @@ export function useNotificationSync(userId: string | null, pushNotification: Pus
 
     console.log('[useNotificationSync] Setting up listeners for userId:', userId);
 
-    // ── 1. Listen for new messages in user's chats ────────────────
-    const chatsQuery = query(
-      collection(db, 'chats'),
-      where('members', 'array-contains', userId),
-    );
+    const fsDb = db as ReturnType<typeof firestore>;
 
-    const unsubChats = onSnapshot(
-      chatsQuery, 
-      async (chatsSnap) => {
-        console.log('[useNotificationSync] Chats snapshot received, docs:', chatsSnap.docs.length, 'isInitialLoad:', isInitialLoad.current);
-        
-        if (isInitialLoad.current) {
-          // On first load, just store timestamps - don't show notifications
-          chatsSnap.docs.forEach((chatDoc) => {
-            const chatData = chatDoc.data();
-            const lastMsg = chatData.lastMessage;
-            if (lastMsg?.timestamp) {
-              lastMessageTimestamps.current[chatDoc.id] = 
-                (lastMsg.timestamp as Timestamp).toDate();
-              console.log('[useNotificationSync] Stored initial timestamp for chat:', chatDoc.id);
-            }
-          });
-          isInitialLoad.current = false;
-          console.log('[useNotificationSync] Initial load complete, will notify on next change');
-          return;
-        }
+    // ── 1. New messages ───────────────────────────────────────────
+    const unsubChats = fsDb
+      .collection('chats')
+      .where('members', 'array-contains', userId)
+      .onSnapshot(
+        async (chatsSnap) => {
+          if (isInitialLoad.current) {
+            chatsSnap.docs.forEach((chatDoc) => {
+              const lm = chatDoc.data().lastMessage;
+              if (lm?.timestamp) {
+                lastMessageTimestamps.current[chatDoc.id] =
+                  typeof lm.timestamp.toDate === 'function'
+                    ? lm.timestamp.toDate()
+                    : new Date(lm.timestamp);
+              }
+            });
+            isInitialLoad.current = false;
+            return;
+          }
 
-        console.log('[useNotificationSync] Processing chat updates, changes:', chatsSnap.docChanges().length);
+          for (const change of chatsSnap.docChanges()) {
+            if (change.type !== 'modified' && change.type !== 'added') continue;
+            const chatId   = change.doc.id;
+            const chatData = change.doc.data();
+            const lastMsg  = chatData.lastMessage;
 
-        // Process only modified or added chats
-        for (const change of chatsSnap.docChanges()) {
-          if (change.type === 'modified' || change.type === 'added') {
-            const chatDoc = change.doc;
-            const chatId = chatDoc.id;
-            const chatData = chatDoc.data();
-            const lastMsg = chatData.lastMessage;
+            if (!lastMsg?.timestamp) continue;
 
-            console.log('[useNotificationSync] Chat change:', change.type, 'chatId:', chatId, 'lastMsg:', lastMsg);
-
-            if (!lastMsg || !lastMsg.timestamp) {
-              console.log('[useNotificationSync] No lastMessage or timestamp, skipping');
-              continue;
-            }
-
-            const lastMsgTime = (lastMsg.timestamp as Timestamp).toDate();
+            const lastMsgTime  = typeof lastMsg.timestamp.toDate === 'function'
+              ? lastMsg.timestamp.toDate() : new Date(lastMsg.timestamp);
             const lastKnownTime = lastMessageTimestamps.current[chatId];
 
-            console.log('[useNotificationSync] Chat:', chatId, 'senderId:', lastMsg.senderId, 'currentUserId:', userId, 'lastMsgTime:', lastMsgTime, 'lastKnownTime:', lastKnownTime);
-
-            // Check if this is a new message (not from current user)
             if (
               lastMsg.senderId !== userId &&
               (!lastKnownTime || lastMsgTime > lastKnownTime)
             ) {
-              console.log('[useNotificationSync] NEW MESSAGE DETECTED! Chat:', chatId);
-              
-              // Update timestamp
               lastMessageTimestamps.current[chatId] = lastMsgTime;
-
-              // Fetch sender info for notification
               try {
-                const senderDoc = await getDoc(doc(db, 'users', lastMsg.senderId));
-                if (!senderDoc.exists()) {
-                  console.log('[useNotificationSync] Sender not found');
-                  continue;
-                }
-                
-                const senderPhone = senderDoc.data().phone;
-                const senderName = await resolveNotificationName(senderPhone);
+                const senderSnap = await fsDb.collection('users').doc(lastMsg.senderId).get();
+                if (!senderSnap.exists) continue;
+                const senderPhone = senderSnap.data()!.phone;
+                const senderName  = await resolveNotificationName(senderPhone);
+                const chatName    = chatData.type === 'group' && chatData.groupName
+                  ? chatData.groupName : senderName;
 
-                console.log('[useNotificationSync] Sender phone:', senderPhone, 'Resolved name:', senderName);
-
-                // Determine chat name
-                let chatName = senderName;
-                if (chatData.type === 'group' && chatData.groupName) {
-                  chatName = chatData.groupName;
-                }
-
-                const notificationData = {
-                  type: 'message' as const,
+                await pushNotificationRef.current({
+                  type:  'message',
                   title: chatName,
-                  body: chatData.type === 'group' 
+                  body:  chatData.type === 'group'
                     ? `${senderName}: ${lastMsg.text || 'Sent a media file'}`
                     : (lastMsg.text || 'Sent a media file'),
                   contactId: chatData.type === 'direct' ? lastMsg.senderId : undefined,
-                };
-
-                console.log('[useNotificationSync] Pushing notification:', notificationData);
-                console.log('[useNotificationSync] pushNotification function:', typeof pushNotification, pushNotification ? 'defined' : 'undefined');
-
-                // Push notification via ref to avoid stale closure
-                try {
-                  await pushNotificationRef.current(notificationData);
-                  console.log('[useNotificationSync] Notification pushed successfully');
-                } catch (err) {
-                  console.error('[useNotificationSync] Error pushing notification:', err);
-                }
+                });
               } catch (err) {
                 console.error('[useNotificationSync] Error fetching sender info:', err);
               }
-            } else {
-              console.log('[useNotificationSync] Message not new or from current user, skipping');
             }
           }
-        }
-      },
-      (error) => {
-        console.error('[useNotificationSync] Error in chats listener:', error);
-      }
-    );
+        },
+        (error) => console.error('[useNotificationSync] Error in chats listener:', error),
+      );
 
     unsubscribers.current.push(unsubChats);
 
-    // ── 2. Listen for missed/rejected calls ───────────────────────
-    // Note: This query requires a compound index in Firestore
-    // If index is not created yet, call notifications won't work but message notifications will
+    // ── 2. Missed / rejected calls ────────────────────────────────
     try {
-      const callHistoryQuery = query(
-        collection(db, 'users', userId, 'callHistory'),
-        where('direction', '==', 'incoming'),
-        where('status', 'in', ['missed', 'rejected']),
-        orderBy('timestamp', 'desc'),
-      );
-
       const lastCallCheck = new Date();
       console.log('[useNotificationSync] Setting up call history listener, will notify for calls after:', lastCallCheck);
-      
-      const unsubCalls = onSnapshot(
-        callHistoryQuery, 
-        (callsSnap) => {
-          console.log('[useNotificationSync] Call history snapshot, changes:', callsSnap.docChanges().length);
-          
-          callsSnap.docChanges().forEach(async (change) => {
-            console.log('[useNotificationSync] Call change type:', change.type);
-            
-            if (change.type === 'added') {
+
+      const unsubCalls = fsDb
+        .collection('users').doc(userId).collection('callHistory')
+        .where('direction', '==', 'incoming')
+        .where('status', 'in', ['missed', 'rejected'])
+        .orderBy('timestamp', 'desc')
+        .onSnapshot(
+          async (callsSnap) => {
+            for (const change of callsSnap.docChanges()) {
+              if (change.type !== 'added') continue;
               const callData = change.doc.data();
-              const callTime = callData.timestamp 
-                ? (callData.timestamp as Timestamp).toDate()
+              const callTime = callData.timestamp
+                ? (typeof callData.timestamp.toDate === 'function'
+                    ? callData.timestamp.toDate()
+                    : new Date(callData.timestamp))
                 : new Date();
 
-              console.log('[useNotificationSync] New call added, callTime:', callTime, 'lastCallCheck:', lastCallCheck);
+              if (callTime <= lastCallCheck) continue;
 
-              // Only notify for calls after we started listening
-              if (callTime > lastCallCheck) {
-                const callType = callData.type === 'video' ? 'Video Call' : 'Call';
-                const status = callData.status === 'missed' ? 'Missed' : 'Rejected';
-                
-                // Resolve caller name from contacts
-                let callerName = 'Unknown';
-                try {
-                  if (callData.otherParty?.userId) {
-                    const callerDoc = await getDoc(doc(db, 'users', callData.otherParty.userId));
-                    if (callerDoc.exists()) {
-                      const callerPhone = callerDoc.data().phone;
-                      callerName = await resolveNotificationName(callerPhone);
-                      console.log('[useNotificationSync] Caller phone:', callerPhone, 'Resolved name:', callerName);
-                    }
+              const callType = callData.type === 'video' ? 'Video Call' : 'Call';
+              const status   = callData.status === 'missed' ? 'Missed' : 'Rejected';
+              let callerName = 'Unknown';
+
+              try {
+                if (callData.otherParty?.userId) {
+                  const callerSnap = await fsDb.collection('users').doc(callData.otherParty.userId).get();
+                  if (callerSnap.exists) {
+                    callerName = await resolveNotificationName(callerSnap.data()!.phone);
                   }
-                } catch (err) {
-                  console.error('[useNotificationSync] Error resolving caller name:', err);
                 }
-
-                const notificationData = {
-                  type: 'call' as const,
-                  title: `${status} ${callType}`,
-                  body: `${callerName} tried to ${callData.type === 'video' ? 'video ' : ''}call you`,
-                  contactId: callData.otherParty?.userId,
-                };
-
-                console.log('[useNotificationSync] Pushing call notification:', notificationData);
-                
-                try {
-                  pushNotificationRef.current(notificationData);
-                  console.log('[useNotificationSync] Call notification pushed');
-                } catch (err) {
-                  console.error('[useNotificationSync] Error pushing call notification:', err);
-                }
-              } else {
-                console.log('[useNotificationSync] Call is older than listener start time, skipping');
+              } catch (err) {
+                console.error('[useNotificationSync] Error resolving caller name:', err);
               }
+
+              pushNotificationRef.current({
+                type:      'call',
+                title:     `${status} ${callType}`,
+                body:      `${callerName} tried to ${callData.type === 'video' ? 'video ' : ''}call you`,
+                contactId: callData.otherParty?.userId,
+              });
             }
-          });
-        },
-        (error) => {
-          console.error('[useNotificationSync] Error in call history listener:', error);
-          // Don't throw - let message notifications continue to work
-        }
-      );
+          },
+          (error) => console.error('[useNotificationSync] Error in call history listener:', error),
+        );
 
       unsubscribers.current.push(unsubCalls);
       console.log('[useNotificationSync] Call history listener set up successfully');
     } catch (error) {
-      console.error('[useNotificationSync] Failed to set up call history listener (index may be missing):', error);
-      console.log('[useNotificationSync] Continuing with message notifications only');
-      // Continue execution - message notifications will still work
+      console.error('[useNotificationSync] Failed to set up call history listener:', error);
     }
 
     console.log('[useNotificationSync] All listeners set up successfully');
-
-    // Cleanup on unmount
     return () => {
       console.log('[useNotificationSync] Cleaning up listeners');
-      unsubscribers.current.forEach(unsub => unsub());
+      unsubscribers.current.forEach((u) => u());
       unsubscribers.current = [];
     };
-  }, [userId]); // Only re-run when userId changes — pushNotification is accessed via ref
+  }, [userId]);
 }

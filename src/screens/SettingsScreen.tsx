@@ -1,6 +1,6 @@
 ﻿// ─── Screen: Settings ────────────────────────────────────────────────────────
 import React from 'react';
-import { View, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
+import { View, TouchableOpacity, StyleSheet, ScrollView, Linking } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -24,7 +24,6 @@ const SETTINGS_SECTIONS: {
       { id: 'account',       icon: 'person-outline',        label: 'Account'       },
       { id: 'privacy',       icon: 'lock-closed-outline',   label: 'Privacy'       },
       { id: 'notifications', icon: 'notifications-outline', label: 'Notifications' },
-      { id: 'chat',          icon: 'chatbubble-outline',    label: 'Chat'          },
     ],
   },
   {
@@ -35,8 +34,8 @@ const SETTINGS_SECTIONS: {
   },
   {
     items: [
-      { id: 'help',  icon: 'help-circle-outline',        label: 'Help & Support' },
-      { id: 'about', icon: 'information-circle-outline', label: 'About'          },
+      { id: 'help',           icon: 'help-circle-outline',   label: 'Help & Support'  },
+      { id: 'privacypolicy',  icon: 'shield-checkmark-outline', label: 'Privacy Policy' },
     ],
   },
   {
@@ -52,12 +51,14 @@ export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
 
   const handleItem = (id: string) => {
-    if (id === 'signout')    { signOut(); return; }
-    if (id === 'appearance') navigation.navigate('Appearance');
+    if (id === 'signout')       { signOut(); return; }
+    if (id === 'appearance')    navigation.navigate('Appearance');
     if (id === 'account')       navigation.navigate('AccountSettings');
     if (id === 'privacy')       navigation.navigate('PrivacySettings');
     if (id === 'notifications') navigation.navigate('NotificationSettings');
     if (id === 'devices')       navigation.navigate('LinkedDevices');
+    if (id === 'help')          Linking.openURL('https://chit-chat-67a7f.web.app/support.html');
+    if (id === 'privacypolicy') Linking.openURL('https://chit-chat-67a7f.web.app/privacy.html');
   };
 
   return (
