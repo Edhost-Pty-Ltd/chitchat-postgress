@@ -63,9 +63,12 @@ export function ParticipantPickerSheet({
     const base = excludeIds.length
       ? contacts.filter(c => !excludeIds.includes(c.userId))
       : contacts;
-    if (!search.trim()) return base;
+    // Only show registered ChitChat users — they have a real Firebase UID
+    // (unregistered contacts have a phone number as userId and can't be invited)
+    const registered = base.filter(c => c.isSaved);
+    if (!search.trim()) return registered;
     const q = search.toLowerCase();
-    return base.filter(c =>
+    return registered.filter(c =>
       c.displayName.toLowerCase().includes(q) || c.phone.includes(q)
     );
   }, [contacts, search, excludeIds]);
@@ -164,7 +167,7 @@ export function ParticipantPickerSheet({
               <View style={styles.centerPad}>
                 <AppIcon name="people-outline" size={40} color={COLORS.sub} />
                 <AppText style={{ color: COLORS.sub, fontSize: 14, marginTop: 10, textAlign: 'center' }}>
-                  {error ?? 'No contacts found on ChitChat'}
+                  {error ?? 'No ChitChat users found in your contacts'}
                 </AppText>
               </View>
             }

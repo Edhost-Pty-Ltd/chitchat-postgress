@@ -312,13 +312,25 @@ export default function VideoCallScreen() {
       if (!data) return;
       if (data.endDate) setMeetingEndTime(data.endDate.toDate());
       if (data.date)    setMeetingStartTime(data.date.toDate());
-      // If organizer marked ended, show report locally
-      if (data.endedAt && !reportOpen) {
-        buildAndShowReport(data).catch(() => {});
+
+      // Meeting ended for all — navigate everyone (including non-organizers) away
+      if (data.endedAt && data.isActive === false) {
+        if (isOrganizer) {
+          // Organizer sees the report
+          if (!reportOpen) buildAndShowReport(data).catch(() => {});
+        } else {
+          // Participants get a brief alert then go back to Calendar
+          Alert.alert(
+            'Meeting ended',
+            'The organizer has ended this meeting.',
+            [{ text: 'OK', onPress: () => navigation.goBack() }],
+            { cancelable: false }
+          );
+        }
       }
     });
     return () => unsub();
-  }, [isMeeting, meetingId]); // eslint-disable-line
+  }, [isMeeting, meetingId, isOrganizer]); // eslint-disable-line
 
   // ── Join meeting presence on mount ──────────────────────────────
   useEffect(() => {
@@ -795,9 +807,38 @@ export default function VideoCallScreen() {
 
   // ── Add participants (from sheet, sourced from phone contacts) ──
   const handleAddParticipants = useCallback(async (ids: string[]) => {
-    if (!ids.length) return;
+    if (!ids.length || !user?.uid || !meetingId) return;
+
+    // 1. Add to the Firestore meeting document so they can see it in Calendar
     await addParticipants(ids);
-  }, [addParticipants]);
+
+    // 2. Ring each newly added participant so they get an incoming call
+    //    that drops them straight into the meeting.
+    const callerName = user.displayName || user.phoneNumber || 'Meeting Host';
+    const meetingTitle = meetingTitleFallback(routeMeetingTitle, 'Meeting');
+
+    for (const calleeId of ids) {
+      try {
+        await initiateOutgoingCall(
+          user.uid,
+          calleeId,
+          {
+            userId: user.uid,
+            displayName: callerName,
+            photoUrl: user.photoURL ?? null,
+          },
+          {
+            userId: calleeId,
+            displayName: meetingTitle,
+            photoUrl: null,
+          },
+          'video'
+        );
+      } catch (err) {
+        console.warn('[VideoCall] Failed to ring participant', calleeId, err);
+      }
+    }
+  }, [addParticipants, initiateOutgoingCall, user, meetingId, routeMeetingTitle]);
 
   const excludeIds = useMemo(
     () => room.participants.filter(id => id !== user?.uid),
@@ -1361,8 +1402,7 @@ export default function VideoCallScreen() {
           onClose={() => setChatOpen(false)}
         />
       )}
-
-      {/* ── Add participant sheet (sourced from phone contacts) ── */}
+ 
       {isMeeting && (
         <ParticipantPickerSheet
           visible={addOpen}

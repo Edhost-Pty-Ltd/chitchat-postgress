@@ -120,7 +120,11 @@ export function useContacts() {
         const registeredUser = registeredUsers.get(phone);
 
         appContacts.push({
-          userId:           phone,  // Use phone number as unique ID
+          // Use the Firebase UID for registered users so that Firestore
+          // `participants` array contains UIDs, matching the
+          // `where('participants', 'array-contains', user.uid)` query.
+          // Fall back to phone number for unregistered contacts.
+          userId:           registeredUser?.userId ?? phone,
           phone,
           displayName:      contactInfo.name,
           isSaved:          !!registeredUser,

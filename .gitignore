@@ -95,3 +95,4 @@ CALLER_INFO_FIX.md
 
 # Kiro spec folders (keep if collaborators use Kiro, otherwise uncomment)
 .kiro/specs/user-registration/
+/.env.local

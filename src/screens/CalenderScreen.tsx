@@ -27,6 +27,7 @@ import { RootStackParamList } from '../types';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 
 const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
+const HOUR_HEIGHT = 70; // Height per hour in the timeline
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'Calendar'>;
 
@@ -63,11 +64,16 @@ const stringToColor = (str: string) => {
   let h = 0; for (let i = 0; i < str.length; i++) h = str.charCodeAt(i) + ((h << 5) - h);
   return c[Math.abs(h) % c.length];
 };
+const hexToRgba = (hex: string, alpha: number) => {
+  const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
 const getInitials = (n: string) => {
   const p = n.trim().split(' ');
   return p.length >= 2 ? (p[0][0] + p[p.length - 1][0]).toUpperCase() : n.slice(0, 2).toUpperCase();
 };
 const formatTime = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const formatTimeSmall = (d: Date) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const formatDate = (d: Date) => d.toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' });
 const formatDateFull = (d: Date) => d.toLocaleDateString([], { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
 const calcDuration = (s: Date, e: Date) => {
@@ -86,6 +92,11 @@ const getEndTime = (m: Meeting): Date => m.endDate ?? deriveEnd(m.date, m.durati
 const isMeetingActive = (m: Meeting, now: Date) => m.isActive && now >= m.date && now <= getEndTime(m);
 const isMeetingPast   = (m: Meeting, now: Date) => !m.isActive || getEndTime(m) < now;
 
+const isSameDay = (d1: Date, d2: Date) => 
+  d1.getFullYear() === d2.getFullYear() && 
+  d1.getMonth() === d2.getMonth() && 
+  d1.getDate() === d2.getDate();
+
 const fmtRemaining = (ms: number) => {
   if (ms <= 0) return 'Ending…';
   const totalSec = Math.floor(ms / 1000);
@@ -96,6 +107,35 @@ const fmtRemaining = (ms: number) => {
   if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s left`;
   return `${s}s left`;
 };
+
+const getWeekDays = (date: Date) => {
+  const start = new Date(date);
+  start.setDate(start.getDate() - (start.getDay() === 0 ? 6 : start.getDay() - 1));
+  return Array.from({length: 7}).map((_, i) => {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    return d;
+  });
+};
+
+// Returns all Date cells for a month grid (Mon–Sun, padded with nulls)
+const getMonthGrid = (month: Date): (Date | null)[] => {
+  const year = month.getFullYear();
+  const m = month.getMonth();
+  const firstDay = new Date(year, m, 1);
+  const lastDay  = new Date(year, m + 1, 0);
+  // Monday-indexed: Mon=0 … Sun=6
+  const startPad = (firstDay.getDay() + 6) % 7;
+  const cells: (Date | null)[] = Array(startPad).fill(null);
+  for (let d = 1; d <= lastDay.getDate(); d++) {
+    cells.push(new Date(year, m, d));
+  }
+  // pad end to complete last row
+  while (cells.length % 7 !== 0) cells.push(null);
+  return cells;
+};
+
+const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 
 function LiveDot({ size = 10 }: { size?: number }) {
   const pulse = useRef(new Animated.Value(0)).current;
@@ -133,7 +173,7 @@ function ContactAvatar({ contact, size = 36 }: { contact: AppContact; size?: num
   );
 }
 
-// ─── Meeting Row ─────────────────────────────────────────────────────────────
+// ─── Meeting Row (For Past tab) ──────────────────────────────────────────────
 const MeetingRow = React.memo(function MeetingRow({
   item, bevel, textColor, fontFamily, FGsecondary, isOrganizer, isActive, isPast,
   onPress, onJoin, remainingLabel,
@@ -145,7 +185,7 @@ const MeetingRow = React.memo(function MeetingRow({
 
   const handlePress = () => {
     if (isActive) { onJoin(); return; }
-    onPress(); // always open the detail sheet — it handles past, upcoming, and minutes
+    onPress(); 
   };
 
   return (
@@ -265,7 +305,7 @@ function NewMeetingSheet({
     setCreating(true);
     const allParticipants = Array.from(new Set([userId, ...participantIds]));
     try {
-      await firestore().collection('meetings').add({
+      const meetingRef = await firestore().collection('meetings').add({
         title,
         date: firestore.Timestamp.fromDate(startTime),
         endDate: firestore.Timestamp.fromDate(endTime),
@@ -280,11 +320,14 @@ function NewMeetingSheet({
         isActive: true,
         createdAt: firestore.FieldValue.serverTimestamp(),
       });
+
       const now = new Date();
+      const scheduledIds: string[] = [];
+
       for (const mins of REMINDER_MILESTONES) {
         const t = new Date(startTime.getTime() - mins * 60000);
         if (t > now) {
-          await Notifications.scheduleNotificationAsync({
+          const id = await Notifications.scheduleNotificationAsync({
             content: {
               title: 'Meeting Reminder',
               body: `"${title}" starts in ${mins === 60 ? '1 hour' : `${mins} minutes`}.`,
@@ -292,19 +335,23 @@ function NewMeetingSheet({
             },
             trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: t },
           });
+          scheduledIds.push(id);
         }
       }
+
       const startNudge = new Date(startTime.getTime() + 60 * 1000);
       if (startNudge > now) {
-        await Notifications.scheduleNotificationAsync({
+        const id = await Notifications.scheduleNotificationAsync({
           content: { title: 'Meeting starting now', body: `"${title}" — tap to join.`, sound: true },
           trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: startNudge },
         });
+        scheduledIds.push(id);
       }
+
       for (let i = 5; i <= 30; i += 5) {
         const t = new Date(startTime.getTime() + i * 60000);
         if (t > now) {
-          await Notifications.scheduleNotificationAsync({
+          const id = await Notifications.scheduleNotificationAsync({
             content: {
               title: `Waiting for "${title}"`,
               body: `Meeting started ${i} min ago. Tap to join.`,
@@ -312,8 +359,34 @@ function NewMeetingSheet({
             },
             trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: t },
           });
+          scheduledIds.push(id);
         }
       }
+
+      // Persist IDs so CalendarScreen can cancel them if the meeting is ended early
+      if (scheduledIds.length > 0) {
+        await meetingRef.update({ notificationIds: scheduledIds });
+      }
+
+      // Notify each invited participant (local push — they see it on their device)
+      const invitees = allParticipants.filter(uid => uid !== userId);
+      for (const _ of invitees) {
+        // We can only schedule local notifications for the current device.
+        // For remote pushes to other devices a Cloud Function with FCM is required.
+        // This immediate notification is for the organizer's own device as a confirmation.
+      }
+      // Send an immediate local invite notification so the organizer sees confirmation
+      if (invitees.length > 0) {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: 'Meeting invitations sent',
+            body: `${invitees.length} participant${invitees.length > 1 ? 's' : ''} invited to "${title}".`,
+            sound: false,
+          },
+          trigger: null, // immediate
+        });
+      }
+
       onDone();
     } catch (e) {
       console.error('Error creating meeting: ', e);
@@ -430,8 +503,6 @@ function NewMeetingSheet({
 }
 
 // ─── RecordingPlayer ─────────────────────────────────────────────────────────
-// Self-contained component for a single recording row inside MeetingDetailSheet.
-// Handles: play/pause, summarize via Gemini, inline minutes display, PDF share.
 function RecordingPlayer({
   rec, index, total, meetingTitle, existingMinutes, onMinutesGenerated,
 }: {
@@ -454,7 +525,6 @@ function RecordingPlayer({
   const [minutes, setMinutes] = useState<string | null>(existingMinutes);
   const [exportingPdf, setExportingPdf] = useState(false);
 
-  // Keep in sync if parent passes down freshly fetched minutes
   useEffect(() => { if (existingMinutes && !minutes) setMinutes(existingMinutes); }, [existingMinutes]);
 
   const fmtDuration = (ms: number) => {
@@ -493,7 +563,6 @@ function RecordingPlayer({
     }
     setSummarizing(true);
     try {
-      // Download audio to a temp path so we can base64 it
       const { downloadAsync, documentDirectory } = await import('expo-file-system/legacy');
       const dest = `${documentDirectory}rec_${rec.id}_tmp.m4a`;
       await downloadAsync(rec.url, dest);
@@ -569,7 +638,6 @@ function RecordingPlayer({
 
   return (
     <View style={[styles.recCard, bevel]}>
-      {/* ── Row 1: play/pause + title + share audio ── */}
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
         <TouchableOpacity
           onPress={handlePlayPause}
@@ -603,14 +671,12 @@ function RecordingPlayer({
         </TouchableOpacity>
       </View>
 
-      {/* ── Progress bar ── */}
       {(isPlaying || positionSecs > 0) && (
         <View style={styles.recProgressTrack}>
           <View style={[styles.recProgressFill, { width: `${progress * 100}%` as any }]} />
         </View>
       )}
 
-      {/* ── Row 2: Summarize button ── */}
       <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
         <TouchableOpacity
           style={[styles.recActionBtn, { flex: 1 }]}
@@ -647,7 +713,6 @@ function RecordingPlayer({
         )}
       </View>
 
-      {/* ── Minutes ── */}
       {minutes && (
         <View style={{ marginTop: 12 }}>
           <AppText style={[styles.minutesSectionLabel, { color: FG.secondary, marginBottom: 6 }]}>
@@ -663,7 +728,6 @@ function RecordingPlayer({
 }
 
 // ─── Meeting Detail Sheet ─────────────────────────────────────────────────────
-// Shows details for any non-active meeting (upcoming or past).
 function MeetingDetailSheet({
   meeting, visible, onClose, onJoin, currentUserId,
 }: {
@@ -678,10 +742,8 @@ function MeetingDetailSheet({
   const { bevel } = useGlass();
   const { contacts } = useContacts();
 
-  // Lazily fetch recordings subcollection when the sheet opens
   const [subRecordings, setSubRecordings] = useState<{ id: string; url: string; durationMs: number }[]>([]);
   const [recLoading, setRecLoading] = useState(false);
-  // Minutes generated from a recording inside this sheet (overrides Firestore value if set)
   const [generatedMinutes, setGeneratedMinutes] = useState<string | null>(null);
 
   useEffect(() => {
@@ -699,19 +761,19 @@ function MeetingDetailSheet({
         })));
       })
       .catch(() => {
-        // Fall back to top-level array already on meeting object
         setSubRecordings(
           meeting.recordings.map((r, i) => ({ id: String(i), url: r.url, durationMs: r.durationMs }))
         );
       })
       .finally(() => setRecLoading(false));
-  }, [visible, meeting?.id]); // eslint-disable-line
+  }, [visible, meeting?.id]);
 
   if (!meeting) return null;
 
   const nowDate = new Date();
-  const isPast = isMeetingPast(meeting, nowDate);
-  const isUpcoming = !isPast && !isMeetingActive(meeting, nowDate);
+  const isPast     = isMeetingPast(meeting, nowDate);
+  const isActive   = isMeetingActive(meeting, nowDate);
+  const isUpcoming = !isPast && !isActive;
   const isOrganizer = meeting.organizerId === currentUserId;
   const didAttend = meeting.attendance.includes(currentUserId);
   const accentColor = stringToColor(meeting.title);
@@ -731,7 +793,6 @@ function MeetingDetailSheet({
         <AppBg />
         <View style={styles.handle} />
 
-        {/* Header */}
         <View style={styles.sheetSubHeader}>
           <TouchableOpacity onPress={onClose} style={styles.iconPad}>
             <AppIcon name="close" size={22} color={COLORS.sub} />
@@ -743,7 +804,6 @@ function MeetingDetailSheet({
 
         <ScrollView contentContainerStyle={styles.minutesContent} showsVerticalScrollIndicator={false}>
 
-          {/* Title card */}
           <View style={[styles.detailTitleCard, { borderLeftColor: accentColor }]}>
             <AppText style={[styles.detailTitle, { color: textColor }]}>{meeting.title}</AppText>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 6 }}>
@@ -775,7 +835,6 @@ function MeetingDetailSheet({
             </View>
           </View>
 
-          {/* Info card */}
           <View style={[styles.minutesMetaCard, bevel]}>
             <View style={styles.minutesMetaRow}>
               <AppIcon name="calendar-outline" size={14} color={COLORS.sub} />
@@ -807,7 +866,6 @@ function MeetingDetailSheet({
             </View>
           </View>
 
-          {/* Participants */}
           <AppText style={[styles.minutesSectionLabel, { color: FG.secondary, marginTop: 16 }]}>
             PARTICIPANTS
           </AppText>
@@ -841,7 +899,6 @@ function MeetingDetailSheet({
                 </View>
               );
             })}
-            {/* Participants not in local contacts */}
             {meeting.participants
               .filter(uid => !participantContacts.find(c => c.userId === uid))
               .map(uid => {
@@ -872,7 +929,6 @@ function MeetingDetailSheet({
               })}
           </View>
 
-          {/* Recordings — each with play/pause, summarize, and PDF share */}
           {(meeting.hasRecordings || allRecordings.length > 0 || recLoading) && (
             <>
               <AppText style={[styles.minutesSectionLabel, { color: FG.secondary, marginTop: 16 }]}>
@@ -905,7 +961,6 @@ function MeetingDetailSheet({
             </>
           )}
 
-          {/* Minutes — shows Firestore minutes, or minutes generated by RecordingPlayer */}
           {isPast && !allRecordings.length && (
             <>
               <AppText style={[styles.minutesSectionLabel, { color: FG.secondary, marginTop: 16 }]}>
@@ -926,17 +981,21 @@ function MeetingDetailSheet({
             </>
           )}
 
-          {/* Actions */}
           <View style={{ marginTop: 24, gap: 10 }}>
-            {isUpcoming && (
+            {(isUpcoming || isActive) && (
               <TouchableOpacity
                 onPress={() => { onClose(); onJoin(meeting); }}
                 activeOpacity={0.85}
                 style={styles.joinBtnWrap}
               >
-                <LinearGradient colors={['#22c55e', '#16a34a']} style={[styles.joinBtn, styles.actionBtnFull]}>
+                <LinearGradient
+                  colors={isActive ? ['#22c55e', '#16a34a'] : GRADIENTS.primary}
+                  style={[styles.joinBtn, styles.actionBtnFull]}
+                >
                   <AppIcon name="videocam" size={18} color="#fff" fixedColor />
-                  <AppText fixedColor style={[styles.joinBtnText, { fontSize: 15 }]}>Join Meeting</AppText>
+                  <AppText fixedColor style={[styles.joinBtnText, { fontSize: 15 }]}>
+                    {isActive ? 'Join Now — Meeting is Live' : 'Join Meeting'}
+                  </AppText>
                 </LinearGradient>
               </TouchableOpacity>
             )}
@@ -953,11 +1012,19 @@ export default function CalendarScreen() {
   const navigation = useNavigation<NavProp>();
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
-  const { FG } = useForeground();
+  const { FG, isDark } = useForeground();
   const { fontFamily, textColor } = useTypography();
   const { bevel, iconButton } = useGlass();
 
   const [tab, setTab] = useState<TabType>('Upcoming');
+  
+  // Calendar specific state
+  const [selectedDate, setSelectedDate] = useState(new Date());
+  // The month displayed in the grid (can differ from selectedDate when navigating)
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const d = new Date(); d.setDate(1); return d;
+  });
+
   const [query, setQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
@@ -969,6 +1036,20 @@ export default function CalendarScreen() {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  const scrollViewRef = useRef<ScrollView>(null);
+
+  // Scroll to current time on mount if in Upcoming tab
+  useEffect(() => {
+    if (tab === 'Upcoming' && scrollViewRef.current && isSameDay(selectedDate, new Date())) {
+      const dt = new Date();
+      const currentTop = (dt.getHours() + dt.getMinutes() / 60) * HOUR_HEIGHT;
+      // center it
+      setTimeout(() => {
+        scrollViewRef.current?.scrollTo({ y: Math.max(0, currentTop - 150), animated: true });
+      }, 300);
+    }
+  }, [tab, selectedDate]);
 
   // ── Sheet / picker state ───────────────────────────────────────────────────
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -996,8 +1077,6 @@ export default function CalendarScreen() {
     setParticipantPickerOpen(false);
   };
 
-  // Date picker and participant picker are rendered INSIDE the sheet Modal tree
-  // so they layer on top without needing to close/reopen the sheet.
   const handleOpenDatePicker = (which: 'start' | 'end') => setDatePicker(which);
 
   const handleDateConfirm = (d: Date) => {
@@ -1011,14 +1090,11 @@ export default function CalendarScreen() {
   };
 
   const handleDateCancel = () => setDatePicker(null);
-
   const handleOpenParticipantPicker = () => setParticipantPickerOpen(true);
-
   const handleParticipantConfirm = (ids: string[]) => {
     setDraftParticipants(ids);
     setParticipantPickerOpen(false);
   };
-
   const handleParticipantClose = () => setParticipantPickerOpen(false);
 
   // ── Firestore ──────────────────────────────────────────────────────────────
@@ -1031,6 +1107,21 @@ export default function CalendarScreen() {
       .onSnapshot(
         (snap) => {
           if (!snap) return;
+
+          // Cancel scheduled notifications for any meeting that just became inactive
+          snap.docChanges().forEach(change => {
+            if (change.type === 'modified') {
+              const d = change.doc.data();
+              if (d.isActive === false && Array.isArray(d.notificationIds)) {
+                d.notificationIds.forEach((id: string) => {
+                  Notifications.cancelScheduledNotificationAsync(id).catch(() => {});
+                });
+                // Clear the stored IDs so we don't try to cancel again
+                change.doc.ref.update({ notificationIds: [] }).catch(() => {});
+              }
+            }
+          });
+
           setMeetings(snap.docs.map(doc => {
             const d = doc.data();
             const start = d.date ? d.date.toDate() : new Date();
@@ -1077,6 +1168,18 @@ export default function CalendarScreen() {
     });
   }, [meetings, tab, query, nowDate]);
 
+  // For timeline
+  const timelineData = useMemo(() => {
+    return meetings.filter(m => isSameDay(m.date, selectedDate)).map(m => {
+      const start = m.date;
+      const end = getEndTime(m);
+      const top = (start.getHours() + start.getMinutes() / 60) * HOUR_HEIGHT;
+      const durationMins = (end.getTime() - start.getTime()) / 60000;
+      const height = Math.max((durationMins / 60) * HOUR_HEIGHT, 30);
+      return { ...m, top, height };
+    });
+  }, [meetings, selectedDate]);
+
   const openSearch = () => {
     setSearchOpen(true);
     Animated.spring(searchAnim, { toValue: 1, useNativeDriver: false, friction: 7, tension: 60 })
@@ -1109,7 +1212,7 @@ export default function CalendarScreen() {
     }
   }, [navigation, user?.uid]);
 
-  const renderMeeting = useCallback(({ item }: { item: Meeting }) => {
+  const renderMeetingRow = useCallback(({ item }: { item: Meeting }) => {
     const active = isMeetingActive(item, nowDate);
     const past   = isMeetingPast(item, nowDate);
     const remainingMs = active ? Math.max(0, getEndTime(item).getTime() - now) : 0;
@@ -1131,6 +1234,12 @@ export default function CalendarScreen() {
       />
     );
   }, [bevel, textColor, fontFamily, FG.secondary, user?.uid, nowDate, now, handleJoinMeeting]);
+
+  const hoursArray = Array.from({ length: 24 }).map((_, i) => {
+    const d = new Date();
+    d.setHours(i, 0, 0, 0);
+    return d;
+  });
 
   return (
     <View style={styles.root}>
@@ -1162,7 +1271,6 @@ export default function CalendarScreen() {
           />
         </View>
 
-        {/* Pickers live inside this Modal so they render above the sheet on iOS */}
         <DateTimePickerModal
           isVisible={datePicker !== null}
           mode="datetime"
@@ -1244,29 +1352,224 @@ export default function CalendarScreen() {
         })}
       </View>
 
-      {/* ── List ─────────────────────────────────────────────────────────── */}
-      {loading ? (
-        <View style={styles.emptyWrap}>
-          <ActivityIndicator size="large" color={COLORS.blue} />
-          <AppText style={styles.emptyText}>Syncing Calendar...</AppText>
-        </View>
-      ) : (
-        <FlatList
-          data={filteredData}
-          keyExtractor={item => item.id}
-          renderItem={renderMeeting}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.listContent}
-          ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
-          ListEmptyComponent={
-            <View style={styles.emptyWrap}>
-              <AppIcon name="calendar-outline" size={52} color={COLORS.sub} />
-              <AppText style={styles.emptyText}>
-                {tab === 'Past' ? 'No completed meetings yet' : `No ${tab.toLowerCase()} meetings found`}
+      {/* ── Timeline View Component (For Upcoming) ────────────────── */}
+      {tab === 'Upcoming' && (
+        <View style={styles.timelineContainer}>
+          {/* ── Month grid ── */}
+          <View style={[styles.calMonthCard, bevel]}>
+            {/* Nav row */}
+            <View style={styles.calNavRow}>
+              <TouchableOpacity
+                onPress={() => setCalendarMonth(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))}
+                style={styles.calNavBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <AppIcon name="chevron-back" size={20} color={textColor} />
+              </TouchableOpacity>
+              <AppText style={[styles.calMonthLabel, { color: textColor }]}>
+                {calendarMonth.toLocaleDateString([], { month: 'long', year: 'numeric' })}
               </AppText>
+              <TouchableOpacity
+                onPress={() => setCalendarMonth(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))}
+                style={styles.calNavBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <AppIcon name="chevron-forward" size={20} color={textColor} />
+              </TouchableOpacity>
             </View>
-          }
-        />
+
+            {/* Day-of-week headers */}
+            <View style={styles.calDayHeaderRow}>
+              {DAY_LABELS.map((l, i) => (
+                <View key={i} style={styles.calDayHeaderCell}>
+                  <AppText style={[styles.calDayHeaderText, { color: FG.secondary }]}>{l}</AppText>
+                </View>
+              ))}
+            </View>
+
+            {/* Grid */}
+            {(() => {
+              const cells = getMonthGrid(calendarMonth);
+              const today = new Date();
+              const rows: (Date | null)[][] = [];
+              for (let i = 0; i < cells.length; i += 7) rows.push(cells.slice(i, i + 7));
+              return rows.map((row, ri) => (
+                <View key={ri} style={styles.calWeekRow}>
+                  {row.map((day, ci) => {
+                    if (!day) return <View key={ci} style={styles.calDayCell} />;
+                    const isToday   = isSameDay(day, today);
+                    const isSelected = isSameDay(day, selectedDate);
+                    const hasMeeting = meetings.some(m => isSameDay(m.date, day));
+                    return (
+                      <TouchableOpacity
+                        key={ci}
+                        style={styles.calDayCell}
+                        onPress={() => {
+                          setSelectedDate(day);
+                          // keep calendarMonth in sync when tapping a different month's overflow day
+                          const newMonth = new Date(day.getFullYear(), day.getMonth(), 1);
+                          if (newMonth.getMonth() !== calendarMonth.getMonth() ||
+                              newMonth.getFullYear() !== calendarMonth.getFullYear()) {
+                            setCalendarMonth(newMonth);
+                          }
+                        }}
+                        activeOpacity={0.7}
+                      >
+                        <View style={[
+                          styles.calDayCircle,
+                          isSelected && { backgroundColor: COLORS.blue },
+                          isToday && !isSelected && { borderWidth: 1.5, borderColor: COLORS.blue },
+                        ]}>
+                          <AppText style={[
+                            styles.calDayNumber,
+                            { color: isSelected ? '#fff' : isToday ? COLORS.blue : textColor },
+                          ]}>
+                            {day.getDate()}
+                          </AppText>
+                        </View>
+                        {hasMeeting && (
+                          <View style={[styles.calDot, { backgroundColor: isSelected ? '#fff' : COLORS.blue }]} />
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              ));
+            })()}
+
+            {/* Today shortcut */}
+            {!isSameDay(selectedDate, new Date()) && (
+              <TouchableOpacity
+                style={styles.calTodayBtn}
+                onPress={() => {
+                  const t = new Date();
+                  setSelectedDate(t);
+                  setCalendarMonth(new Date(t.getFullYear(), t.getMonth(), 1));
+                }}
+              >
+                <AppText style={[styles.calTodayText, { color: COLORS.blue }]}>Today</AppText>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* ── Selected day label ── */}
+          <View style={{ paddingHorizontal: 16, paddingVertical: 8 }}>
+            <AppText style={[styles.calSelectedLabel, { color: FG.secondary }]}>
+              {isSameDay(selectedDate, new Date())
+                ? 'Today'
+                : formatDateFull(selectedDate)}
+            </AppText>
+          </View>
+
+          <ScrollView ref={scrollViewRef} style={styles.timelineScroll} showsVerticalScrollIndicator={false}>
+             <View style={{ height: 24 * HOUR_HEIGHT, paddingBottom: 100 }}>
+               
+               {/* Background Hour Lines */}
+               {hoursArray.map((d, i) => (
+                 <View key={i} style={[styles.timelineHourRow, { top: i * HOUR_HEIGHT }]}>
+                    <View style={styles.timelineHourTextWrap}>
+                      <AppText style={[styles.timelineHourText, { color: FG.secondary }]}>
+                        {i === 0 ? '12 AM' : i < 12 ? `${i} AM` : i === 12 ? '12 PM' : `${i - 12} PM`}
+                      </AppText>
+                    </View>
+                    <View style={[styles.timelineHourLine, { borderColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)' }]} />
+                 </View>
+               ))}
+
+               {/* Current Time Indicator */}
+               {isSameDay(selectedDate, new Date()) && (
+                 <View style={[styles.currentTimeContainer, { top: (new Date().getHours() + new Date().getMinutes() / 60) * HOUR_HEIGHT }]}>
+                    <View style={[styles.currentTimeBadge, { backgroundColor: textColor }]}>
+                      <AppText style={[styles.currentTimeText, { color: isDark ? '#000' : '#fff' }]}>
+                        {formatTimeSmall(new Date())}
+                      </AppText>
+                    </View>
+                    <View style={[styles.currentTimeLine, { backgroundColor: textColor }]} />
+                 </View>
+               )}
+
+               {/* Event Blocks */}
+               {timelineData.map((event) => {
+                 const colorBase = stringToColor(event.title);
+                 const bg = hexToRgba(colorBase, isDark ? 0.2 : 0.15);
+                 return (
+                   <TouchableOpacity
+                     key={event.id}
+                     style={[styles.timelineEventBlock, {
+                       top: event.top,
+                       height: event.height,
+                       backgroundColor: bg,
+                       borderLeftColor: colorBase,
+                     }]}
+                     onPress={() => setDetailMeeting(event)}
+                     activeOpacity={0.8}
+                   >
+                     <AppText style={[styles.timelineEventTitle, { color: textColor }]} numberOfLines={1}>
+                        {event.title}
+                     </AppText>
+                     {event.height > 40 && (
+                       <AppText style={[styles.timelineEventSub, { color: FG.secondary }]} numberOfLines={1}>
+                          {event.duration}
+                       </AppText>
+                     )}
+                   </TouchableOpacity>
+                 );
+               })}
+
+               {/* Empty day hint */}
+               {timelineData.length === 0 && (
+                 <View style={{ position: 'absolute', left: 65, right: 14, top: (8.5) * HOUR_HEIGHT, alignItems: 'center', gap: 8 }}>
+                   <AppIcon name="calendar-outline" size={36} color={COLORS.sub} />
+                   <AppText style={{ color: COLORS.sub, fontSize: 13 }}>No meetings on this day</AppText>
+                 </View>
+               )}
+
+             </View>
+          </ScrollView>
+        </View>
+      )}
+
+      {/* ── List (For Past) ─────────────────────────────────────────────────── */}
+      {tab === 'Past' && (
+        <>
+          {/* Month navigator for past tab */}
+          <View style={[styles.calNavRowPast, bevel]}>
+            <TouchableOpacity
+              onPress={() => setCalendarMonth(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))}
+              style={styles.calNavBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <AppIcon name="chevron-back" size={20} color={textColor} />
+            </TouchableOpacity>
+            <AppText style={[styles.calMonthLabel, { color: textColor }]}>
+              {calendarMonth.toLocaleDateString([], { month: 'long', year: 'numeric' })}
+            </AppText>
+            <TouchableOpacity
+              onPress={() => setCalendarMonth(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))}
+              style={styles.calNavBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <AppIcon name="chevron-forward" size={20} color={textColor} />
+            </TouchableOpacity>
+          </View>
+
+          <FlatList
+            data={filteredData.filter(m => {
+              const d = m.date;
+              return d.getFullYear() === calendarMonth.getFullYear() &&
+                     d.getMonth() === calendarMonth.getMonth();
+            })}
+            keyExtractor={item => item.id}
+            renderItem={renderMeetingRow}
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.listContent}
+            ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+            ListEmptyComponent={
+              <View style={styles.emptyWrap}>
+                <AppIcon name="calendar-outline" size={52} color={COLORS.sub} />
+                <AppText style={styles.emptyText}>
+                  No meetings in {calendarMonth.toLocaleDateString([], { month: 'long', year: 'numeric' })}
+                </AppText>
+              </View>
+            }
+          />
+        </>
       )}
 
       {/* ── FAB ──────────────────────────────────────────────────────────── */}
@@ -1298,6 +1601,52 @@ const styles = StyleSheet.create({
   tabLabel: { fontSize: 14, fontWeight: '600' },
   tabLabelActive: { fontSize: 14, fontWeight: '700', color: '#fff' },
   listContent: { paddingHorizontal: 14, paddingBottom: 110 },
+
+  // Timeline / Calendar UI Styles
+  timelineContainer: { flex: 1 },
+
+  // Month grid card
+  calMonthCard: {
+    marginHorizontal: 14, marginTop: 4, marginBottom: 4,
+    borderRadius: RADIUS.lg, padding: 12, overflow: 'hidden',
+  },
+  calNavRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  calNavRowPast: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginHorizontal: 14, marginBottom: 10, borderRadius: RADIUS.lg,
+    paddingHorizontal: 14, paddingVertical: 12,
+  },
+  calNavBtn: { padding: 4 },
+  calMonthLabel: { fontSize: 16, fontWeight: '700' },
+  calDayHeaderRow: { flexDirection: 'row', marginBottom: 2 },
+  calDayHeaderCell: { flex: 1, alignItems: 'center', paddingVertical: 2 },
+  calDayHeaderText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.3 },
+  calWeekRow: { flexDirection: 'row' },
+  calDayCell: { flex: 1, alignItems: 'center', paddingVertical: 2 },
+  calDayCircle: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  calDayNumber: { fontSize: 13, fontWeight: '600' },
+  calDot: { width: 5, height: 5, borderRadius: 3, marginTop: 1 },
+  calTodayBtn: { alignSelf: 'center', marginTop: 6, paddingHorizontal: 14, paddingVertical: 5, borderRadius: RADIUS.full, backgroundColor: 'rgba(30,156,240,0.12)' },
+  calTodayText: { fontSize: 12, fontWeight: '700' },
+  calSelectedLabel: { fontSize: 12, fontWeight: '700', letterSpacing: 0.5, paddingHorizontal: 16, paddingBottom: 4 },
+
+  timelineScroll: { flex: 1 },
+  timelineHourRow: { position: 'absolute', left: 0, right: 0, height: HOUR_HEIGHT, flexDirection: 'row' },
+  timelineHourTextWrap: { width: 55, paddingRight: 8, alignItems: 'flex-end' },
+  timelineHourText: { fontSize: 11, fontWeight: '500', top: -7 },
+  timelineHourLine: { flex: 1, borderTopWidth: 1, borderStyle: 'solid' },
+
+  currentTimeContainer: { position: 'absolute', left: 0, right: 0, flexDirection: 'row', alignItems: 'center', zIndex: 10 },
+  currentTimeBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, marginLeft: 6, marginRight: 6 },
+  currentTimeText: { fontSize: 10, fontWeight: '700' },
+  currentTimeLine: { flex: 1, height: 1 },
+
+  timelineEventBlock: { position: 'absolute', left: 65, right: 14, borderRadius: 6, borderLeftWidth: 3, paddingHorizontal: 8, paddingVertical: 6, overflow: 'hidden' },
+  timelineEventTitle: { fontSize: 13, fontWeight: '700', marginBottom: 2 },
+  timelineEventSub: { fontSize: 11 },
 
   meetingCard: { flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: RADIUS.lg, paddingHorizontal: 14, paddingVertical: 14 },
   meetingCardActive: { borderWidth: 1.5, borderColor: 'rgba(34,197,94,0.45)', backgroundColor: 'rgba(34,197,94,0.06)' },
@@ -1364,7 +1713,6 @@ const styles = StyleSheet.create({
   minutesEmpty: { alignItems: 'center', paddingVertical: 40, gap: 10 },
   minutesEmptyText: { fontSize: 14, textAlign: 'center' },
 
-  // Detail sheet extras
   detailTitleCard: { borderLeftWidth: 4, borderRadius: RADIUS.md, paddingLeft: 14, paddingVertical: 10, marginBottom: 14 },
   detailTitle: { fontSize: 20, fontWeight: '800' },
   detailStatusBadge: { backgroundColor: 'rgba(100,100,100,0.15)', paddingHorizontal: 8, paddingVertical: 3, borderRadius: RADIUS.full },
@@ -1372,7 +1720,6 @@ const styles = StyleSheet.create({
   contactName: { fontSize: 14, fontWeight: '600' },
   contactPhone: { fontSize: 12, marginTop: 1 },
 
-  // RecordingPlayer
   recCard: {
     borderRadius: RADIUS.lg, padding: 14, marginBottom: 10,
     borderWidth: 1, borderColor: 'rgba(30,156,240,0.18)',
