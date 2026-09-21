@@ -1,90 +1,98 @@
 // ─── WebRTC Platform Wrapper ─────────────────────────────────────────────────
-// Conditionally imports react-native-webrtc only on native platforms
-// On web, provides mock implementations to prevent errors
+// Lazily loads react-native-webrtc on native platforms only.
+//
+// react-native-webrtc calls `new NativeEventEmitter(WebRTCModule)` at the
+// module's top level. If the module is required during app initialization
+// (before the native bridge is fully ready), WebRTCModule can be null and
+// the NativeEventEmitter throws. Deferring the require() to first-use avoids
+// this — by then the bridge is always ready.
 
 import { Platform } from 'react-native';
 
-let RTCPeerConnection: any;
-let RTCSessionDescription: any;
-let RTCIceCandidate: any;
-let mediaDevices: any;
-let MediaStream: any;
-
-if (Platform.OS === 'web') {
-  // Mock implementations for web
-  console.warn('[WebRTC] Running on web - WebRTC features disabled');
-  
-  RTCPeerConnection = class MockRTCPeerConnection {
-    constructor() {
-      console.warn('[WebRTC] Mock RTCPeerConnection created');
-    }
-    createOffer() { return Promise.resolve({}); }
-    createAnswer() { return Promise.resolve({}); }
-    setLocalDescription() { return Promise.resolve(); }
-    setRemoteDescription() { return Promise.resolve(); }
-    addIceCandidate() { return Promise.resolve(); }
-    addTrack() { return {}; }
-    removeTrack() {}
-    close() {}
-    addEventListener() {}
-    removeEventListener() {}
-  };
-  
-  RTCSessionDescription = class MockRTCSessionDescription {
-    constructor(init: any) {
-      Object.assign(this, init);
-    }
-  };
-  
-  RTCIceCandidate = class MockRTCIceCandidate {
-    constructor(init: any) {
-      Object.assign(this, init);
-    }
-  };
-  
-  mediaDevices = {
-    getUserMedia: () => {
-      console.warn('[WebRTC] Mock getUserMedia called - returning null');
-      return Promise.resolve(null);
-    },
-    enumerateDevices: () => Promise.resolve([]),
-  };
-  
-  MediaStream = class MockMediaStream {
-    constructor() {
-      console.warn('[WebRTC] Mock MediaStream created');
-    }
-    getTracks() { return []; }
-    getAudioTracks() { return []; }
-    getVideoTracks() { return []; }
-    addTrack() {}
-    removeTrack() {}
-    toURL() { return ''; }
-  };
-} else {
-  // Use LiveKit's react-native-webrtc on native platforms.
-  // @livekit/react-native-webrtc is a drop-in replacement for react-native-webrtc
-  // exposing the same RTCPeerConnection / mediaDevices / MediaStream API.
-  const webrtc = require('@livekit/react-native-webrtc');
-  RTCPeerConnection = webrtc.RTCPeerConnection;
-  RTCSessionDescription = webrtc.RTCSessionDescription;
-  RTCIceCandidate = webrtc.RTCIceCandidate;
-  mediaDevices = webrtc.mediaDevices;
-  MediaStream = webrtc.MediaStream;
+// ─── Web mocks ───────────────────────────────────────────────────────────────
+class MockRTCPeerConnection {
+  constructor() {}
+  createOffer() { return Promise.resolve({}); }
+  createAnswer() { return Promise.resolve({}); }
+  setLocalDescription() { return Promise.resolve(); }
+  setRemoteDescription() { return Promise.resolve(); }
+  addIceCandidate() { return Promise.resolve(); }
+  addTrack() { return {}; }
+  removeTrack() {}
+  close() {}
+  addEventListener() {}
+  removeEventListener() {}
 }
 
-export {
-  RTCPeerConnection,
-  RTCSessionDescription,
-  RTCIceCandidate,
-  mediaDevices,
-  MediaStream,
+class MockRTCSessionDescription {
+  constructor(init: any) { Object.assign(this, init); }
+}
+
+class MockRTCIceCandidate {
+  constructor(init: any) { Object.assign(this, init); }
+}
+
+const mockMediaDevices = {
+  getUserMedia: () => Promise.resolve(null),
+  enumerateDevices: () => Promise.resolve([]),
 };
 
-export type { RTCPeerConnectionType, MediaStreamType };
+class MockMediaStream {
+  getTracks() { return []; }
+  getAudioTracks() { return []; }
+  getVideoTracks() { return []; }
+  addTrack() {}
+  removeTrack() {}
+  toURL() { return ''; }
+}
 
-// TypeScript types
-interface RTCPeerConnectionType {
+// ─── Lazy native loader ───────────────────────────────────────────────────────
+// We cache the result so the require only runs once.
+let _webrtc: any = null;
+function getNative() {
+  if (!_webrtc) {
+    // require() is deferred to first call — by then the native bridge
+    // is fully initialised and WebRTCModule is non-null.
+    _webrtc = require('react-native-webrtc');
+  }
+  return _webrtc;
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+// Each export is a getter that delegates to the real native class on native,
+// or the mock on web — without triggering the require at module load time.
+
+export function getRTCPeerConnection() {
+  return Platform.OS === 'web' ? MockRTCPeerConnection : getNative().RTCPeerConnection;
+}
+
+export function getRTCSessionDescription() {
+  return Platform.OS === 'web' ? MockRTCSessionDescription : getNative().RTCSessionDescription;
+}
+
+export function getRTCIceCandidate() {
+  return Platform.OS === 'web' ? MockRTCIceCandidate : getNative().RTCIceCandidate;
+}
+
+export function getMediaDevices() {
+  return Platform.OS === 'web' ? mockMediaDevices : getNative().mediaDevices;
+}
+
+export function getMediaStream() {
+  return Platform.OS === 'web' ? MockMediaStream : getNative().MediaStream;
+}
+
+// Legacy named exports for any existing code that imports them directly.
+// These still return the correct value but are evaluated lazily on first access
+// via a Proxy-like pattern using getters on a plain object.
+export const RTCPeerConnection    = new Proxy({} as any, { get: (_, k) => getRTCPeerConnection()[k as string], construct: (_, args) => new (getRTCPeerConnection())(...args) });
+export const RTCSessionDescription = new Proxy({} as any, { get: (_, k) => getRTCSessionDescription()[k as string], construct: (_, args) => new (getRTCSessionDescription())(...args) });
+export const RTCIceCandidate       = new Proxy({} as any, { get: (_, k) => getRTCIceCandidate()[k as string], construct: (_, args) => new (getRTCIceCandidate())(...args) });
+export const mediaDevices          = new Proxy({} as any, { get: (_, k) => getMediaDevices()[k as string] });
+export const MediaStream           = new Proxy({} as any, { get: (_, k) => getMediaStream()[k as string], construct: (_, args) => new (getMediaStream())(...args) });
+
+// ─── TypeScript types ─────────────────────────────────────────────────────────
+export interface RTCPeerConnectionType {
   createOffer(): Promise<RTCSessionDescriptionInit>;
   createAnswer(): Promise<RTCSessionDescriptionInit>;
   setLocalDescription(description: RTCSessionDescriptionInit): Promise<void>;
@@ -93,7 +101,7 @@ interface RTCPeerConnectionType {
   close(): void;
 }
 
-interface MediaStreamType {
+export interface MediaStreamType {
   getTracks(): any[];
   getAudioTracks(): any[];
   getVideoTracks(): any[];

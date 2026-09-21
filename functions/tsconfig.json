@@ -3,13 +3,13 @@
     "module": "commonjs",
     "target": "es2020",
     "noImplicitReturns": true,
-    "noUnusedLocals": true,
-    "outDir": "lib",
+    "noUnusedLocals": true, 
+    
     "sourceMap": true,
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true
   },
   "compileOnSave": true,
-  "include": ["src"]
+  "include": ["lib"]
 }

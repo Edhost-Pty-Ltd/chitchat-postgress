@@ -19,23 +19,36 @@ import ChatsScreen from '../screens/ChatsScreen';
 
 
 // ── Lazy imports — only parsed/executed when first navigated to ───────────────
-const ChatScreen = lazy(() => import('../screens/ChatScreen'));
-const CallsScreen = lazy(() => import('../screens/CallsScreen'));
-const CalendarScreen = lazy(() => import('../screens/CalenderScreen'));
-const StatusScreen = lazy(() => import('../screens/StatusScreen'));
-const ContactsScreen = lazy(() => import('../screens/ContactsScreen'));
-const SettingsScreen = lazy(() => import('../screens/SettingsScreen'));
-const AppearanceScreen = lazy(() => import('../screens/AppearanceScreen'));
-const ProfileScreen = lazy(() => import('../screens/ProfileScreen'));
-const VideoCallScreen = lazy(() => import('../screens/VideoCallScreen'));
-const AudioCallScreen = lazy(() => import('../screens/AudioCallScreen'));
-const AccountSettingsScreen = lazy(() => import('../screens/AccountSettingsScreen'));
-const PrivacySettingsScreen = lazy(() => import('../screens/PrivacySettingsScreen'));
-const NotificationSettingsScreen = lazy(() => import('../screens/NotificationSettingsScreen'));
-const ChangeNumberScreen = lazy(() => import('../screens/ChangeNumberScreen'));
-const NotificationsScreen = lazy(() => import('../screens/NotificationsScreen'));
-const LinkedDevicesScreen = lazy(() => import('../screens/LinkedDevicesScreen'));
-const BlockedContactsScreen = lazy(() => import('../screens/BlockedContactsScreen'));
+// React Navigation does not support React.lazy() directly on Stack.Screen.
+// Each lazy component is wrapped in a Suspense boundary so the navigator
+// always receives a real synchronous component reference.
+function makeLazy<T extends object>(factory: () => Promise<{ default: React.ComponentType<T> }>) {
+  const Lazy = lazy(factory);
+  const Wrapped = (props: T) => (
+    <Suspense fallback={<ScreenFallback />}>
+      <Lazy {...(props as any)} />
+    </Suspense>
+  );
+  return Wrapped;
+}
+
+const ChatScreen                 = makeLazy(() => import('../screens/ChatScreen'));
+const CallsScreen                = makeLazy(() => import('../screens/CallsScreen'));
+const CalendarScreen             = makeLazy(() => import('../screens/CalenderScreen'));
+const StatusScreen               = makeLazy(() => import('../screens/StatusScreen'));
+const ContactsScreen             = makeLazy(() => import('../screens/ContactsScreen'));
+const SettingsScreen             = makeLazy(() => import('../screens/SettingsScreen'));
+const AppearanceScreen           = makeLazy(() => import('../screens/AppearanceScreen'));
+const ProfileScreen              = makeLazy(() => import('../screens/ProfileScreen'));
+const VideoCallScreen            = makeLazy(() => import('../screens/VideoCallScreen'));
+const AudioCallScreen            = makeLazy(() => import('../screens/AudioCallScreen'));
+const AccountSettingsScreen      = makeLazy(() => import('../screens/AccountSettingsScreen'));
+const PrivacySettingsScreen      = makeLazy(() => import('../screens/PrivacySettingsScreen'));
+const NotificationSettingsScreen = makeLazy(() => import('../screens/NotificationSettingsScreen'));
+const ChangeNumberScreen         = makeLazy(() => import('../screens/ChangeNumberScreen'));
+const NotificationsScreen        = makeLazy(() => import('../screens/NotificationsScreen'));
+const LinkedDevicesScreen        = makeLazy(() => import('../screens/LinkedDevicesScreen'));
+const BlockedContactsScreen      = makeLazy(() => import('../screens/BlockedContactsScreen'));
 
 import { IncomingCallManager } from '../components';
 
@@ -171,18 +184,17 @@ export default function AppNavigator() {
 
   return (
     <>
-      <Suspense fallback={<ScreenFallback />}>
-        <Stack.Navigator
-          initialRouteName={authenticated ? 'Chats' : 'Splash'}
-          screenOptions={screenOptions}
-        >
+      <Stack.Navigator
+        initialRouteName={authenticated ? 'Chats' : 'Splash'}
+        screenOptions={screenOptions}
+      >
           {authenticated ? (
             <>
               {/* Core screens — eager */}
               <Stack.Screen name="Chats" component={ChatsScreen} />
               {/* Secondary screens — lazy */}
               <Stack.Screen name="Chat" component={ChatScreen as any} />
-              <Stack.Screen name="Calender" component={CalendarScreen as any} />
+              <Stack.Screen name="Calendar" component={CalendarScreen as any} />
               <Stack.Screen name="Calls" component={CallsScreen as any} />
               <Stack.Screen name="Status" component={StatusScreen as any} />
               <Stack.Screen name="Contacts" component={ContactsScreen as any} />
@@ -213,7 +225,6 @@ export default function AppNavigator() {
             </>
           )}
         </Stack.Navigator>
-      </Suspense>
 
       {authenticated && <IncomingCallManager />}
     </>

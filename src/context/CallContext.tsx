@@ -38,6 +38,7 @@ interface CallContextValue extends CallState {
   startNetworkMonitoring: () => void;
   stopNetworkMonitoring: () => void;
   cleanup: () => void;
+  getPeerConnection: () => import('../utils/webrtc-platform').RTCPeerConnectionType | null;
 }
 
 const CallContext = createContext<CallContextValue | undefined>(undefined);
@@ -163,6 +164,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
     startNetworkMonitoring: webrtc.startNetworkMonitoring,
     stopNetworkMonitoring: webrtc.stopNetworkMonitoring,
     cleanup: webrtc.cleanup,
+    getPeerConnection: webrtc.getPeerConnection,
   };
 
   return <CallContext.Provider value={value}>{children}</CallContext.Provider>;
