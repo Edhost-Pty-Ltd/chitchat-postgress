@@ -62,12 +62,17 @@ service cloud.firestore {
         request.auth.uid in resource.data.members;
 
       // Messages subcollection
+      // Use the parent chat's resource instead of get() to avoid an extra read
       match /messages/{messageId} {
-        allow read: if isChatMember(chatId);
-        allow create: if isChatMember(chatId) &&
+        allow read: if isSignedIn() &&
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members;
+        allow create: if isSignedIn() &&
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members &&
           request.auth.uid == request.resource.data.senderId;
-        allow update: if isChatMember(chatId);
-        allow delete: if isChatMember(chatId);
+        allow update: if isSignedIn() &&
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members;
+        allow delete: if isSignedIn() &&
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members;
       }
     }
 

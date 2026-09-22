@@ -22,6 +22,26 @@ try {
   console.warn('[usePushNotifications] expo-notifications not available. Push notifications disabled.');
 }
 
+// ── Safe unsubscribe helper ───────────────────────────────────────────────────
+// `Notifications.removeNotificationSubscription` was removed from expo-notifications.
+// The subscription objects returned by addNotification*Listener now expose a
+// `.remove()` method (EventSubscription). Older SDKs returned a plain function.
+// Handle both, and never call undefined().
+function removeSubscription(sub: any) {
+  if (!sub) return;
+  try {
+    if (typeof sub.remove === 'function') {
+      sub.remove();
+      return;
+    }
+    if (typeof sub === 'function') {
+      sub();
+    }
+  } catch (err) {
+    console.warn('[usePushNotifications] Error removing subscription (ignored):', err);
+  }
+}
+
 export function usePushNotifications(userId: string | null) {
   const [expoPushToken, setExpoPushToken] = useState<string | null>(null);
   const [notification, setNotification] = useState<any | null>(null);
@@ -49,8 +69,8 @@ export function usePushNotifications(userId: string | null) {
     });
 
     return () => {
-      if (notificationListener.current) Notifications.removeNotificationSubscription(notificationListener.current);
-      if (responseListener.current)     Notifications.removeNotificationSubscription(responseListener.current);
+      if (notificationListener.current) removeSubscription(notificationListener.current);
+      if (responseListener.current)     removeSubscription(responseListener.current);
     };
   }, [userId]);
 
