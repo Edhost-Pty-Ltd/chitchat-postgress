@@ -2,9 +2,10 @@
 import React, { useRef, useState, useEffect } from 'react';
 import {
   View, TouchableOpacity, StyleSheet, ScrollView,
-  Image, Alert, Platform, TextInput, FlatList, Modal,
-  KeyboardAvoidingView,
+  Image, Alert, Platform, TextInput, Modal,
+  KeyboardAvoidingView, Switch,
 } from 'react-native';
+import DatePicker from 'react-native-date-picker';
 import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
@@ -39,6 +40,10 @@ export default function ProfileScreen() {
 
   // Business fields
   const [email, setEmail] = useState('');
+  const [auto_responder_message, setauto_responder_message] = useState('');
+  const [autoResponderEnabled, setAutoResponderEnabled] = useState(false);
+  const [autoResponderPending, setAutoResponderPending] = useState(false);
+  const [draftAutoMessage, setDraftAutoMessage] = useState('');
   const [website, setWebsite] = useState('');
   const [editingField, setEditingField] = useState<string | null>(null);
   const [draftValue, setDraftValue] = useState('');
@@ -46,24 +51,16 @@ export default function ProfileScreen() {
 
   // Work hours — structured
   const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-  const HOURS = [
-    'Closed',
-    '5:00 AM', '5:30 AM', '6:00 AM', '6:30 AM', '7:00 AM', '7:30 AM',
-    '8:00 AM', '8:30 AM', '9:00 AM', '9:30 AM', '10:00 AM', '10:30 AM',
-    '11:00 AM', '11:30 AM', '12:00 PM', '12:30 PM', '1:00 PM', '1:30 PM',
-    '2:00 PM', '2:30 PM', '3:00 PM', '3:30 PM', '4:00 PM', '4:30 PM',
-    '5:00 PM', '5:30 PM', '6:00 PM', '6:30 PM', '7:00 PM', '7:30 PM',
-    '8:00 PM', '8:30 PM', '9:00 PM', '9:30 PM', '10:00 PM', '10:30 PM',
-    '11:00 PM', '11:30 PM', '12:00 AM',
-  ];
 
   interface DaySchedule { open: string; close: string; }
+
+  // Default to completely closed until the user sets their own schedule
   const defaultSchedule: Record<string, DaySchedule> = {
-    Monday: { open: '8:00 AM', close: '5:00 PM' },
-    Tuesday: { open: '8:00 AM', close: '5:00 PM' },
-    Wednesday: { open: '8:00 AM', close: '5:00 PM' },
-    Thursday: { open: '8:00 AM', close: '5:00 PM' },
-    Friday: { open: '8:00 AM', close: '5:00 PM' },
+    Monday: { open: 'Closed', close: 'Closed' },
+    Tuesday: { open: 'Closed', close: 'Closed' },
+    Wednesday: { open: 'Closed', close: 'Closed' },
+    Thursday: { open: 'Closed', close: 'Closed' },
+    Friday: { open: 'Closed', close: 'Closed' },
     Saturday: { open: 'Closed', close: 'Closed' },
     Sunday: { open: 'Closed', close: 'Closed' },
   };
@@ -72,6 +69,12 @@ export default function ProfileScreen() {
   const [hoursModalOpen, setHoursModalOpen] = useState(false);
   const [pickerTarget, setPickerTarget] = useState<{ day: string; field: 'open' | 'close' } | null>(null);
   const [pickerVisible, setPickerVisible] = useState(false);
+  // Single Date object drives the native drum-roll picker
+  const [pickerDate, setPickerDate] = useState<Date>(() => {
+    const d = new Date();
+    d.setHours(9, 0, 0, 0);
+    return d;
+  });
 
   // Catalog
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
@@ -93,10 +96,12 @@ export default function ProfileScreen() {
 
         const fsDb = db as ReturnType<typeof firestore>;
         const userSnap = await fsDb.collection('users').doc(currentUser.uid).get();
-        if (userSnap.exists) {
+        if (userSnap.exists()) {
           const data = userSnap.data()!;
           setEmail(data.email || '');
           setWebsite(data.website || '');
+          setauto_responder_message(data.auto_responder_message || '');
+          setAutoResponderEnabled(data.autoResponderEnabled || false);
           if (data.workSchedule) setWorkSchedule(data.workSchedule);
           setCatalog(data.catalog || []);
         }
@@ -136,6 +141,7 @@ export default function ProfileScreen() {
     try {
       if (field === 'email') setEmail(value);
       else if (field === 'website') setWebsite(value);
+      else if (field === 'auto_responder_message') setauto_responder_message(value);
 
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
@@ -147,6 +153,76 @@ export default function ProfileScreen() {
       console.warn('[ProfileScreen] Error saving field:', error);
     }
     setEditingField(null);
+  };
+
+  // ── Auto Responder toggle (only starts a pending edit when turning ON) ─────
+  const handleAutoResponderToggle = async (val: boolean) => {
+    if (val) {
+      // Begin pending edit. Do NOT persist yet — user must save with a message.
+      setDraftAutoMessage(
+        auto_responder_message ||
+        'Thanks for your message! We are currently closed. We will get back to you as soon as we open.'
+      );
+      setAutoResponderPending(true);
+      return;
+    }
+
+    // Turning OFF
+    if (autoResponderPending) {
+      // Cancel pending edit — nothing to persist.
+      setAutoResponderPending(false);
+      setDraftAutoMessage('');
+      return;
+    }
+
+    // Was actually enabled → persist OFF.
+    setAutoResponderEnabled(false);
+    try {
+      const authInstance = getAuth();
+      const currentUser = authInstance.currentUser;
+      if (currentUser) {
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({ autoResponderEnabled: false });
+      }
+    } catch (error) {
+      console.warn('[ProfileScreen] Error saving autoResponderEnabled:', error);
+    }
+  };
+
+  // ── Save Auto Responder (message + enabled flag together) ─────────────────
+  const saveAutoResponder = async () => {
+    const msg = draftAutoMessage.trim();
+    if (!msg) {
+      Alert.alert(
+        'Message required',
+        'Please type the automatic reply message before saving. Otherwise, customers would receive empty replies.'
+      );
+      return;
+    }
+
+    // Optimistic local state
+    setauto_responder_message(msg);
+    setAutoResponderEnabled(true);
+    setAutoResponderPending(false);
+
+    try {
+      const authInstance = getAuth();
+      const currentUser = authInstance.currentUser;
+      if (currentUser) {
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({
+          autoResponderEnabled: true,
+          auto_responder_message: msg,
+        });
+      }
+    } catch (error) {
+      console.warn('[ProfileScreen] Error saving auto responder:', error);
+    }
+  };
+
+  const cancelAutoResponder = () => {
+    setAutoResponderPending(false);
+    setDraftAutoMessage('');
   };
 
   // ── Save work schedule ─────────────────────────────────────────────────────
@@ -164,24 +240,57 @@ export default function ProfileScreen() {
     }
   };
 
-  const selectTime = (time: string) => {
+  // Convert a Date to a readable "H:MM AM/PM" string
+  const formatPickerDate = (date: Date): string => {
+    const h = date.getHours();
+    const m = date.getMinutes();
+    const period = h >= 12 ? 'PM' : 'AM';
+    const hour12 = h % 12 || 12;
+    return `${hour12}:${String(m).padStart(2, '0')} ${period}`;
+  };
+
+  const confirmTime = () => {
     if (!pickerTarget) return;
+    const timeStr = formatPickerDate(pickerDate);
     const updated = { ...workSchedule };
-    updated[pickerTarget.day] = { ...updated[pickerTarget.day], [pickerTarget.field]: time };
-    // If marking as closed, set both
-    if (time === 'Closed') {
-      updated[pickerTarget.day] = { open: 'Closed', close: 'Closed' };
+    if (!updated[pickerTarget.day]) {
+      updated[pickerTarget.day] = { open: '8:00 AM', close: '5:00 PM' };
     }
+    updated[pickerTarget.day] = { ...updated[pickerTarget.day], [pickerTarget.field]: timeStr };
     setWorkSchedule(updated);
     setPickerVisible(false);
     setPickerTarget(null);
     saveWorkSchedule(updated);
   };
 
+  const openTimePicker = (day: string, field: 'open' | 'close') => {
+    setPickerTarget({ day, field });
+
+    // Pre-seed the picker with the currently saved time for this slot
+    const current = workSchedule[day]?.[field];
+    const seed = new Date();
+    if (current && current !== 'Closed') {
+      const match = current.match(/^(\d+):(\d+)\s*(AM|PM)$/i);
+      if (match) {
+        const h12 = parseInt(match[1], 10);
+        const min = parseInt(match[2], 10);
+        const isPM = match[3].toUpperCase() === 'PM';
+        const h24 = isPM ? (h12 === 12 ? 12 : h12 + 12) : (h12 === 12 ? 0 : h12);
+        seed.setHours(h24, min, 0, 0);
+      } else {
+        seed.setHours(9, 0, 0, 0);
+      }
+    } else {
+      seed.setHours(9, 0, 0, 0);
+    }
+    setPickerDate(seed);
+    setPickerVisible(true);
+  };
+
   // Format schedule summary for display
   const getScheduleSummary = (): string => {
-    const openDays = DAYS.filter(d => workSchedule[d]?.open !== 'Closed');
-    if (openDays.length === 0) return 'All days closed';
+    const openDays = DAYS.filter(d => workSchedule[d] && workSchedule[d].open !== 'Closed');
+    if (openDays.length === 0) return 'Not set (All days closed)';
     if (openDays.length === 7) return `Every day ${workSchedule[openDays[0]].open} - ${workSchedule[openDays[0]].close}`;
     const first = openDays[0];
     const last = openDays[openDays.length - 1];
@@ -316,8 +425,8 @@ export default function ProfileScreen() {
   const initials = shownName.split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
 
   // ── Editable field card component ──────────────────────────────────────────
-  const EditableField = ({ field, label, icon, value, placeholder, keyboardType }: {
-    field: string; label: string; icon: string; value: string; placeholder: string; keyboardType?: any;
+  const EditableField = ({ field, label, icon, value, placeholder, keyboardType ,isMultiline}: {
+    field: string; label: string; icon: string; value: string; placeholder: string; keyboardType?: any;isMultiline?:boolean
   }) => (
     <TouchableOpacity
       style={styles.infoCard}
@@ -331,7 +440,8 @@ export default function ProfileScreen() {
         <AppText style={[styles.infoLabel, { fontFamily }]}>{label}</AppText>
         {editingField === field ? (
           <TextInput
-            ref={fieldInputRef}
+            ref={fieldInputRef} 
+            multiline={isMultiline}
             style={[styles.infoInput, { color: textColor, fontFamily }]}
             value={draftValue}
             onChangeText={setDraftValue}
@@ -345,7 +455,7 @@ export default function ProfileScreen() {
             autoFocus
           />
         ) : (
-          <AppText style={[styles.infoValue, { color: value ? textColor : COLORS.textFaint, fontFamily }]}>
+          <AppText style={[styles.infoValue, { color: value ? textColor : COLORS.textFaint, fontFamily }]} numberOfLines={isMultiline ? 3 : 1}>
             {value || placeholder}
           </AppText>
         )}
@@ -359,6 +469,8 @@ export default function ProfileScreen() {
       )}
     </TouchableOpacity>
   );
+
+  const showAutoResponderEditor = autoResponderEnabled || autoResponderPending;
 
   return (
     <View style={styles.root}>
@@ -470,7 +582,7 @@ export default function ProfileScreen() {
             placeholder="Add email address"
             keyboardType="email-address"
           />
-
+          
           {/* Website */}
           <EditableField
             field="website"
@@ -498,6 +610,94 @@ export default function ProfileScreen() {
             </View>
             <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />
           </TouchableOpacity>
+        </View>
+        
+        {/* ── Auto Responder Settings ── */}
+        <View style={styles.section}>
+          <AppText style={[styles.sectionTitle, { color: COLORS.sub, fontFamily }]}>AUTO RESPONDER</AppText>
+          <View style={styles.infoCard}>
+            <View style={styles.iconCircle}>
+              <AppIcon name="chatbubble-ellipses-outline" size={18} color={COLORS.blue} fixedColor />
+            </View>
+            <View style={styles.infoContent}>
+              <AppText style={[styles.infoLabel, { fontFamily }]}>Automatic Response</AppText>
+              <AppText style={[styles.infoValue, { color: (autoResponderEnabled || autoResponderPending) ? COLORS.blue : COLORS.textFaint, fontFamily, fontSize: 13 }]}>
+                {autoResponderPending
+                  ? 'Add a message and save to enable'
+                  : autoResponderEnabled
+                    ? 'Replies during closed hours'
+                    : 'Currently disabled'}
+              </AppText>
+            </View>
+            <Switch
+              value={autoResponderEnabled || autoResponderPending}
+              onValueChange={handleAutoResponderToggle}
+              trackColor={{ false: 'rgba(0,0,0,0.1)', true: COLORS.blue }}
+              thumbColor={'#fff'}
+            />
+          </View>
+
+          {showAutoResponderEditor && (
+            <View style={styles.autoEditorCard}>
+              <AppText style={[styles.infoLabel, { fontFamily, marginBottom: 6 }]}>
+                Auto Reply Message
+              </AppText>
+
+              {autoResponderPending ? (
+                // Pending edit — free text, save required
+                <TextInput
+                  style={[
+                    styles.autoEditorInput,
+                    { color: textColor, fontFamily },
+                  ]}
+                  value={draftAutoMessage}
+                  onChangeText={setDraftAutoMessage}
+                  placeholder="e.g. Thanks for your message! We are currently closed..."
+                  placeholderTextColor={COLORS.textFaint}
+                  multiline
+                  numberOfLines={4}
+                  textAlignVertical="top"
+                  autoFocus
+                />
+              ) : (
+                // Already saved — allow quick inline edit via existing EditableField
+                <EditableField
+                  field="auto_responder_message"
+                  label="Message"
+                  icon="document-text-outline"
+                  isMultiline={true}
+                  value={auto_responder_message}
+                  placeholder="No message set"
+                  keyboardType="default"
+                />
+              )}
+
+              {autoResponderPending && (
+                <View style={styles.autoActionsRow}>
+                  <TouchableOpacity
+                    onPress={cancelAutoResponder}
+                    activeOpacity={0.8}
+                    style={[styles.autoCancelBtn]}
+                  >
+                    <AppText style={[styles.autoCancelText, { fontFamily, color: COLORS.sub }]}>
+                      Cancel
+                    </AppText>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    onPress={saveAutoResponder}
+                    activeOpacity={0.85}
+                    style={{ flex: 1 }}
+                  >
+                    <LinearGradient colors={GRADIENTS.primary} style={styles.autoSaveBtn}>
+                      <AppIcon name="checkmark-circle-outline" size={18} color="#fff" fixedColor style={{ marginRight: 6 }} />
+                      <AppText fixedColor style={styles.autoSaveText}>Save Changes</AppText>
+                    </LinearGradient>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          )}
         </View>
 
         {/* ── Catalog ── */}
@@ -659,107 +859,129 @@ export default function ProfileScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* ── Work Hours Modal ── */}
+      {/* ── Work Hours Modal (contains inline time picker to avoid nested Modal on iOS) ── */}
       <Modal
         visible={hoursModalOpen}
         transparent
         animationType="slide"
-        onRequestClose={() => setHoursModalOpen(false)}
+        onRequestClose={() => {
+          if (pickerVisible) {
+            setPickerVisible(false);
+            setPickerTarget(null);
+          } else {
+            setHoursModalOpen(false);
+          }
+        }}
       >
         <View style={styles.modalOverlay}>
-          <View style={[styles.modalSheet, { maxHeight: '80%' }]}>
+          <View style={[styles.modalSheet, { maxHeight: '90%' }]}>
             <View style={styles.modalHandle} />
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <AppText style={[styles.modalTitle, { marginBottom: 0, color: textColor, fontFamily }]}>Work Hours</AppText>
-              <TouchableOpacity onPress={() => setHoursModalOpen(false)}>
-                <AppIcon name="close" size={22} color={COLORS.sub} />
-              </TouchableOpacity>
-            </View>
 
-            <ScrollView showsVerticalScrollIndicator={false}>
-              {DAYS.map((day) => {
-                const schedule = workSchedule[day] || { open: 'Closed', close: 'Closed' };
-                const isClosed = schedule.open === 'Closed';
+            {pickerVisible ? (
+              /* ── Inline Time Picker view (replaces day list) ── */
+              <>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <TouchableOpacity onPress={() => { setPickerVisible(false); setPickerTarget(null); }} style={{ padding: 4 }}>
+                    <AppIcon name="chevron-back" size={22} color={COLORS.blue} fixedColor />
+                  </TouchableOpacity>
+                  <AppText style={[styles.modalTitle, { marginBottom: 0, color: textColor, fontFamily, fontSize: 16 }]}>
+                    {pickerTarget
+                      ? `${pickerTarget.day} — ${pickerTarget.field === 'open' ? 'Opens at' : 'Closes at'}`
+                      : 'Select Time'}
+                  </AppText>
+                  <View style={{ width: 30 }} />
+                </View>
 
-                return (
-                  <View key={day} style={styles.dayRow}>
-                    <AppText style={[styles.dayLabel, { color: textColor, fontFamily }]}>{day}</AppText>
-                    <View style={styles.dayTimes}>
-                      {isClosed ? (
-                        <TouchableOpacity
-                          style={styles.closedBadge}
-                          onPress={() => { setPickerTarget({ day, field: 'open' }); setPickerVisible(true); }}
-                        >
-                          <AppText style={[styles.closedText, { fontFamily }]}>Closed</AppText>
-                        </TouchableOpacity>
-                      ) : (
-                        <>
-                          <TouchableOpacity
-                            style={styles.timePill}
-                            onPress={() => { setPickerTarget({ day, field: 'open' }); setPickerVisible(true); }}
-                          >
-                            <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.open}</AppText>
-                          </TouchableOpacity>
-                          <AppText style={[{ color: COLORS.sub, fontSize: 12 }]}>to</AppText>
-                          <TouchableOpacity
-                            style={styles.timePill}
-                            onPress={() => { setPickerTarget({ day, field: 'close' }); setPickerVisible(true); }}
-                          >
-                            <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.close}</AppText>
-                          </TouchableOpacity>
-                        </>
-                      )}
-                    </View>
-                  </View>
-                );
-              })}
-            </ScrollView>
+                <View style={{ alignItems: 'center', marginVertical: 12 }}>
+                  <DatePicker
+                    date={pickerDate}
+                    onDateChange={setPickerDate}
+                    mode="time"
+                    locale="en_US"
+                  />
+                </View>
+
+                <View style={styles.pickerActions}>
+                  <TouchableOpacity
+                    onPress={() => { setPickerVisible(false); setPickerTarget(null); }}
+                    style={[styles.pickerActionBtn, styles.pickerCancelBtn]}
+                  >
+                    <AppText style={[styles.pickerActionText, { color: COLORS.sub, fontFamily }]}>Cancel</AppText>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={confirmTime}
+                    style={[styles.pickerActionBtn, styles.pickerConfirmBtn]}
+                  >
+                    <AppText fixedColor style={[styles.pickerActionText, { color: '#fff', fontFamily }]}>Set Time</AppText>
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : (
+              /* ── Day schedule list ── */
+              <>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                  <AppText style={[styles.modalTitle, { marginBottom: 0, color: textColor, fontFamily }]}>Work Hours</AppText>
+                  <TouchableOpacity onPress={() => setHoursModalOpen(false)}>
+                    <AppIcon name="close" size={22} color={COLORS.sub} />
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false}>
+                  {DAYS.map((day) => {
+                    const schedule = workSchedule[day] || { open: 'Closed', close: 'Closed' };
+                    const isClosed = schedule.open === 'Closed';
+
+                    return (
+                      <View key={day} style={styles.dayRow}>
+                        <View style={styles.dayToggleWrap}>
+                          <Switch
+                            value={!isClosed}
+                            onValueChange={(val) => {
+                              const updated = { ...workSchedule };
+                              if (val) {
+                                updated[day] = { open: '8:00 AM', close: '5:00 PM' };
+                              } else {
+                                updated[day] = { open: 'Closed', close: 'Closed' };
+                              }
+                              setWorkSchedule(updated);
+                              saveWorkSchedule(updated);
+                            }}
+                            trackColor={{ false: 'rgba(0,0,0,0.1)', true: COLORS.blue }}
+                            thumbColor={'#fff'}
+                            style={{ transform: [{ scale: 0.8 }] }}
+                          />
+                          <AppText style={[styles.dayLabel, { color: textColor, fontFamily }]}>{day}</AppText>
+                        </View>
+
+                        <View style={styles.dayTimes}>
+                          {isClosed ? (
+                            <AppText style={[styles.closedText, { fontFamily, color: COLORS.sub }]}>Closed</AppText>
+                          ) : (
+                            <>
+                              <TouchableOpacity
+                                style={styles.timePill}
+                                onPress={() => openTimePicker(day, 'open')}
+                              >
+                                <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.open}</AppText>
+                              </TouchableOpacity>
+                              <AppText style={{ color: COLORS.sub, fontSize: 12 }}>to</AppText>
+                              <TouchableOpacity
+                                style={styles.timePill}
+                                onPress={() => openTimePicker(day, 'close')}
+                              >
+                                <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.close}</AppText>
+                              </TouchableOpacity>
+                            </>
+                          )}
+                        </View>
+                      </View>
+                    );
+                  })}
+                </ScrollView>
+              </>
+            )}
           </View>
         </View>
-      </Modal>
-
-      {/* ── Time Picker Modal ── */}
-      <Modal
-        visible={pickerVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setPickerVisible(false)}
-      >
-        <TouchableOpacity
-          style={styles.modalOverlay}
-          activeOpacity={1}
-          onPress={() => setPickerVisible(false)}
-        >
-          <View style={styles.pickerSheet}>
-            <View style={styles.modalHandle} />
-            <AppText style={[styles.pickerTitle, { color: textColor, fontFamily }]}>
-              {pickerTarget ? `${pickerTarget.day} — ${pickerTarget.field === 'open' ? 'Opens at' : 'Closes at'}` : 'Select Time'}
-            </AppText>
-            <ScrollView style={{ maxHeight: 300 }} showsVerticalScrollIndicator={false}>
-              {HOURS.map((time) => (
-                <TouchableOpacity
-                  key={time}
-                  style={[
-                    styles.pickerItem,
-                    pickerTarget && workSchedule[pickerTarget.day]?.[pickerTarget.field] === time && styles.pickerItemActive,
-                  ]}
-                  onPress={() => selectTime(time)}
-                >
-                  <AppText style={[
-                    styles.pickerItemText,
-                    { color: textColor, fontFamily },
-                    pickerTarget && workSchedule[pickerTarget.day]?.[pickerTarget.field] === time && { color: COLORS.blue, fontWeight: '700' },
-                  ]}>
-                    {time}
-                  </AppText>
-                  {pickerTarget && workSchedule[pickerTarget.day]?.[pickerTarget.field] === time && (
-                    <AppIcon name="checkmark" size={18} color={COLORS.blue} fixedColor />
-                  )}
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-        </TouchableOpacity>
       </Modal>
     </View>
   );
@@ -837,6 +1059,48 @@ const styles = StyleSheet.create({
     paddingBottom: 2,
     padding: 0, margin: 0,
   },
+
+  // Auto responder editor
+  autoEditorCard: {
+    borderRadius: 14,
+    paddingHorizontal: 14, paddingVertical: 14,
+    backgroundColor: 'rgba(255,255,255,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.7)',
+    gap: 8,
+  },
+  autoEditorInput: {
+    fontSize: 14,
+    minHeight: 90,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#f5f7fa',
+    lineHeight: 20,
+  },
+  autoActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 4,
+  },
+  autoCancelBtn: {
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    borderRadius: 14,
+    backgroundColor: 'rgba(0,0,0,0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  autoCancelText: { fontSize: 15, fontWeight: '700' },
+  autoSaveBtn: {
+    borderRadius: 14,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center', justifyContent: 'center',
+    ...SHADOW.button,
+  },
+  autoSaveText: { color: '#fff', fontSize: 15, fontWeight: '700' },
 
   // Add button
   addBtn: {
@@ -946,12 +1210,18 @@ const styles = StyleSheet.create({
   // Work hours modal
   dayRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingVertical: 12,
+    paddingVertical: 10,
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(0,0,0,0.04)',
   },
-  dayLabel: { fontSize: 14, fontWeight: '600', width: 90 },
-  dayTimes: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dayToggleWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    width: 120, // Prevents days from shifting the other elements
+  },
+  dayLabel: { fontSize: 14, fontWeight: '600' },
+  dayTimes: { flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, justifyContent: 'flex-end' },
   timePill: {
     paddingHorizontal: 12, paddingVertical: 7,
     borderRadius: 8,
@@ -978,6 +1248,7 @@ const styles = StyleSheet.create({
     paddingBottom: 30,
   },
   pickerTitle: { fontSize: 15, fontWeight: '700', marginBottom: 12 },
+  pickerHelper: { fontSize: 11, fontWeight: '600', marginTop: 10, marginBottom: 6, letterSpacing: 0.4 },
   pickerItem: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingVertical: 13, paddingHorizontal: 14,
@@ -988,4 +1259,56 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(30,156,240,0.08)',
   },
   pickerItemText: { fontSize: 15 },
+
+  // Number picker actions
+  pickerActions: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 12,
+  },
+  pickerActionBtn: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pickerCancelBtn: {
+    backgroundColor: 'rgba(0,0,0,0.06)',
+  },
+  pickerConfirmBtn: {
+    backgroundColor: COLORS.blue,
+  },
+  pickerActionText: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+
+  // Legacy custom time input (no longer used but kept for compatibility)
+  customTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 4,
+  },
+  customTimeInput: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '600',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: 'rgba(30,156,240,0.20)',
+  },
+  customTimeBtn: {
+    backgroundColor: COLORS.blue,
+    paddingHorizontal: 18,
+    paddingVertical: 13,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  customTimeBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
 });

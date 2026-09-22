@@ -501,7 +501,7 @@ export default function ChatScreen() {
             const fsDb2 = db as ReturnType<typeof firestore>;
             const userSnap = await fsDb2.collection('users').doc(memberId).get();
             
-            if (userSnap.exists) {
+            if (userSnap.exists()) {
               const userData = userSnap.data()!;
               const photoPrivacy = userData.privacyProfilePhoto ?? 'Contacts';
               return {
@@ -589,7 +589,7 @@ export default function ChatScreen() {
               pastMemberEntry.leftAt.toDate() : 
               new Date(pastMemberEntry.leftAt);
             
-            if (userSnap.exists) {
+            if (userSnap.exists()) {
               const userData = userSnap.data()!;
               return {
                 userId: pastMemberEntry.userId,
@@ -782,6 +782,74 @@ export default function ChatScreen() {
     scrollToAndHighlight(messageId);
   }, [messages, highlightAnim]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Check & Trigger Auto Responder for Businesses ───────────────
+  const checkAndTriggerAutoResponder = useCallback(async () => {
+    if (isGroup || !otherUserId || !userId) return;
+
+    try {
+      const fsDb = db as ReturnType<typeof firestore>;
+      const recipientSnap = await fsDb.collection('users').doc(otherUserId).get();
+      if (!recipientSnap.exists) return;
+
+      const recipientData = recipientSnap.data()!;
+      if (!recipientData.autoResponderEnabled || !recipientData.auto_responder_message) return;
+
+      const isOutsideWorkingHours = (schedule: any) => {
+        if (!schedule) return false;
+        const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        const now = new Date();
+        const currentDay = DAYS[now.getDay()];
+        const todaySchedule = schedule[currentDay];
+        if (!todaySchedule || todaySchedule.open === 'Closed') return true;
+
+        const convertToMinutes = (timeStr: string) => {
+          const match = timeStr.match(/(\d+):(\d+)\s+(AM|PM)/i);
+          if (!match) return 0;
+          let hours = parseInt(match[1], 10);
+          const minutes = parseInt(match[2], 10);
+          const ampm = match[3].toUpperCase();
+          if (ampm === 'PM' && hours < 12) hours += 12;
+          if (ampm === 'AM' && hours === 12) hours = 0;
+          return hours * 60 + minutes;
+        };
+
+        const currentMinutes = now.getHours() * 60 + now.getMinutes();
+        const openMinutes = convertToMinutes(todaySchedule.open);
+        const closeMinutes = convertToMinutes(todaySchedule.close);
+        return currentMinutes < openMinutes || currentMinutes >= closeMinutes;
+      };
+
+      if (isOutsideWorkingHours(recipientData.workSchedule)) {
+        // Find the last message from the recipient in current messages array
+        const lastMessageFromRecipient = messages.slice().reverse().find(m => m.senderId === otherUserId);
+        const isAlreadyReplied = lastMessageFromRecipient?.text === recipientData.auto_responder_message;
+
+        if (!isAlreadyReplied) {
+          // Add small delay to feel natural
+          setTimeout(async () => {
+            await fsDb.collection('chats').doc(chatId).collection('messages').add({
+              senderId: otherUserId,
+              text: recipientData.auto_responder_message,
+              type: 'text',
+              timestamp: firestore.FieldValue.serverTimestamp(),
+              readBy: [otherUserId],
+              deliveredTo: [],
+              blockedMessage: false,
+            });
+            await fsDb.collection('chats').doc(chatId).update({
+              'lastMessage.text': recipientData.auto_responder_message,
+              'lastMessage.senderId': otherUserId,
+              'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
+            });
+          }, 1000);
+        }
+      }
+    } catch (err) {
+      console.warn('[ChatScreen] Error checking auto-responder:', err);
+    }
+  }, [isGroup, otherUserId, userId, chatId, messages]);
+
+
   // ── Upload and send voice note ──────────────────────────────────
   const handleVoiceUploadAndSend = useCallback(async (result: RecordingResult) => {
     if (!userId) return;
@@ -810,6 +878,7 @@ export default function ChatScreen() {
       setUploadProgress(0);
       setRetryCount(0);
       pendingRecordingRef.current = null;
+      await checkAndTriggerAutoResponder();
     } catch (error: any) {
       console.error('[ChatScreen] Voice upload failed:', error);
       setIsUploading(false);
@@ -825,7 +894,7 @@ export default function ChatScreen() {
         pendingRecordingRef.current = null;
       }
     }
-  }, [userId, chatId, retryCount]);
+  }, [userId, chatId, retryCount, checkAndTriggerAutoResponder]);
 
   // ── Retry upload handler ────────────────────────────────────────
   const handleRetryUpload = useCallback(() => {
@@ -893,6 +962,7 @@ export default function ChatScreen() {
         setReplyingTo(null);
         setInput('');
         setShowEmoji(false);
+        await checkAndTriggerAutoResponder();
       } else {
         if (isBlocked) {
           const fsDbBlocked = db as ReturnType<typeof firestore>;
@@ -919,6 +989,7 @@ export default function ChatScreen() {
           if (success) {
             setInput('');
             setShowEmoji(false);
+            await checkAndTriggerAutoResponder();
           }
         }
       }
@@ -1070,7 +1141,7 @@ export default function ChatScreen() {
         await fsDbFwd.collection('chats').doc(targetChatId).collection('messages').add(messageData);
 
         // Update target chat's lastMessage
-        const chatRef = doc(db, 'chats', targetChatId);
+        // const chatRef = doc(db, 'chats', targetChatId);
         const lastMessageText = 
           messageToForward.type === 'text' 
             ? messageToForward.text 
@@ -1253,6 +1324,8 @@ export default function ChatScreen() {
       
       if (!uploadResult.success) {
         Alert.alert('Upload Failed', 'Could not send the image. Please try again.');
+      } else {
+        await checkAndTriggerAutoResponder();
       }
     } catch (error) {
       console.error('[ChatScreen] Upload error:', error);
@@ -1366,6 +1439,7 @@ export default function ChatScreen() {
         console.log('[ChatScreen] All images processed');
         setUploadingImage(false);
         setImageUploadProgress(0);
+        await checkAndTriggerAutoResponder();
       }
     } catch (error) {
       console.error('[ChatScreen] Gallery error:', error);
@@ -1423,6 +1497,7 @@ export default function ChatScreen() {
         console.log('[ChatScreen] All files processed');
         setUploadingImage(false);
         setImageUploadProgress(0);
+        await checkAndTriggerAutoResponder();
       }
     } catch (error) {
       console.error('[ChatScreen] Document picker error:', error);
@@ -1463,6 +1538,7 @@ export default function ChatScreen() {
           
           if (uploadResult.success) {
             console.log('[ChatScreen] Audio file sent successfully');
+            await checkAndTriggerAutoResponder();
           } else {
             Alert.alert('Upload Failed', 'Could not send the audio file. Please try again.');
           }
@@ -1609,7 +1685,7 @@ export default function ChatScreen() {
       const updatedMembers = currentMembers.filter((id) => id !== userId);
       
       const userSnap = await fsDbLeave.collection('users').doc(userId).get();
-      const userDisplayName = userSnap.exists ? (userSnap.data()!.displayName || user?.phoneNumber || 'User') : 'User';
+      const userDisplayName = userSnap.exists() ? (userSnap.data()!.displayName || user?.phoneNumber || 'User') : 'User';
       
       const batch = fsDbLeave.batch();
       
