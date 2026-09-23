@@ -92,6 +92,8 @@ CALL_CONNECTION_FIX.md
 DUPLICATE_ANSWER_FIX.md
 IMMEDIATE_CLEANUP_FIX.md
 CALLER_INFO_FIX.md
+ChitChatBusiness_vs_Whats*.pdf
+ChitChatBusiness_vs_Whats*.html
 
 # Kiro spec folders (keep if collaborators use Kiro, otherwise uncomment)
 .kiro/specs/user-registration/

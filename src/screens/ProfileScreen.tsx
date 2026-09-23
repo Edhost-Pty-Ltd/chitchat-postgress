@@ -5,7 +5,7 @@ import {
   Image, Alert, Platform, TextInput, Modal,
   KeyboardAvoidingView, Switch, ActivityIndicator,
 } from 'react-native';
-import DatePicker from 'react-native-date-picker';
+import DateTimePickerModal from 'react-native-modal-datetime-picker';
 import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
@@ -245,9 +245,9 @@ export default function ProfileScreen() {
     return `${hour12}:${String(m).padStart(2, '0')} ${period}`;
   };
 
-  const confirmTime = () => {
+  const confirmTime = (date: Date) => {
     if (!pickerTarget) return;
-    const timeStr = formatPickerDate(pickerDate);
+    const timeStr = formatPickerDate(date);
     const updated = { ...workSchedule };
     if (!updated[pickerTarget.day]) {
       updated[pickerTarget.day] = { open: '8:00 AM', close: '5:00 PM' };
@@ -894,61 +894,14 @@ export default function ProfileScreen() {
         visible={hoursModalOpen}
         transparent
         animationType="slide"
-        onRequestClose={() => {
-          if (pickerVisible) {
-            setPickerVisible(false);
-            setPickerTarget(null);
-          } else {
-            setHoursModalOpen(false);
-          }
-        }}
+        onRequestClose={() => setHoursModalOpen(false)}
       >
         <View style={styles.modalOverlay}>
           <View style={[styles.modalSheet, { maxHeight: '90%' }]}>
             <View style={styles.modalHandle} />
 
-            {pickerVisible ? (
-              /* ── Inline Time Picker view (replaces day list) ── */
-              <>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                  <TouchableOpacity onPress={() => { setPickerVisible(false); setPickerTarget(null); }} style={{ padding: 4 }}>
-                    <AppIcon name="chevron-back" size={22} color={COLORS.blue} fixedColor />
-                  </TouchableOpacity>
-                  <AppText style={[styles.modalTitle, { marginBottom: 0, color: textColor, fontFamily, fontSize: 16 }]}>
-                    {pickerTarget
-                      ? `${pickerTarget.day} — ${pickerTarget.field === 'open' ? 'Opens at' : 'Closes at'}`
-                      : 'Select Time'}
-                  </AppText>
-                  <View style={{ width: 30 }} />
-                </View>
-
-                <View style={{ alignItems: 'center', marginVertical: 12 }}>
-                  <DatePicker
-                    date={pickerDate}
-                    onDateChange={setPickerDate}
-                    mode="time"
-                    locale="en_US"
-                  />
-                </View>
-
-                <View style={styles.pickerActions}>
-                  <TouchableOpacity
-                    onPress={() => { setPickerVisible(false); setPickerTarget(null); }}
-                    style={[styles.pickerActionBtn, styles.pickerCancelBtn]}
-                  >
-                    <AppText style={[styles.pickerActionText, { color: COLORS.sub, fontFamily }]}>Cancel</AppText>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    onPress={confirmTime}
-                    style={[styles.pickerActionBtn, styles.pickerConfirmBtn]}
-                  >
-                    <AppText fixedColor style={[styles.pickerActionText, { color: '#fff', fontFamily }]}>Set Time</AppText>
-                  </TouchableOpacity>
-                </View>
-              </>
-            ) : (
-              /* ── Day schedule list ── */
-              <>
+            {/* ── Day schedule list ── */}
+            <>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                   <AppText style={[styles.modalTitle, { marginBottom: 0, color: textColor, fontFamily }]}>Work Hours</AppText>
                   <TouchableOpacity onPress={() => setHoursModalOpen(false)}>
@@ -1009,10 +962,19 @@ export default function ProfileScreen() {
                   })}
                 </ScrollView>
               </>
-            )}
           </View>
         </View>
       </Modal>
+
+      {/* ── Time Picker Modal ── */}
+      <DateTimePickerModal
+        isVisible={pickerVisible}
+        mode="time"
+        date={pickerDate}
+        onConfirm={confirmTime}
+        onCancel={() => { setPickerVisible(false); setPickerTarget(null); }}
+        is24Hour={false}
+      />
 
       {/* ── Catalog Share Sheet ── */}
       {shareItem && (

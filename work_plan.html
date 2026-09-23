@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ChitChatBusiness Feature Parity Work Plan</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+    <style>
+        :root {
+            --bg-primary: #F8FAFC;
+            --surface: #FFFFFF;
+            --text-main: #0F172A;
+            --text-muted: #64748B;
+            --border: #E2E8F0;
+            --primary: #4F46E5;
+            --primary-light: #EEF2FF;
+            --accent-green-bg: #DCFCE7;
+            --accent-green-text: #166534;
+            --accent-amber-bg: #FEF3C7;
+            --accent-amber-text: #92400E;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) {
+                --bg-primary: #0B0F19;
+                --surface: #1E293B;
+                --text-main: #F8FAFC;
+                --text-muted: #94A3B8;
+                --border: #334155;
+                --primary: #6366F1;
+                --primary-light: #1E1B4B;
+                --accent-green-bg: #064E3B;
+                --accent-green-text: #6EE7B7;
+                --accent-amber-bg: #78350F;
+                --accent-amber-text: #FDE68A;
+            }
+        }
+
+        :root[data-theme="dark"] {
+            --bg-primary: #0B0F19;
+            --surface: #1E293B;
+            --text-main: #F8FAFC;
+            --text-muted: #94A3B8;
+            --border: #334155;
+            --primary: #6366F1;
+            --primary-light: #1E1B4B;
+            --accent-green-bg: #064E3B;
+            --accent-green-text: #6EE7B7;
+            --accent-amber-bg: #78350F;
+            --accent-amber-text: #FDE68A;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-main);
+            line-height: 1.5;
+            padding: 32px 16px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        header {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 32px;
+            margin-bottom: 24px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .header-title h1 {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--text-main);
+            margin-bottom: 6px;
+        }
+
+        .header-title p {
+            font-size: 14px;
+            color: var(--text-muted);
+        }
+
+        .action-btn {
+            background: var(--primary);
+            color: #FFFFFF;
+            border: none;
+            padding: 10px 18px;
+            font-size: 14px;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: opacity 0.2s;
+        }
+
+        .action-btn:hover {
+            opacity: 0.9;
+        }
+
+        .section {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 24px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+
+        h2 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+            gap: 20px;
+        }
+
+        .card {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .card-title {
+            font-weight: 600;
+            font-size: 16px;
+            color: var(--text-main);
+        }
+
+        .badge {
+            font-size: 12px;
+            font-weight: 500;
+            padding: 4px 10px;
+            border-radius: 9999px;
+        }
+
+        .badge.high {
+            background: var(--accent-amber-bg);
+            color: var(--accent-amber-text);
+        }
+
+        .badge.medium {
+            background: var(--primary-light);
+            color: var(--primary);
+        }
+
+        ul {
+            list-style-type: none;
+            margin-top: 10px;
+        }
+
+        li {
+            position: relative;
+            padding-left: 20px;
+            margin-bottom: 10px;
+            font-size: 14px;
+            color: var(--text-muted);
+        }
+
+        li::before {
+            content: "•";
+            position: absolute;
+            left: 0;
+            color: var(--primary);
+            font-weight: bold;
+        }
+
+        li strong {
+            color: var(--text-main);
+        }
+
+        .summary-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 8px;
+            font-size: 14px;
+        }
+
+        .summary-table th, .summary-table td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .summary-table th {
+            font-weight: 600;
+            color: var(--text-main);
+            background: var(--bg-primary);
+        }
+
+        .summary-table td {
+            color: var(--text-muted);
+        }
+
+        .summary-table td strong {
+            color: var(--text-main);
+        }
+
+        @media print {
+            body {
+                background: white;
+                color: black;
+                padding: 0;
+            }
+            .action-btn {
+                display: none;
+            }
+            header, .section {
+                border: 1px solid #ccc;
+                box-shadow: none;
+                page-break-inside: avoid;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-title">
+                <h1>ChitChatBusiness Feature Parity Work Plan</h1>
+                <p>Roadmap for closing WhatsApp Business feature gaps</p>
+            </div>
+            <button class="action-btn" onclick="window.print()">
+                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><path d="M6 14h12v8H6z"/></svg>
+                Save as PDF / Print
+            </button>
+        </header>
+
+        <div class="section">
+            <h2>Executive Summary</h2>
+            <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 16px;">
+                To achieve parity with WhatsApp Business, we have scoped out and prioritized missing messaging, catalog, and profile features. This work plan splits execution evenly between team members across two core phases.
+            </p>
+            <table class="summary-table">
+                <thead>
+                    <tr>
+                        <th>Phase</th>
+                        <th>Focus Area</th>
+                        <th>Assigned Owners</th>
+                        <th>Priority</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Phase 1</strong></td>
+                        <td>Quick Replies & Auto-Messages (Greeting/Away), Chat Labels, Broadcast Lists</td>
+                        <td>You & Team Member 2</td>
+                        <td><span class="badge high">High</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Phase 2</strong></td>
+                        <td>Catalog Cart/Sharing, QR Deep Links, Business Profile Enhancements, Message Analytics</td>
+                        <td>You & Team Member 2</td>
+                        <td><span class="badge medium">Medium</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section">
+            <h2>Phase 1: High-Priority Messaging & Core Workflows</h2>
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Member 1 (You)</span>
+                        <span class="badge high">High Priority</span>
+                    </div>
+                    <ul>
+                        <li><strong>Quick Replies System:</strong> Build shortcut expansion engine (e.g. typing <code>/</code> prompts saved responses like <code>/greeting</code>).</li>
+                        <li><strong>Chat Labels & Tags:</strong> Implement color-coded tag management for filtering and organizing customer conversations in the inbox list.</li>
+                    </ul>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Team Member 2</span>
+                        <span class="badge high">High Priority</span>
+                    </div>
+                    <ul>
+                        <li><strong>Greeting & Away Messages:</strong> Implement background logic/auto-responders for first-time inbound messages and scheduled off-hours.</li>
+                        <li><strong>Broadcast Lists:</strong> Build multi-recipient selection flow to send announcements to contact groups.</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Phase 2: Medium-Priority Profile & Commerce Enhancements</h2>
+            <div class="grid-2">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Member 1 (You)</span>
+                        <span class="badge medium">Medium Priority</span>
+                    </div>
+                    <ul>
+                        <li><strong>Catalog Cart & Sharing:</strong> Add cart state management and enable sending product cards directly into active chat threads.</li>
+                        <li><strong>QR Code / Shareable Link:</strong> Create QR generator and deep-link handler for frictionless customer onboarding.</li>
+                    </ul>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Team Member 2</span>
+                        <span class="badge medium">Medium Priority</span>
+                    </div>
+                    <ul>
+                        <li><strong>Enhanced Business Profile:</strong> Update Firestore schemas and UI to support industry categories, descriptions, and physical addresses.</li>
+                        <li><strong>Message Analytics:</strong> Implement basic delivery, sent, and read status counters across threads and broadcasts.</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
