@@ -1,5 +1,32 @@
 // ─── App-wide TypeScript Types ───────────────────────────────────────────────
 
+// ─── Catalog ──────────────────────────────────────────────────────────────────
+export interface CatalogItem {
+  id:           string;
+  name:         string;
+  price:        string;
+  description?: string;
+  imageUri?:    string | null;  // Firebase Storage download URL (after upload)
+}
+
+// ─── Broadcast ───────────────────────────────────────────────────────────────
+export interface BroadcastList {
+  id:          string;        // Firestore doc id
+  name:        string;        // e.g. "VIP Customers"
+  recipients:  string[];      // Firebase UIDs
+  createdBy:   string;        // sender UID
+  createdAt:   Date;
+  lastSentAt:  Date | null;
+  lastMessage: string | null; // preview of most recent send
+}
+
+// ─── Cart ─────────────────────────────────────────────────────────────────────
+export interface CartItem {
+  item:     CatalogItem;
+  quantity: number;
+  sellerUid: string; // which business this item belongs to
+}
+
 export type ContactStatus = 'online' | 'away' | 'offline';
 
 export type CallType = 'Outgoing' | 'Incoming' | 'Missed';
@@ -128,6 +155,7 @@ export type RootStackParamList = {
   Notifications: undefined;
   LinkedDevices: undefined;
   BlockedContacts: undefined;
+  Broadcast: undefined;
   AudioCall: { 
     callId: string;
     isOutgoing: boolean;

@@ -24,8 +24,9 @@ import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
 import { RootStackParamList } from '../types';
 
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
+import BroadcastScreen from './BroadcastScreen';
 type NavProp   = NativeStackNavigationProp<RootStackParamList, 'Chats'>;
-type TabType   = 'Chats' | 'Groups';
+type TabType   = 'Chats' | 'Groups' | 'Broadcast';
 type SheetMode = 'select' | 'newContact' | 'newGroup';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -291,7 +292,7 @@ function NewGroupSheet({
         contacts.map(async (c) => {
           try {
             const snap = await fsDb.collection('users').doc(c.userId).get();
-            map.set(c.userId, snap.exists ? (snap.data()!.privacyGroups ?? 'Everyone') : 'Everyone');
+            map.set(c.userId, snap.exists() ? (snap.data()!.privacyGroups ?? 'Everyone') : 'Everyone');
           } catch {
             map.set(c.userId, 'Everyone');
           }
@@ -756,7 +757,7 @@ export default function ChatsScreen() {
       for (const uid of unknownIds) {
         try {
           const snap = await fsDb.collection('users').doc(uid).get();
-          if (snap.exists) {
+          if (snap.exists()) {
             const data = snap.data()!;
             newInfo.set(uid, {
               displayName: data.displayName ?? data.phone ?? uid,
@@ -965,7 +966,7 @@ export default function ChatsScreen() {
 
       {/* ── Tabs ── */}
       <View style={styles.tabBar}>
-        {(['Chats', 'Groups'] as TabType[]).map((t) => {
+        {(['Chats', 'Groups','Broadcast'] as TabType[]).map((t) => {
           const active = tab === t;
           return active ? (
             <TouchableOpacity key={t} onPress={() => setTab(t)} activeOpacity={0.85}>
@@ -982,8 +983,10 @@ export default function ChatsScreen() {
         })}
       </View>
 
-      {/* ── Chat list ── */}
-      {chatsLoading ? (
+      {/* ── Chat list / Broadcast tab ── */}
+      {tab === 'Broadcast' ? (
+        <BroadcastScreen />
+      ) : chatsLoading ? (
         <View style={styles.emptyWrap}>
           <ActivityIndicator size="large" color={COLORS.blue} />
           <Text style={styles.emptyText}>Loading chats…</Text>
@@ -1009,14 +1012,16 @@ export default function ChatsScreen() {
         />
       )}
 
-      {/* ── FAB ── */}
-      <TouchableOpacity 
-        style={[styles.fab, bevel, { bottom: insets.bottom + 150 }, Platform.OS === 'web' && styles.fabWeb]} 
-        activeOpacity={0.85}
-        onPress={() => setSheetOpen(true)}
-      >
-        <AppIcon name="add" size={28} color={COLORS.blue} fixedColor />
-      </TouchableOpacity>
+      {/* ── FAB — hidden on Broadcast tab (BroadcastScreen has its own FAB) ── */}
+      {tab !== 'Broadcast' && (
+        <TouchableOpacity
+          style={[styles.fab, bevel, { bottom: insets.bottom + 150 }, Platform.OS === 'web' && styles.fabWeb]}
+          activeOpacity={0.85}
+          onPress={() => setSheetOpen(true)}
+        >
+          <AppIcon name="add" size={28} color={COLORS.blue} fixedColor />
+        </TouchableOpacity>
+      )}
 
       <BottomNav active="chats" />
     </View>
