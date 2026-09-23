@@ -1115,12 +1115,9 @@ const styles = StyleSheet.create({
   chatCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     borderRadius: RADIUS.lg,
-    paddingHorizontal: 14, paddingVertical: 10,
-    // bevel colors applied at runtime via useGlass() so they adapt to dark/light
-  },
-  // Avatar wrapper — relative for status dot
-  chatAvatarWrap: { position: 'relative', width: 52, height: 52 },
-  // Status dot absolute-positioned bottom-right of avatar
+    paddingHorizontal: 14, paddingVertical: 10, 
+  }, 
+  chatAvatarWrap: { position: 'relative', width: 52, height: 52 }, 
   onlineDot: {
     position: 'absolute', bottom: 1, right: 1,
     width: 13, height: 13, borderRadius: 7,
