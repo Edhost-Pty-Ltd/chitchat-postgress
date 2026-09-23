@@ -1,12 +1,20 @@
 // ─── App-wide TypeScript Types ───────────────────────────────────────────────
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
+export interface CatalogCollection {
+  id:        string;
+  name:      string;
+  emoji?:    string | null;  // null-safe — Firestore rejects undefined
+  createdAt: number;
+}
+
 export interface CatalogItem {
-  id:           string;
-  name:         string;
-  price:        string;
-  description?: string;
-  imageUri?:    string | null;  // Firebase Storage download URL (after upload)
+  id:            string;
+  name:          string;
+  price:         string;
+  description?:  string;
+  imageUri?:     string | null;  // Firebase Storage download URL (after upload)
+  collectionId?: string | null;  // links to CatalogCollection.id, null = uncategorised
 }
 
 // ─── Broadcast ───────────────────────────────────────────────────────────────

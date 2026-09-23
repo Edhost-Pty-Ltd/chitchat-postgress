@@ -25,7 +25,7 @@ if (Platform.OS !== 'web') {
     const camera = require('expo-camera');
     CameraView = camera.CameraView;
     useCameraPermissions = camera.useCameraPermissions;
-    
+
     const mediaLibrary = require('expo-media-library');
     useMediaLibraryPermissions = mediaLibrary.usePermissions;
   } catch (err) {
@@ -124,7 +124,7 @@ function formatLeftDate(date: Date): string {
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-  
+
   if (diffDays === 0) {
     return `Left today`;
   } else if (diffDays === 1) {
@@ -231,9 +231,15 @@ export default function ChatScreen() {
   const { totalItems, formatOrderSummary, clearCart } = useCart();
   const [cartSheetVisible, setCartSheetVisible] = useState(false);
 
-  // ── Seller catalog (loaded when profile modal opens for 1-on-1 chats) ──
-  const [sellerCatalog, setSellerCatalog] = useState<import('../types').CatalogItem[]>([]);
-  const [loadingCatalog, setLoadingCatalog] = useState(false);
+  // ── Seller catalog (loaded on mount for 1-on-1 chats) ──
+  const [sellerCatalog,      setSellerCatalog]      = useState<import('../types').CatalogItem[]>([]);
+  const [sellerCollections,  setSellerCollections]  = useState<import('../types').CatalogCollection[]>([]);
+  const [loadingCatalog,     setLoadingCatalog]     = useState(false);
+  // which collection is expanded inside the profile sheet (null = all collapsed)
+  const [expandedProfileCol, setExpandedProfileCol] = useState<string | null>(null);
+  // catalog full-screen sheet
+  const [catalogSheetVisible, setCatalogSheetVisible] = useState(false);
+  const [activeCatalogCol,    setActiveCatalogCol]    = useState<string | null>(null); // 'all' | colId
 
   // ── Messages — real-time Firestore stream ───────────────────────
   const { messages, loading, sendMessage } = useMessages(chatId, userId);
@@ -246,7 +252,7 @@ export default function ChatScreen() {
     if (isGroup) {
       return messages;
     }
-    
+
     // In 1-on-1 chats, filter out blocked messages for recipient
     return messages.filter(msg => {
       // If message has blockedMessage flag and I'm the recipient, hide it
@@ -260,7 +266,7 @@ export default function ChatScreen() {
   // ── Group messages by date with separators ──────────────────────
   // This creates a flat list of messages with date separator items inserted
   // whenever messages cross a calendar day boundary
-  type MessageListItem = 
+  type MessageListItem =
     | { type: 'message'; data: FireMessage }
     | { type: 'dateSeparator'; dateLabel: string; date: Date };
 
@@ -277,8 +283,8 @@ export default function ChatScreen() {
         return;
       }
 
-      const messageDate = message.timestamp instanceof Date 
-        ? message.timestamp 
+      const messageDate = message.timestamp instanceof Date
+        ? message.timestamp
         : new Date(message.timestamp);
 
       if (isNaN(messageDate.getTime())) {
@@ -459,16 +465,16 @@ export default function ChatScreen() {
   // ── Load muted state from AsyncStorage on mount ─────────────────
   useEffect(() => {
     let isMounted = true;
-    
+
     const loadMuted = async () => {
       const savedMuted = await loadMutedState(chatId);
       if (isMounted) {
         setMuted(savedMuted);
       }
     };
-    
+
     loadMuted();
-    
+
     return () => {
       isMounted = false;
     };
@@ -478,37 +484,15 @@ export default function ChatScreen() {
   useEffect(() => {
     if (!profileModalOpen || !isGroup || !chatId) return;
 
-  useEffect(() => {
-    if (!profileModalOpen || isGroup || !otherUserId) {
-      if (!profileModalOpen) setSellerCatalog([]);
-      return;
-    }
-    let cancelled = false;
-    setLoadingCatalog(true);
-    (async () => {
-      try {
-        const fsDbCat = db as ReturnType<typeof firestore>;
-        const snap = await fsDbCat.collection('users').doc(otherUserId).get();
-        if (!cancelled && snap.exists()) {
-          setSellerCatalog(snap.data()?.catalog ?? []);
-        }
-      } catch (err) {
-        console.warn('[ChatScreen] Failed to load seller catalog:', err);
-      } finally {
-        if (!cancelled) setLoadingCatalog(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [profileModalOpen, isGroup, otherUserId]);
     const fetchGroupMembers = async () => {
       setLoadingMembers(true);
       try {
         console.log('[ChatScreen] Fetching group members for chat:', chatId);
-        
+
         // First, get the chat document to retrieve member IDs
         const fsDbMembers = db as ReturnType<typeof firestore>;
         const chatSnapMembers = await fsDbMembers.collection('chats').doc(chatId).get();
-        
+
         if (!chatSnapMembers.exists) {
           console.warn('[ChatScreen] Chat document not found');
           setGroupMembers([]);
@@ -518,7 +502,7 @@ export default function ChatScreen() {
 
         const chatDataMembers = chatSnapMembers.data()!;
         const memberIds = chatDataMembers.members as string[] || [];
-        
+
         console.log('[ChatScreen] Found member IDs:', memberIds);
 
         if (memberIds.length === 0) {
@@ -532,7 +516,7 @@ export default function ChatScreen() {
           try {
             const fsDb2 = db as ReturnType<typeof firestore>;
             const userSnap = await fsDb2.collection('users').doc(memberId).get();
-            
+
             if (userSnap.exists()) {
               const userData = userSnap.data()!;
               const photoPrivacy = userData.privacyProfilePhoto ?? 'Contacts';
@@ -543,7 +527,7 @@ export default function ChatScreen() {
                 status: userData.status || 'offline',
               } as GroupMember;
             }
-            
+
             // Fallback for users without profile data
             return {
               userId: memberId,
@@ -584,11 +568,11 @@ export default function ChatScreen() {
       setLoadingPastMembers(true);
       try {
         console.log('[ChatScreen] Fetching past members for chat:', chatId);
-        
+
         // First, get the chat document to check for pastMembers field
         const fsDbPast2 = db as ReturnType<typeof firestore>;
         const chatSnapP = await fsDbPast2.collection('chats').doc(chatId).get();
-        
+
         if (!chatSnapP.exists) {
           console.warn('[ChatScreen] Chat document not found');
           setPastMembers([]);
@@ -601,7 +585,7 @@ export default function ChatScreen() {
           userId: string;
           leftAt: any; // Firestore Timestamp
         }> | undefined;
-        
+
         console.log('[ChatScreen] Found past member data:', pastMemberData);
 
         if (!pastMemberData || pastMemberData.length === 0) {
@@ -615,12 +599,12 @@ export default function ChatScreen() {
           try {
             const fsDb3 = db as ReturnType<typeof firestore>;
             const userSnap = await fsDb3.collection('users').doc(pastMemberEntry.userId).get();
-            
+
             // Convert Firestore Timestamp to Date
-            const leftAtDate = pastMemberEntry.leftAt?.toDate ? 
-              pastMemberEntry.leftAt.toDate() : 
+            const leftAtDate = pastMemberEntry.leftAt?.toDate ?
+              pastMemberEntry.leftAt.toDate() :
               new Date(pastMemberEntry.leftAt);
-            
+
             if (userSnap.exists()) {
               const userData = userSnap.data()!;
               return {
@@ -630,7 +614,7 @@ export default function ChatScreen() {
                 leftAt: leftAtDate,
               } as PastMember;
             }
-            
+
             // Fallback for users without profile data
             return {
               userId: pastMemberEntry.userId,
@@ -663,11 +647,14 @@ export default function ChatScreen() {
     fetchPastMembers();
   }, [profileModalOpen, isGroup, chatId]);
 
-  // ── Fetch seller catalog when profile modal opens (1-on-1 chats only) ──────
-  // Reads users/{otherUserId}.catalog so the customer can browse and add items.
+  // ── Load seller catalog + collections (1-on-1 only) ──────────────
+  // IMPORTANT: Loads on mount (not just when the profile modal opens) so
+  // that the header catalog button and profile catalog entry both have data.
   useEffect(() => {
-    if (!profileModalOpen || isGroup || !otherUserId) {
-      if (!profileModalOpen) setSellerCatalog([]);
+    if (isGroup || !otherUserId) {
+      setSellerCatalog([]);
+      setSellerCollections([]);
+      setLoadingCatalog(false);
       return;
     }
     let cancelled = false;
@@ -678,15 +665,23 @@ export default function ChatScreen() {
         const snap = await fsDbCat.collection('users').doc(otherUserId).get();
         if (!cancelled && snap.exists()) {
           setSellerCatalog(snap.data()?.catalog ?? []);
+          setSellerCollections(snap.data()?.collections ?? []);
+        } else if (!cancelled) {
+          setSellerCatalog([]);
+          setSellerCollections([]);
         }
       } catch (err) {
         console.warn('[ChatScreen] Failed to load seller catalog:', err);
+        if (!cancelled) {
+          setSellerCatalog([]);
+          setSellerCollections([]);
+        }
       } finally {
         if (!cancelled) setLoadingCatalog(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [profileModalOpen, isGroup, otherUserId]);
+  }, [isGroup, otherUserId]);
 
   // ── Check blocked status ─────────────────────────────────────────
   useEffect(() => {
@@ -699,21 +694,21 @@ export default function ChatScreen() {
     const checkBlockedStatus = async () => {
       try {
         console.log('[ChatScreen] Checking if contact is blocked:', otherUserId);
-        
+
         // Check if the current user has blocked the other user
         const fsDbBlock = db as ReturnType<typeof firestore>;
         const blockedByMeSnap = await fsDbBlock
           .collection('users').doc(userId!).collection('blockedUsers').doc(otherUserId!).get();
         const blockedMeSnap = await fsDbBlock
           .collection('users').doc(otherUserId!).collection('blockedUsers').doc(userId!).get();
-        
+
         const iBlockedThem = blockedByMeSnap.exists;
         const theyBlockedMe = blockedMeSnap.exists;
-        
+
         setBlockedByMe(iBlockedThem);
         setBlockedByThem(theyBlockedMe);
         setIsBlocked(iBlockedThem || theyBlockedMe);
-        
+
         console.log('[ChatScreen] Blocked status - by me:', iBlockedThem, ', by them:', theyBlockedMe);
       } catch (error) {
         console.error('[ChatScreen] Error checking blocked status:', error);
@@ -739,10 +734,10 @@ export default function ChatScreen() {
               .collection('users').doc(userId).collection('blockedUsers').doc(otherUserId).get();
             const blockedMeSnapF = await fsDbFocus
               .collection('users').doc(otherUserId).collection('blockedUsers').doc(userId).get();
-            
+
             const iBlockedThem = blockedByMeSnapF.exists;
             const theyBlockedMe = blockedMeSnapF.exists;
-            
+
             setBlockedByMe(iBlockedThem);
             setBlockedByThem(theyBlockedMe);
             setIsBlocked(iBlockedThem || theyBlockedMe);
@@ -1088,7 +1083,7 @@ export default function ChatScreen() {
 
   const handleDeleteMessage = async () => {
     if (!selectedMessageId) return;
-    
+
     Alert.alert(
       'Delete Message',
       'Are you sure you want to delete this message?',
@@ -1198,10 +1193,9 @@ export default function ChatScreen() {
         await fsDbFwd.collection('chats').doc(targetChatId).collection('messages').add(messageData);
 
         // Update target chat's lastMessage
-        // const chatRef = doc(db, 'chats', targetChatId);
-        const lastMessageText = 
-          messageToForward.type === 'text' 
-            ? messageToForward.text 
+        const lastMessageText =
+          messageToForward.type === 'text'
+            ? messageToForward.text
             : messageToForward.type === 'voice'
               ? '🎤 Voice message'
               : messageToForward.type === 'image'
@@ -1224,7 +1218,7 @@ export default function ChatScreen() {
         'Message Forwarded',
         `Message forwarded to ${selectedChatIds.length} ${selectedChatIds.length === 1 ? 'chat' : 'chats'}`
       );
-      
+
       setMessageToForward(null);
       setForwardModalVisible(false);
     } catch (error) {
@@ -1341,16 +1335,16 @@ export default function ChatScreen() {
   const compressImage = async (uri: string): Promise<string> => {
     try {
       console.log('[ChatScreen] Attempting to compress image:', uri);
-      
+
       // Dynamic import to avoid crash if module not available
       const { manipulateAsync, SaveFormat } = await import('expo-image-manipulator');
-      
+
       const compressed = await manipulateAsync(
         uri,
         [{ resize: { width: 1200 } }], // Resize to max 1200px width, maintain aspect ratio
         { compress: 0.8, format: SaveFormat.JPEG }
       );
-      
+
       console.log('[ChatScreen] Compressed successfully');
       return compressed.uri;
     } catch (error) {
@@ -1365,10 +1359,10 @@ export default function ChatScreen() {
 
     try {
       console.log('[ChatScreen] Uploading image:', uri);
-      
+
       // Compress before upload
       const compressedUri = await compressImage(uri);
-      
+
       const uploadResult = await sendImageMessage(
         chatId,
         userId,
@@ -1378,7 +1372,7 @@ export default function ChatScreen() {
           console.log('[ChatScreen] Image upload progress:', progress);
         }
       );
-      
+
       if (!uploadResult.success) {
         Alert.alert('Upload Failed', 'Could not send the image. Please try again.');
       } else {
@@ -1396,13 +1390,13 @@ export default function ChatScreen() {
       Alert.alert('Camera', 'Camera is not available on web.');
       return;
     }
-    
+
     // Check if permission is already granted
     if (cameraPermission?.granted) {
       setCameraOpen(true);
       return;
     }
-    
+
     // Request permission
     const { granted } = await requestCameraPermission();
     if (granted) {
@@ -1420,15 +1414,15 @@ export default function ChatScreen() {
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.85,
       });
-      
+
       console.log('[ChatScreen] Picture taken:', photo.uri);
       setCameraOpen(false);
-      
+
       setUploadingImage(true);
       setImageUploadProgress(0);
-      
+
       await uploadSingleImage(photo.uri);
-      
+
       setUploadingImage(false);
       setImageUploadProgress(0);
       console.log('[ChatScreen] Picture uploaded successfully');
@@ -1454,23 +1448,23 @@ export default function ChatScreen() {
         allowsMultipleSelection: true, // Enable multiple selection
         quality: 0.85,
       });
-      
+
       if (!result.canceled && result.assets.length > 0 && userId) {
         setShowAttach(false);
         setUploadingImage(true);
         setImageUploadProgress(0);
-        
+
         // Upload images sequentially
         for (let i = 0; i < result.assets.length; i++) {
           const imageUri = result.assets[i].uri;
           console.log(`[ChatScreen] Uploading image ${i + 1}/${result.assets.length}`);
-          
+
           try {
             // Reset progress for each image
             setImageUploadProgress(0);
-            
+
             const compressedUri = await compressImage(imageUri);
-            
+
             const uploadResult = await sendImageMessage(
               chatId,
               userId,
@@ -1480,7 +1474,7 @@ export default function ChatScreen() {
                 console.log(`[ChatScreen] Image ${i + 1} upload progress:`, progress);
               }
             );
-            
+
             if (!uploadResult.success) {
               console.error(`[ChatScreen] Image ${i + 1} upload failed`);
               Alert.alert('Upload Failed', `Image ${i + 1} could not be sent. Continuing with others...`);
@@ -1492,7 +1486,7 @@ export default function ChatScreen() {
             Alert.alert('Error', `Failed to upload image ${i + 1}. Continuing with others...`);
           }
         }
-        
+
         console.log('[ChatScreen] All images processed');
         setUploadingImage(false);
         setImageUploadProgress(0);
@@ -1508,24 +1502,24 @@ export default function ChatScreen() {
 
   const openDocuments = async () => {
     try {
-      const result = await DocumentPicker.getDocumentAsync({ 
+      const result = await DocumentPicker.getDocumentAsync({
         multiple: true,
         type: '*/*', // Allow all file types
       });
-      
+
       if (!result.canceled && result.assets.length > 0 && userId) {
         setShowAttach(false);
         setUploadingImage(true);
         setImageUploadProgress(0);
-        
+
         for (let i = 0; i < result.assets.length; i++) {
           const file = result.assets[i];
           console.log(`[ChatScreen] Uploading file ${i + 1}/${result.assets.length}:`, file.name, file.mimeType);
-          
+
           try {
             // Reset progress for each file
             setImageUploadProgress(0);
-            
+
             const uploadResult = await sendFileMessage(
               chatId,
               userId,
@@ -1538,7 +1532,7 @@ export default function ChatScreen() {
                 console.log(`[ChatScreen] File ${i + 1} upload progress:`, progress);
               }
             );
-            
+
             if (!uploadResult.success) {
               console.error(`[ChatScreen] File ${i + 1} upload failed`);
               Alert.alert('Upload Failed', `${file.name} could not be sent. Continuing with others...`);
@@ -1550,7 +1544,7 @@ export default function ChatScreen() {
             Alert.alert('Error', `Failed to upload ${file.name}. Continuing with others...`);
           }
         }
-        
+
         console.log('[ChatScreen] All files processed');
         setUploadingImage(false);
         setImageUploadProgress(0);
@@ -1566,19 +1560,19 @@ export default function ChatScreen() {
 
   const openAudioPicker = async () => {
     try {
-      const result = await DocumentPicker.getDocumentAsync({ 
+      const result = await DocumentPicker.getDocumentAsync({
         type: 'audio/*', // Only audio files
         multiple: false,
       });
-      
+
       if (!result.canceled && result.assets.length > 0 && userId) {
         setShowAttach(false);
         const audioFile = result.assets[0];
         console.log('[ChatScreen] Selected audio file:', audioFile.name, audioFile.mimeType);
-        
+
         setUploadingImage(true);
         setImageUploadProgress(0);
-        
+
         try {
           const uploadResult = await sendFileMessage(
             chatId,
@@ -1592,7 +1586,7 @@ export default function ChatScreen() {
               console.log('[ChatScreen] Audio file upload progress:', progress);
             }
           );
-          
+
           if (uploadResult.success) {
             console.log('[ChatScreen] Audio file sent successfully');
             await checkAndTriggerAutoResponder();
@@ -1637,7 +1631,7 @@ export default function ChatScreen() {
 
       const BATCH_SIZE = 500;
       const batches = [];
-      
+
       for (let i = 0; i < snapshot.docs.length; i += BATCH_SIZE) {
         const batch = fsDbClear.batch();
         const batchDocs = snapshot.docs.slice(i, i + BATCH_SIZE);
@@ -1667,7 +1661,7 @@ export default function ChatScreen() {
 
     try {
       console.log('[ChatScreen] Blocking contact:', otherUserId);
-      
+
       // Add the blocked user to the current user's blockedUsers subcollection
       const fsDbBlockC = db as ReturnType<typeof firestore>;
       await fsDbBlockC.collection('users').doc(userId).collection('blockedUsers').doc(otherUserId).set({
@@ -1675,12 +1669,12 @@ export default function ChatScreen() {
         displayName: displayName,
         photoURL: otherUserPhoto || null,
       });
-      
+
       console.log('[ChatScreen] Contact blocked successfully');
       setIsBlocked(true);
       setShowBlockConfirmation(false);
       setProfileModalOpen(false);
-      
+
       // Show confirmation
       Alert.alert('Contact Blocked', `${displayName} has been blocked. You won't receive messages from this contact.`);
     } catch (error) {
@@ -1698,15 +1692,15 @@ export default function ChatScreen() {
 
     try {
       console.log('[ChatScreen] Unblocking contact:', otherUserId);
-      
+
       // Remove the blocked user from the current user's blockedUsers subcollection
       const fsDbUnblock = db as ReturnType<typeof firestore>;
       await fsDbUnblock.collection('users').doc(userId).collection('blockedUsers').doc(otherUserId).delete();
-      
+
       console.log('[ChatScreen] Contact unblocked successfully');
       setIsBlocked(false);
       setBlockedByMe(false);
-      
+
       // Show confirmation
       Alert.alert('Contact Unblocked', `You can now send and receive messages from ${displayName}.`);
     } catch (error) {
@@ -1726,11 +1720,11 @@ export default function ChatScreen() {
 
     try {
       console.log('[ChatScreen] Leaving group:', chatId);
-      
+
       const fsDbLeave = db as ReturnType<typeof firestore>;
       const chatRefLeave = fsDbLeave.collection('chats').doc(chatId);
       const chatSnapLeave = await chatRefLeave.get();
-      
+
       if (!chatSnapLeave.exists) {
         Alert.alert('Error', 'Group not found.');
         setLeavingGroup(false);
@@ -1740,21 +1734,21 @@ export default function ChatScreen() {
       const chatDataLeave = chatSnapLeave.data()!;
       const currentMembers = chatDataLeave.members as string[] || [];
       const updatedMembers = currentMembers.filter((id) => id !== userId);
-      
+
       const userSnap = await fsDbLeave.collection('users').doc(userId).get();
       const userDisplayName = userSnap.exists() ? (userSnap.data()!.displayName || user?.phoneNumber || 'User') : 'User';
-      
+
       const batch = fsDbLeave.batch();
-      
+
       const pastMembersEntry = { userId, leftAt: new Date() };
       const currentPastMembers = chatDataLeave.pastMembers || [];
       const updatedPastMembers = [...currentPastMembers, pastMembersEntry];
-      
+
       batch.update(chatRefLeave, {
         members: updatedMembers,
         pastMembers: updatedPastMembers,
       });
-      
+
       const msgRef = fsDbLeave.collection('chats').doc(chatId).collection('messages').doc();
       batch.set(msgRef, {
         messageId: msgRef.id,
@@ -1765,23 +1759,23 @@ export default function ChatScreen() {
         timestamp: firestore.FieldValue.serverTimestamp(),
         readBy: [userId],
       });
-      
+
       batch.update(chatRefLeave, {
         'lastMessage.text': `${userDisplayName} left the group`,
         'lastMessage.senderId': userId,
         'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
       });
-      
+
       await batch.commit();
-      
+
       console.log('[ChatScreen] Left group successfully');
       setLeavingGroup(false);
       setShowLeaveGroupConfirmation(false);
       setProfileModalOpen(false);
-      
+
       // Navigate back to ChatsScreen
       navigation.goBack();
-      
+
       // Show confirmation
       setTimeout(() => {
         Alert.alert('Left Group', `You have left ${displayName}.`);
@@ -1835,11 +1829,34 @@ export default function ChatScreen() {
       item.type === 'text' &&
       item.text?.toLowerCase().includes(searchQuery.toLowerCase());
     const isActiveMatch = searchMatchIds[searchCurrentIndex] === item.messageId;
-    
+
     // Get tick status for outgoing messages
     const tickStatus = getTickStatus(item, userId, isGroup);
     const tickIcon = getTickIcon(tickStatus);
-    
+
+    // ── Catalog product card — standalone render, no msgRow wrapper ──
+    // Rendered here (before messageContent) so it bypasses the chat bubble
+    // layout entirely and avoids the duplicate-timestamp problem.
+    if (item.type === 'catalog' && item.catalogItem) {
+      return (
+        <TouchableOpacity
+          activeOpacity={1}
+          onLongPress={() => handleLongPressMessage(item.messageId)}
+          delayLongPress={300}
+        >
+          <View style={[isSelected && styles.selectedMessage]}>
+            <CatalogBubble
+              item={item.catalogItem}
+              isOutgoing={isOut}
+              sellerUid={item.senderId}
+              timestamp={formatTime(item.timestamp)}
+              tickIcon={tickIcon}
+            />
+          </View>
+        </TouchableOpacity>
+      );
+    }
+
     // Debug logging for file messages
     if (item.type === 'file') {
       console.log('[ChatScreen] Rendering file message:', {
@@ -1850,7 +1867,7 @@ export default function ChatScreen() {
         mimeType: item.mimeType,
       });
     }
-    
+
     const messageContent = (
       <View style={[styles.msgRow, isOut ? styles.msgRowOut : styles.msgRowIn]}>
         {!isOut && (
@@ -1882,15 +1899,15 @@ export default function ChatScreen() {
             />
           ) : item.type === 'image' && item.imageUrl ? (
             <LinearGradient colors={GRADIENTS.chatSent} style={[styles.bubble, styles.bubbleIn, styles.imageBubble]}>
-              <TouchableOpacity 
+              <TouchableOpacity
                 activeOpacity={0.9}
                 onPress={() => {
                   setViewerImageUrl(item.imageUrl!);
                   setViewerVisible(true);
                 }}
               >
-                <Image 
-                  source={{ uri: item.imageUrl }} 
+                <Image
+                  source={{ uri: item.imageUrl }}
                   style={styles.messageImage}
                   resizeMode="cover"
                 />
@@ -1902,7 +1919,7 @@ export default function ChatScreen() {
           ) : (
             <LinearGradient colors={GRADIENTS.chatSent} style={[styles.bubble, styles.bubbleIn]}>
               {item.replyTo && (
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={styles.replyBubble}
                   onPress={() => {
                     const originalMsg = messages.find(m => m.messageId === item.replyTo!.messageId);
@@ -1971,15 +1988,15 @@ export default function ChatScreen() {
             />
           ) : item.type === 'image' && item.imageUrl ? (
             <View style={[styles.bubble, styles.bubbleOut, styles.imageBubble]}>
-              <TouchableOpacity 
+              <TouchableOpacity
                 activeOpacity={0.9}
                 onPress={() => {
                   setViewerImageUrl(item.imageUrl!);
                   setViewerVisible(true);
                 }}
               >
-                <Image 
-                  source={{ uri: item.imageUrl }} 
+                <Image
+                  source={{ uri: item.imageUrl }}
                   style={styles.messageImage}
                   resizeMode="cover"
                 />
@@ -1997,7 +2014,7 @@ export default function ChatScreen() {
           ) : (
             <View style={[styles.bubble, styles.bubbleOut]}>
               {item.replyTo && (
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={[styles.replyBubble, { backgroundColor: 'rgba(30,156,240,0.08)' }]}
                   onPress={() => {
                     const originalMsg = messages.find(m => m.messageId === item.replyTo!.messageId);
@@ -2016,9 +2033,9 @@ export default function ChatScreen() {
                       {item.replyTo.senderId === userId ? 'You' : resolveSenderName(item.replyTo.senderId)}
                     </AppText>
                     <AppText style={[styles.replyBubbleText, { color: textColor, opacity: 0.7 }]} numberOfLines={1}>
-                      {item.replyTo.type === 'text' && item.replyTo.text 
-                        ? item.replyTo.text 
-                        : item.replyTo.type === 'voice' 
+                      {item.replyTo.type === 'text' && item.replyTo.text
+                        ? item.replyTo.text
+                        : item.replyTo.type === 'voice'
                           ? '🎤 Voice message'
                           : item.replyTo.type === 'image'
                             ? '📷 Image'
@@ -2043,16 +2060,6 @@ export default function ChatScreen() {
               </View>
             </View>
           )
-        )}
-
-        {/* ── Catalog product card ─────────────────────────────────── */}
-        {item.type === 'catalog' && item.catalogItem && (
-          <CatalogBubble
-            item={item.catalogItem}
-            isOutgoing={isOut}
-            sellerUid={item.senderId}
-            timestamp={formatTime(item.timestamp)}
-          />
         )}
       </View>
     );
@@ -2107,6 +2114,14 @@ export default function ChatScreen() {
       <AppText style={styles.emptyText}>Say hello!</AppText>
     </View>
   );
+
+  // ── Open catalog helper (always closes profile sheet first) ────
+  const openCatalogSheet = useCallback(() => {
+    setProfileModalOpen(false);
+    setActiveCatalogCol(null);
+    // Defer slightly so the profile modal dismisses before catalog modal presents.
+    setTimeout(() => setCatalogSheetVisible(true), 50);
+  }, []);
 
   return (
     <>
@@ -2195,9 +2210,9 @@ export default function ChatScreen() {
               onPress={() => setProfileModalOpen(true)}
               activeOpacity={0.75}
             >
-              <Avatar 
-                initials={getInitials(displayName)} 
-                color={COLORS.blue} 
+              <Avatar
+                initials={getInitials(displayName)}
+                color={COLORS.blue}
                 size={40}
                 imageUrl={headerPhoto}
               />
@@ -2211,6 +2226,17 @@ export default function ChatScreen() {
               </View>
             </TouchableOpacity>
 
+            {/* Catalog button — only for 1-on-1 chats with a seller catalog */}
+            {!isGroup && sellerCatalog.length > 0 && (
+              <TouchableOpacity
+                style={styles.iconBtn}
+                onPress={openCatalogSheet}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <AppIcon name="storefront" size={20} color={COLORS.blue} fixedColor />
+              </TouchableOpacity>
+            )}
+
             <TouchableOpacity style={styles.iconBtn} onPress={handleVoiceCall} disabled={outgoingCall.isInitiating}>
               <AppIcon name="call" size={20} color={COLORS.blue} fixedColor />
             </TouchableOpacity>
@@ -2223,10 +2249,10 @@ export default function ChatScreen() {
 
           {/* ── 3-dot menu dropdown ── */}
           <Modal visible={menuOpen} transparent animationType="none" onRequestClose={() => setMenuOpen(false)}>
-            <TouchableOpacity 
-              style={styles.menuBackdrop} 
-              activeOpacity={1} 
-              onPress={() => setMenuOpen(false)} 
+            <TouchableOpacity
+              style={styles.menuBackdrop}
+              activeOpacity={1}
+              onPress={() => setMenuOpen(false)}
             />
             <View style={[styles.menuCard, bevel]}>
               <TouchableOpacity
@@ -2239,11 +2265,11 @@ export default function ChatScreen() {
                 }}
                 activeOpacity={0.75}
               >
-                <AppIcon 
-                  name={muted ? 'notifications' : 'notifications-off'} 
-                  size={20} 
-                  color={COLORS.blue} 
-                  fixedColor 
+                <AppIcon
+                  name={muted ? 'notifications' : 'notifications-off'}
+                  size={20}
+                  color={COLORS.blue}
+                  fixedColor
                 />
                 <AppText style={[styles.menuItemText, { color: textColor }]}>
                   {muted ? 'Unmute Notifications' : 'Mute Notifications'}
@@ -2460,9 +2486,9 @@ export default function ChatScreen() {
                     Replying to {replyingTo.senderId === userId ? 'yourself' : resolveSenderName(replyingTo.senderId)}
                   </AppText>
                   <AppText style={[styles.replyPreviewText, { color: FG.secondary }]} numberOfLines={1}>
-                    {replyingTo.type === 'text' && replyingTo.text 
-                      ? replyingTo.text 
-                      : replyingTo.type === 'voice' 
+                    {replyingTo.type === 'text' && replyingTo.text
+                      ? replyingTo.text
+                      : replyingTo.type === 'voice'
                         ? '🎤 Voice message'
                         : replyingTo.type === 'image'
                           ? '📷 Image'
@@ -2485,7 +2511,7 @@ export default function ChatScreen() {
             /* Show blocked banner + input bar */
             <View style={styles.inputBarWithBanner}>
               {/* Banner */}
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={[styles.blockedBanner, { backgroundColor: FG.glassBg, borderTopColor: FG.glassBorder }]}
                 onPress={blockedByMe ? handleUnblockContact : undefined}
                 activeOpacity={blockedByMe ? 0.7 : 1}
@@ -2676,7 +2702,7 @@ export default function ChatScreen() {
 
       {/* ── Contact Picker Modal ── */}
       <Modal visible={contactPickerOpen} transparent animationType="slide" onRequestClose={() => setContactPickerOpen(false)}>
-        <KeyboardAvoidingView 
+        <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={{ flex: 1 }}
         >
@@ -2704,9 +2730,9 @@ export default function ChatScreen() {
             </View>
 
             {/* Contact list */}
-            <ScrollView 
-              showsVerticalScrollIndicator={false} 
-              style={styles.contactPickerList} 
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              style={styles.contactPickerList}
               contentContainerStyle={styles.contactPickerContent}
               keyboardShouldPersistTaps="handled"
             >
@@ -2816,14 +2842,14 @@ export default function ChatScreen() {
 
       {/* ── Full-screen image viewer ── */}
       {viewerVisible && viewerImageUrl && (
-        <Modal 
-          visible 
-          transparent 
-          animationType="fade" 
+        <Modal
+          visible
+          transparent
+          animationType="fade"
           onRequestClose={() => setViewerVisible(false)}
         >
           <View style={styles.imageViewerContainer}>
-            <TouchableOpacity 
+            <TouchableOpacity
               style={styles.imageViewerBackdrop}
               activeOpacity={1}
               onPress={() => setViewerVisible(false)}
@@ -2834,7 +2860,7 @@ export default function ChatScreen() {
                 resizeMode="contain"
               />
             </TouchableOpacity>
-            <TouchableOpacity 
+            <TouchableOpacity
               style={styles.imageViewerCloseBtn}
               onPress={() => setViewerVisible(false)}
             >
@@ -2863,7 +2889,28 @@ export default function ChatScreen() {
         />
       </Modal>
 
-      {/* ── Profile Modal ── */}
+      {/* ── Catalog Sheet ── */}
+      <Modal
+        visible={catalogSheetVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCatalogSheetVisible(false)}
+      >
+        <CatalogBrowseSheet
+          collections={sellerCollections}
+          catalog={sellerCatalog}
+          sellerUid={otherUserId ?? ''}
+          loading={loadingCatalog}
+          activeColId={activeCatalogCol}
+          onSelectCol={setActiveCatalogCol}
+          textColor={textColor}
+          fgSecondary={FG.secondary}
+          onClose={() => setCatalogSheetVisible(false)}
+          onViewCart={() => { setCatalogSheetVisible(false); setCartSheetVisible(true); }}
+        />
+      </Modal>
+
+      {/* ── Profile Modal — Business Profile Overview ── */}
       <Modal
         visible={profileModalOpen}
         transparent
@@ -2871,184 +2918,145 @@ export default function ChatScreen() {
         onRequestClose={() => setProfileModalOpen(false)}
       >
         <View style={styles.profileOverlay}>
-          <TouchableOpacity 
-            style={styles.profileBackdrop} 
-            activeOpacity={1} 
-            onPress={() => setProfileModalOpen(false)} 
+          <TouchableOpacity
+            style={styles.profileBackdrop}
+            activeOpacity={1}
+            onPress={() => setProfileModalOpen(false)}
           />
           <View style={[styles.profileSheet, { backgroundColor: FG.glassBg, borderColor: FG.glassBorder }]}>
             <AppBg />
-            {/* Handle */}
+
+            {/* ── Handle ── */}
             <View style={styles.profileHandle} />
 
-            {/* Close button */}
-            <TouchableOpacity 
-              style={styles.profileCloseBtn} 
-              onPress={() => setProfileModalOpen(false)}
-            >
-              <AppIcon name="close" size={20} color={FG.secondary} />
-            </TouchableOpacity>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
 
-            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.profileScroll}>
-              {/* Avatar + name */}
-              <View style={styles.profileAvatarWrap}>
-                  <Avatar 
-                    initials={getInitials(displayName)} 
-                    color={COLORS.blue} 
-                    size={80}
+              {/* ── Hero header: gradient banner + avatar ── */}
+              <View style={profileHeroStyles.hero}>
+                <LinearGradient
+                  colors={[COLORS.blue, COLORS.blueDark]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={profileHeroStyles.heroBanner}
+                />
+                {/* Close pill */}
+                <TouchableOpacity
+                  style={profileHeroStyles.closeBtn}
+                  onPress={() => setProfileModalOpen(false)}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                >
+                  <AppIcon name="close" size={18} color="#fff" fixedColor />
+                </TouchableOpacity>
+                {/* Avatar centred on bottom edge of banner */}
+                <View style={profileHeroStyles.avatarRing}>
+                  <Avatar
+                    initials={getInitials(displayName)}
+                    color={COLORS.blue}
+                    size={78}
                     imageUrl={headerPhoto}
                   />
                 </View>
-                <AppText style={[styles.profileName, { color: textColor, fontFamily }]}>
-                  {displayName}
-                </AppText>
-                <AppText style={[styles.profileStatus, { color: isOnline ? COLORS.blue : FG.secondary }]}>
-                  {isGroup ? `Group · ${messages.length} messages` : (presenceText || 'Tap here for info')}
-                </AppText>
+              </View>
 
-                {/* Action buttons */}
-                <View style={styles.profileActions}>
+              {/* ── Name + status ── */}
+              <View style={profileHeroStyles.nameBlock}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <AppText style={[profileHeroStyles.name, { color: textColor, fontFamily }]}>
+                    {displayName}
+                  </AppText>
+                  {!isGroup && (
+                    <LinearGradient colors={GRADIENTS.primary} style={profileHeroStyles.verifiedBadge}>
+                      <AppIcon name="checkmark" size={10} color="#fff" fixedColor />
+                    </LinearGradient>
+                  )}
+                </View>
+                <AppText style={[profileHeroStyles.accountType, { color: FG.secondary }]}>
+                  {isGroup ? `Group · ${messages.length} messages` : 'Business account'}
+                </AppText>
+                <AppText style={[profileHeroStyles.presence, { color: isOnline ? COLORS.blue : FG.secondary }]}>
+                  {isGroup ? '' : (presenceText || '')}
+                </AppText>
+              </View>
+
+              {/* ── Three action buttons: Call · Catalog · Share ── */}
+              {!isGroup && (
+                <View style={profileHeroStyles.actions}>
                   {[
-                    { icon: 'call-outline' as const, label: 'Audio Call', onPress: () => { setProfileModalOpen(false); handleVoiceCall(); } },
-                  ].map((a) => (
-                    <TouchableOpacity 
-                      key={a.label} 
-                      style={[styles.profileActionBtn, bevel]} 
-                      onPress={a.onPress} 
-                      activeOpacity={0.8}
-                      disabled={isGroup}
+                    { icon: 'call-outline' as const,        label: 'Call',    onPress: () => { setProfileModalOpen(false); handleVoiceCall(); } },
+                    { icon: 'storefront-outline' as const,  label: 'Catalog', onPress: openCatalogSheet },
+                    { icon: 'share-social-outline' as const, label: 'Share',  onPress: () => {} },
+                  ].map(a => (
+                    <TouchableOpacity
+                      key={a.label}
+                      style={profileHeroStyles.actionBtn}
+                      onPress={a.onPress}
+                      activeOpacity={0.75}
                     >
-                      <LinearGradient colors={GRADIENTS.primary} style={styles.profileActionIcon}>
-                        <AppIcon name={a.icon} size={20} color="#fff" fixedColor />
-                      </LinearGradient>
-                      <AppText style={[styles.profileActionLabel, { color: textColor }]}>
+                      <View style={profileHeroStyles.actionIconWrap}>
+                        <AppIcon name={a.icon} size={22} color={COLORS.blue} fixedColor />
+                      </View>
+                      <AppText style={[profileHeroStyles.actionLabel, { color: FG.secondary }]}>
                         {a.label}
                       </AppText>
                     </TouchableOpacity>
                   ))}
                 </View>
+              )}
 
-                {/* Group Participants - Only show for group chats */}
-                {isGroup && (
-                  <>
-                    <AppText style={[styles.profileSectionLabel, { color: FG.secondary }]}>
-                      PARTICIPANTS ({groupMembers.length})
+              {/* ── Business info rows ── */}
+              {!isGroup && (
+                <View style={profileHeroStyles.infoSection}>
+                  {/* Presence / hours */}
+                  <View style={profileHeroStyles.infoRow}>
+                    <AppIcon name="time-outline" size={18} color={COLORS.blue} fixedColor />
+                    <AppText style={[profileHeroStyles.infoText, { color: textColor }]}>
+                      {isOnline ? 'Open now' : 'Closed now'}
                     </AppText>
-                    {loadingMembers ? (
-                      <View style={[styles.profileMemberLoadingBox, bevel]}>
-                        <ActivityIndicator size="small" color={COLORS.blue} />
-                        <AppText style={[styles.profileMemberLoadingText, { color: FG.secondary }]}>
-                          Loading participants...
-                        </AppText>
-                      </View>
-                    ) : groupMembers.length > 0 ? (
-                      groupMembers.map((member) => {
-                        const statusEmoji = 
-                          member.status === 'online' ? '🟢' : 
-                          member.status === 'away' ? '🟡' : '⚫';
-                        const statusText = 
-                          member.status === 'online' ? 'Online' : 
-                          member.status === 'away' ? 'Away' : 'Offline';
-                        
-                        return (
-                          <View 
-                            key={member.userId} 
-                            style={[styles.profileMemberRow, bevel]}
-                          >
-                            <Avatar 
-                              initials={getInitials(member.displayName)} 
-                              color={COLORS.blue} 
-                              size={42}
-                              imageUrl={member.photoURL}
-                              status={member.status}
-                            />
-                            <View style={{ flex: 1 }}>
-                              <AppText style={[styles.profileMemberName, { color: textColor, fontFamily }]}>
-                                {member.displayName}
-                                {member.userId === userId && <AppText style={[styles.profileMemberYou, { color: FG.secondary }]}> (You)</AppText>}
-                              </AppText>
-                              <AppText style={[styles.profileMemberStatus, { color: FG.secondary }]}>
-                                {statusEmoji} {statusText}
-                              </AppText>
-                            </View>
-                          </View>
-                        );
-                      })
-                    ) : (
-                      <View style={[styles.profileMemberEmptyBox, bevel]}>
-                        <AppIcon name="people-outline" size={28} color={FG.secondary} />
-                        <AppText style={[styles.profileMemberEmptyText, { color: FG.secondary }]}>
-                          No participants found
-                        </AppText>
-                      </View>
-                    )}
-                  </>
-                )}
+                  </View>
+                </View>
+              )}
 
-                {/* Past Members - Only show for group chats if there are any */}
-                {isGroup && (
-                  <>
-                    <AppText style={[styles.profileSectionLabel, { color: FG.secondary }]}>
-                      PAST MEMBERS {pastMembers.length > 0 ? `(${pastMembers.length})` : ''}
-                    </AppText>
-                    {loadingPastMembers ? (
-                      <View style={[styles.profileMemberLoadingBox, bevel]}>
-                        <ActivityIndicator size="small" color={COLORS.blue} />
-                        <AppText style={[styles.profileMemberLoadingText, { color: FG.secondary }]}>
-                          Loading past members...
-                        </AppText>
-                      </View>
-                    ) : pastMembers.length > 0 ? (
-                      pastMembers.map((member) => {
-                        const leftDateText = formatLeftDate(member.leftAt);
-                        
-                        return (
-                          <View 
-                            key={member.userId} 
-                            style={[styles.profilePastMemberRow, bevel]}
-                          >
-                            <Avatar 
-                              initials={getInitials(member.displayName)} 
-                              color={COLORS.blue} 
-                              size={42}
-                              imageUrl={member.photoURL}
-                              status="offline"
-                            />
-                            <View style={{ flex: 1 }}>
-                              <AppText style={[styles.profileMemberName, styles.profilePastMemberName, { color: textColor, fontFamily }]}>
-                                {member.displayName}
-                              </AppText>
-                              <AppText style={[styles.profileMemberStatus, { color: FG.secondary }]}>
-                                {leftDateText}
-                              </AppText>
-                            </View>
-                            <AppIcon name="exit-outline" size={18} color={FG.secondary} />
-                          </View>
-                        );
-                      })
-                    ) : (
-                      <View style={[styles.profileMemberEmptyBox, bevel]}>
-                        <AppIcon name="people-outline" size={28} color={FG.secondary} />
-                        <AppText style={[styles.profileMemberEmptyText, { color: FG.secondary }]}>
-                          No past members
-                        </AppText>
-                      </View>
-                    )}
-                  </>
-                )}
+              {/* ── Divider ── */}
+              <View style={profileHeroStyles.divider} />
 
-                {/* Shared media */}
+              {/* ── Group participants / past members ── */}
+              {isGroup && (
+                <View style={{ paddingHorizontal: 16 }}>
+                  <AppText style={[styles.profileSectionLabel, { color: FG.secondary }]}>
+                    PARTICIPANTS ({groupMembers.length})
+                  </AppText>
+                  {loadingMembers ? (
+                    <View style={[styles.profileMemberLoadingBox, bevel]}>
+                      <ActivityIndicator size="small" color={COLORS.blue} />
+                      <AppText style={[styles.profileMemberLoadingText, { color: FG.secondary }]}>
+                        Loading participants...
+                      </AppText>
+                    </View>
+                  ) : groupMembers.map(member => {
+                    const statusText = member.status === 'online' ? 'Online' : member.status === 'away' ? 'Away' : 'Offline';
+                    return (
+                      <View key={member.userId} style={[styles.profileMemberRow, bevel]}>
+                        <Avatar initials={getInitials(member.displayName)} color={COLORS.blue} size={42} imageUrl={member.photoURL} status={member.status} />
+                        <View style={{ flex: 1 }}>
+                          <AppText style={[styles.profileMemberName, { color: textColor, fontFamily }]}>
+                            {member.displayName}{member.userId === userId ? <AppText style={[styles.profileMemberYou, { color: FG.secondary }]}> (You)</AppText> : null}
+                          </AppText>
+                          <AppText style={[styles.profileMemberStatus, { color: FG.secondary }]}>{statusText}</AppText>
+                        </View>
+                      </View>
+                    );
+                  })}
+                </View>
+              )}
+
+              {/* ── Shared media ── */}
+              <View style={{ paddingHorizontal: 16 ,marginBottom: 20}}>
                 <AppText style={[styles.profileSectionLabel, { color: FG.secondary }]}>
                   SHARED MEDIA
                 </AppText>
                 {messages.filter(m => m.type === 'image').length > 0 ? (
-                  <TouchableOpacity 
-                    style={[styles.profileMediaRow, bevel]}
-                    activeOpacity={0.8}
-                  >
-                    <AppText style={[styles.profileMediaLabel, { color: textColor }]}>
-                      Shared media
-                    </AppText>
+                  <TouchableOpacity style={[styles.profileMediaRow, bevel]} activeOpacity={0.8}>
+                    <AppText style={[styles.profileMediaLabel, { color: textColor }]}>Shared media</AppText>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                       <AppText style={[styles.profileMediaCount, { color: FG.secondary }]}>
                         {messages.filter(m => m.type === 'image').length} photos
@@ -3059,211 +3067,93 @@ export default function ChatScreen() {
                 ) : (
                   <View style={[styles.infoMediaBox, bevel]}>
                     <AppIcon name="images-outline" size={28} color={FG.secondary} />
-                    <AppText style={[styles.infoMediaEmpty, { color: FG.secondary }]}>
-                      No media shared yet
-                    </AppText>
+                    <AppText style={[styles.infoMediaEmpty, { color: FG.secondary }]}>No media shared yet</AppText>
                   </View>
                 )}
+              </View>
 
-                {/* ── Catalog (1-on-1 chats only) ──────────────────────────────── */}
-                {!isGroup && (
-                  <>
-                    <AppText style={[styles.profileSectionLabel, { color: FG.secondary }]}>
-                      CATALOG
-                    </AppText>
-
-                    {loadingCatalog ? (
-                      <View style={[styles.profileMemberLoadingBox, bevel]}>
-                        <ActivityIndicator size="small" color={COLORS.blue} />
-                        <AppText style={[styles.profileMemberLoadingText, { color: FG.secondary }]}>
-                          Loading catalog…
+              {/* ── Catalog shortcut — cart badge only, full catalog via sheet ── */}
+              {!isGroup && sellerCatalog.length > 0 && (
+                <View style={{ paddingHorizontal: 16, marginBottom: 4 }}>
+                  <TouchableOpacity
+                    style={[profileHeroStyles.catalogEntryRow, bevel]}
+                    activeOpacity={0.8}
+                    onPress={openCatalogSheet}
+                  >
+                    <View style={profileHeroStyles.catalogEntryLeft}>
+                      <LinearGradient colors={GRADIENTS.primary} style={profileHeroStyles.catalogEntryIcon}>
+                        <AppIcon name="storefront-outline" size={18} color="#fff" fixedColor />
+                      </LinearGradient>
+                      <View>
+                        <AppText style={[profileHeroStyles.catalogEntryTitle, { color: textColor }]}>Catalog</AppText>
+                        <AppText style={[profileHeroStyles.catalogEntrySub, { color: FG.secondary }]}>
+                          {sellerCatalog.length} item{sellerCatalog.length !== 1 ? 's' : ''}
+                          {sellerCollections.length > 0 ? `  ·  ${sellerCollections.length} collection${sellerCollections.length !== 1 ? 's' : ''}` : ''}
                         </AppText>
                       </View>
-                    ) : sellerCatalog.length === 0 ? (
-                      <View style={[styles.infoMediaBox, bevel]}>
-                        <AppIcon name="storefront-outline" size={28} color={FG.secondary} />
-                        <AppText style={[styles.infoMediaEmpty, { color: FG.secondary }]}>
-                          No products listed yet
-                        </AppText>
+                    </View>
+                    <AppIcon name="chevron-forward" size={18} color={FG.secondary} />
+                  </TouchableOpacity>
+                  <CartBadgeRow onViewCart={() => { setProfileModalOpen(false); setCartSheetVisible(true); }} />
+                </View>
+              )}
+
+              {/* ── Privacy / Block / Leave ── */}
+              <View style={{ paddingHorizontal: 16 }}>
+                <AppText style={[styles.profileSectionLabel, { color: FG.secondary }]}>PRIVACY</AppText>
+
+                {isGroup ? (
+                  !showLeaveGroupConfirmation ? (
+                    <TouchableOpacity style={[styles.profileBlockBtn, bevel]} onPress={() => setShowLeaveGroupConfirmation(true)} activeOpacity={0.8} disabled={leavingGroup}>
+                      <AppIcon name="exit-outline" size={20} color={COLORS.missed} fixedColor />
+                      <AppText style={[styles.profileBlockText, { color: COLORS.missed }]}>Leave Group</AppText>
+                    </TouchableOpacity>
+                  ) : (
+                    <View style={[styles.confirmationCard, bevel]}>
+                      <LinearGradient colors={['rgba(255,59,48,0.20)', 'rgba(255,149,0,0.20)']} style={styles.confirmationIconWrap}>
+                        <AppIcon name="exit-outline" size={28} color={COLORS.missed} fixedColor />
+                      </LinearGradient>
+                      <AppText style={[styles.confirmationTitle, { color: textColor, fontFamily }]}>Leave Group?</AppText>
+                      <AppText style={[styles.confirmationBody, { color: FG.secondary }]}>You will no longer receive messages from this group.</AppText>
+                      <View style={styles.confirmationButtons}>
+                        <TouchableOpacity style={[styles.confirmationCancelBtn, { borderColor: FG.glassBorder }]} onPress={() => setShowLeaveGroupConfirmation(false)} disabled={leavingGroup}>
+                          <AppText style={[styles.confirmationCancelText, { color: textColor }]}>Cancel</AppText>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={[styles.confirmationBlockBtn, { backgroundColor: COLORS.missed }]} onPress={handleLeaveGroup} disabled={leavingGroup}>
+                          {leavingGroup ? <ActivityIndicator size="small" color="#fff" /> : <AppText style={[styles.confirmationBlockText, { color: '#fff' }]}>Leave Group</AppText>}
+                        </TouchableOpacity>
                       </View>
-                    ) : (
-                      <>
-                        {sellerCatalog.map(catalogProduct => (
-                          <ProfileCatalogCard
-                            key={catalogProduct.id}
-                            item={catalogProduct}
-                            sellerUid={otherUserId ?? ''}
-                            bevel={bevel}
-                            textColor={textColor}
-                            fgSecondary={FG.secondary}
-                          />
-                        ))}
-
-                        {/* View Cart shortcut — only shows when cart has items */}
-                        <CartBadgeRow
-                          onViewCart={() => {
-                            setProfileModalOpen(false);
-                            setCartSheetVisible(true);
-                          }}
-                        />
-                      </>
-                    )}
-                  </>
-                )}
-
-                {/* Privacy section for group chats - Leave Group */}
-                {isGroup && (
-                  <>
-                    <AppText style={[styles.profileSectionLabel, { color: FG.secondary }]}>
-                      PRIVACY
-                    </AppText>
-
-                    {/* Leave Group Button */}
-                    {!showLeaveGroupConfirmation ? (
-                      <TouchableOpacity 
-                        style={[styles.profileBlockBtn, bevel]}
-                        onPress={() => setShowLeaveGroupConfirmation(true)}
-                        activeOpacity={0.8}
-                        disabled={leavingGroup}
-                      >
-                        <AppIcon name="exit-outline" size={20} color={COLORS.missed} fixedColor />
-                        <AppText style={[styles.profileBlockText, { color: COLORS.missed }]}>
-                          Leave Group
-                        </AppText>
+                    </View>
+                  )
+                ) : isBlocked && blockedByMe ? (
+                  <TouchableOpacity style={[styles.profileBlockBtn, bevel]} onPress={handleUnblockContact} activeOpacity={0.8}>
+                    <AppIcon name="checkmark-circle-outline" size={20} color={COLORS.blue} fixedColor />
+                    <AppText style={[styles.profileBlockText, { color: COLORS.blue }]}>Unblock User</AppText>
+                  </TouchableOpacity>
+                ) : !showBlockConfirmation ? (
+                  <TouchableOpacity style={[styles.profileBlockBtn, bevel]} onPress={() => setShowBlockConfirmation(true)} activeOpacity={0.8}>
+                    <AppIcon name="ban-outline" size={20} color={COLORS.missed} fixedColor />
+                    <AppText style={[styles.profileBlockText, { color: COLORS.missed }]}>Block {displayName}</AppText>
+                  </TouchableOpacity>
+                ) : (
+                  <View style={[styles.confirmationCard, bevel]}>
+                    <LinearGradient colors={['rgba(255,59,48,0.20)', 'rgba(255,149,0,0.20)']} style={styles.confirmationIconWrap}>
+                      <AppIcon name="ban-outline" size={28} color={COLORS.missed} fixedColor />
+                    </LinearGradient>
+                    <AppText style={[styles.confirmationTitle, { color: textColor, fontFamily }]}>Block {displayName}?</AppText>
+                    <AppText style={[styles.confirmationBody, { color: FG.secondary }]}>Blocked contacts cannot call you or send you messages.</AppText>
+                    <View style={styles.confirmationButtons}>
+                      <TouchableOpacity style={[styles.confirmationCancelBtn, { borderColor: FG.glassBorder }]} onPress={() => setShowBlockConfirmation(false)}>
+                        <AppText style={[styles.confirmationCancelText, { color: textColor }]}>Cancel</AppText>
                       </TouchableOpacity>
-                    ) : (
-                      /* Inline Confirmation Card */
-                      <View style={[styles.confirmationCard, bevel]}>
-                        {/* Gradient Icon */}
-                        <LinearGradient 
-                          colors={['rgba(255,59,48,0.20)', 'rgba(255,149,0,0.20)']}
-                          style={styles.confirmationIconWrap}
-                        >
-                          <AppIcon name="exit-outline" size={28} color={COLORS.missed} fixedColor />
-                        </LinearGradient>
-
-                        {/* Title */}
-                        <AppText style={[styles.confirmationTitle, { color: textColor, fontFamily }]}>
-                          Leave Group?
-                        </AppText>
-
-                        {/* Body text */}
-                        <AppText style={[styles.confirmationBody, { color: FG.secondary }]}>
-                          You will no longer receive messages from this group. A notification will be sent to all members that you left.
-                        </AppText>
-
-                        {/* Action buttons */}
-                        <View style={styles.confirmationButtons}>
-                          <TouchableOpacity 
-                            style={[styles.confirmationCancelBtn, { borderColor: FG.glassBorder }]}
-                            onPress={() => setShowLeaveGroupConfirmation(false)}
-                            activeOpacity={0.8}
-                            disabled={leavingGroup}
-                          >
-                            <AppText style={[styles.confirmationCancelText, { color: textColor }]}>
-                              Cancel
-                            </AppText>
-                          </TouchableOpacity>
-
-                          <TouchableOpacity 
-                            style={[styles.confirmationBlockBtn, { backgroundColor: COLORS.missed }]}
-                            onPress={handleLeaveGroup}
-                            activeOpacity={0.8}
-                            disabled={leavingGroup}
-                          >
-                            {leavingGroup ? (
-                              <ActivityIndicator size="small" color="#fff" />
-                            ) : (
-                              <AppText style={[styles.confirmationBlockText, { color: '#fff' }]}>
-                                Leave Group
-                              </AppText>
-                            )}
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                    )}
-                  </>
-                )}
-
-                {/* Privacy section - Only show for individual chats */}
-                {!isGroup && (
-                  <>
-                    <AppText style={[styles.profileSectionLabel, { color: FG.secondary }]}>
-                      PRIVACY
-                    </AppText>
-
-                    {/* Block/Unblock Contact Button */}
-                    {isBlocked && blockedByMe ? (
-                      /* Unblock User Button */
-                      <TouchableOpacity 
-                        style={[styles.profileBlockBtn, bevel]}
-                        onPress={handleUnblockContact}
-                        activeOpacity={0.8}
-                      >
-                        <AppIcon name="checkmark-circle-outline" size={20} color={COLORS.blue} fixedColor />
-                        <AppText style={[styles.profileBlockText, { color: COLORS.blue }]}>
-                          Unblock User
-                        </AppText>
+                      <TouchableOpacity style={[styles.confirmationBlockBtn, { backgroundColor: COLORS.missed }]} onPress={handleBlockContact}>
+                        <AppText style={[styles.confirmationBlockText, { color: '#fff' }]}>Block</AppText>
                       </TouchableOpacity>
-                    ) : !showBlockConfirmation ? (
-                      /* Block Contact Button */
-                      <TouchableOpacity 
-                        style={[styles.profileBlockBtn, bevel]}
-                        onPress={() => setShowBlockConfirmation(true)}
-                        activeOpacity={0.8}
-                      >
-                        <AppIcon name="ban-outline" size={20} color={COLORS.missed} fixedColor />
-                        <AppText style={[styles.profileBlockText, { color: COLORS.missed }]}>
-                          Block {displayName}
-                        </AppText>
-                      </TouchableOpacity>
-                    ) : (
-                      /* Inline Confirmation Card */
-                      <View style={[styles.confirmationCard, bevel]}>
-                        {/* Gradient Icon */}
-                        <LinearGradient 
-                          colors={['rgba(255,59,48,0.20)', 'rgba(255,149,0,0.20)']}
-                          style={styles.confirmationIconWrap}
-                        >
-                          <AppIcon name="ban-outline" size={28} color={COLORS.missed} fixedColor />
-                        </LinearGradient>
-
-                        {/* Title */}
-                        <AppText style={[styles.confirmationTitle, { color: textColor, fontFamily }]}>
-                          Block {displayName}?
-                        </AppText>
-
-                        {/* Body text */}
-                        <AppText style={[styles.confirmationBody, { color: FG.secondary }]}>
-                          Blocked contacts cannot call you or send you messages. They won't be notified that you blocked them.
-                        </AppText>
-
-                        {/* Action buttons */}
-                        <View style={styles.confirmationButtons}>
-                          <TouchableOpacity 
-                            style={[styles.confirmationCancelBtn, { borderColor: FG.glassBorder }]}
-                            onPress={() => setShowBlockConfirmation(false)}
-                            activeOpacity={0.8}
-                          >
-                            <AppText style={[styles.confirmationCancelText, { color: textColor }]}>
-                              Cancel
-                            </AppText>
-                          </TouchableOpacity>
-
-                          <TouchableOpacity 
-                            style={[styles.confirmationBlockBtn, { backgroundColor: COLORS.missed }]}
-                            onPress={handleBlockContact}
-                            activeOpacity={0.8}
-                          >
-                            <AppText style={[styles.confirmationBlockText, { color: '#fff' }]}>
-                              Block
-                            </AppText>
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                    )}
-                  </>
+                    </View>
+                  </View>
                 )}
+              </View>
+
             </ScrollView>
           </View>
         </View>
@@ -3302,14 +3192,14 @@ export default function ChatScreen() {
 
 
 // ─── ProfileCatalogCard ───────────────────────────────────────────────────────
-// Compact product card used inside the profile bottom sheet.
-// Shows image, name, price, description + an Add/stepper control via useCart.
+// Premium product card for the profile bottom sheet.
+// Full image on top, name + price + description below, Add/stepper at the bottom.
+// Two cards sit side-by-side in a 2-column grid.
 function ProfileCatalogCard({
-  item, sellerUid, bevel, textColor, fgSecondary,
+  item, sellerUid, textColor, fgSecondary,
 }: {
   item: import('../types').CatalogItem;
   sellerUid: string;
-  bevel: any;
   textColor: string;
   fgSecondary: string;
 }) {
@@ -3332,46 +3222,55 @@ function ProfileCatalogCard({
   };
 
   return (
-    <View style={[profileCatalogStyles.card, bevel]}>
-      {/* Left — image */}
+    <View style={pcStyles.card}>
+      {/* Product image — fills top of card */}
       {item.imageUri ? (
-        <Image source={{ uri: item.imageUri }} style={profileCatalogStyles.img} resizeMode="cover" />
+        <Image source={{ uri: item.imageUri }} style={pcStyles.img} resizeMode="cover" />
       ) : (
-        <View style={profileCatalogStyles.imgPlaceholder}>
-          <AppIcon name="cube-outline" size={22} color={COLORS.blue} fixedColor />
+        <View style={pcStyles.imgPlaceholder}>
+          <AppIcon name="cube-outline" size={28} color={COLORS.blue} fixedColor />
         </View>
       )}
 
-      {/* Middle — info */}
-      <View style={profileCatalogStyles.info}>
-        <AppText style={[profileCatalogStyles.name, { color: textColor }]} numberOfLines={1}>
+      {/* Info block */}
+      <View style={pcStyles.info}>
+        <AppText style={[pcStyles.name, { color: textColor }]} numberOfLines={2}>
           {item.name}
         </AppText>
         {!!item.price && (
-          <AppText style={profileCatalogStyles.price}>{item.price}</AppText>
+          <AppText style={pcStyles.price}>{item.price}</AppText>
         )}
         {!!item.description && (
-          <AppText style={[profileCatalogStyles.desc, { color: fgSecondary }]} numberOfLines={2}>
+          <AppText style={[pcStyles.desc, { color: fgSecondary }]} numberOfLines={2}>
             {item.description}
           </AppText>
         )}
       </View>
 
-      {/* Right — cart control */}
-      <View style={profileCatalogStyles.controls}>
+      {/* Cart control */}
+      <View style={pcStyles.footer}>
         {qty === 0 ? (
-          <TouchableOpacity onPress={handleAdd} activeOpacity={0.85} style={profileCatalogStyles.addBtn}>
-            <LinearGradient colors={GRADIENTS.primary} style={profileCatalogStyles.addBtnGrad}>
-              <AppIcon name="add" size={16} color="#fff" fixedColor />
+          <TouchableOpacity onPress={handleAdd} activeOpacity={0.85} style={pcStyles.addBtn}>
+            <LinearGradient colors={GRADIENTS.primary} style={pcStyles.addBtnGrad}>
+              <AppIcon name="add" size={15} color="#fff" fixedColor />
+              <AppText fixedColor style={pcStyles.addBtnText}>Add</AppText>
             </LinearGradient>
           </TouchableOpacity>
         ) : (
-          <View style={profileCatalogStyles.stepper}>
-            <TouchableOpacity onPress={() => removeItem(item.id)} style={profileCatalogStyles.stepBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <View style={pcStyles.stepper}>
+            <TouchableOpacity
+              onPress={() => removeItem(item.id)}
+              style={pcStyles.stepBtn}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
               <AppIcon name="remove" size={14} color={COLORS.blue} fixedColor />
             </TouchableOpacity>
-            <AppText style={profileCatalogStyles.stepQty}>{qty}</AppText>
-            <TouchableOpacity onPress={handleAdd} style={profileCatalogStyles.stepBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <AppText style={pcStyles.stepQty}>{qty}</AppText>
+            <TouchableOpacity
+              onPress={handleAdd}
+              style={pcStyles.stepBtn}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
               <AppIcon name="add" size={14} color={COLORS.blue} fixedColor />
             </TouchableOpacity>
           </View>
@@ -3400,45 +3299,550 @@ function CartBadgeRow({ onViewCart }: { onViewCart: () => void }) {
   );
 }
 
-const profileCatalogStyles = StyleSheet.create({
-  card: {
+// ─── CatalogBrowseSheet ───────────────────────────────────────────────────────
+// Full-screen-ish modal sheet matching the reference image:
+//   - Header: business name + close
+//   - Collection chips row (horizontal scroll): All · Shoes · Clothing · …
+//   - If a collection is selected: banner image (first item image) + product grid
+//   - Uncategorised products listed below with horizontal scroll rows
+// ─────────────────────────────────────────────────────────────────────────────
+function CatalogBrowseSheet({
+  collections, catalog, sellerUid, loading, activeColId,
+  onSelectCol, textColor, fgSecondary, onClose, onViewCart,
+}: {
+  collections:  import('../types').CatalogCollection[];
+  catalog:      import('../types').CatalogItem[];
+  sellerUid:    string;
+  loading:      boolean;
+  activeColId:  string | null;
+  onSelectCol:  (id: string | null) => void;
+  textColor:    string;
+  fgSecondary:  string;
+  onClose:      () => void;
+  onViewCart:   () => void;
+}) {
+  const { totalItems } = useCart();
+
+  // Items to display in the main grid — depends on active chip
+  const displayItems = activeColId
+    ? catalog.filter(i => i.collectionId === activeColId)
+    : catalog;
+
+  // Banner image: first item with an image in the active collection (or first overall)
+  const bannerImg = displayItems.find(i => i.imageUri)?.imageUri ?? null;
+
+  // Uncategorised items (shown when All tab active)
+  const uncategorised = catalog.filter(i => !i.collectionId);
+
+  return (
+    <View style={csStyles.overlay}>
+      <TouchableOpacity style={csStyles.backdrop} activeOpacity={1} onPress={onClose} />
+      <View style={csStyles.sheet}>
+
+        {/* ── Header ── */}
+        <View style={csStyles.header}>
+          <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <AppIcon name="chevron-back" size={22} color={COLORS.blue} fixedColor />
+          </TouchableOpacity>
+          <AppText style={[csStyles.headerTitle, { color: textColor }]}>Catalog</AppText>
+          <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <AppIcon name="close" size={20} color={COLORS.sub} />
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView showsVerticalScrollIndicator={false} stickyHeaderIndices={[0]}>
+
+          {/* ── Collection chips (sticky) ── */}
+          <View style={csStyles.chipBarWrap}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={csStyles.chipBar}>
+              {/* "All" chip */}
+              <TouchableOpacity
+                style={[csStyles.chip, activeColId === null && csStyles.chipActive]}
+                onPress={() => onSelectCol(null)}
+                activeOpacity={0.8}
+              >
+                {activeColId === null ? (
+                  <LinearGradient colors={GRADIENTS.primary} style={csStyles.chipGrad}>
+                    <AppText fixedColor style={csStyles.chipActiveText}>All</AppText>
+                  </LinearGradient>
+                ) : (
+                  <AppText style={[csStyles.chipText, { color: fgSecondary }]}>All</AppText>
+                )}
+              </TouchableOpacity>
+
+              {/* Collection chips */}
+              {collections.map(col => {
+                const active = activeColId === col.id;
+                return (
+                  <TouchableOpacity
+                    key={col.id}
+                    style={[csStyles.chip, active && csStyles.chipActive]}
+                    onPress={() => onSelectCol(col.id)}
+                    activeOpacity={0.8}
+                  >
+                    {active ? (
+                      <LinearGradient colors={GRADIENTS.primary} style={csStyles.chipGrad}>
+                        <AppText fixedColor style={csStyles.chipActiveText}>
+                          {col.emoji ? `${col.emoji} ` : ''}{col.name}
+                        </AppText>
+                      </LinearGradient>
+                    ) : (
+                      <AppText style={[csStyles.chipText, { color: fgSecondary }]}>
+                        {col.emoji ? `${col.emoji} ` : ''}{col.name}
+                      </AppText>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+
+          {loading ? (
+            <View style={csStyles.centerState}>
+              <ActivityIndicator size="large" color={COLORS.blue} />
+              <AppText style={{ color: fgSecondary, marginTop: 10 }}>Loading…</AppText>
+            </View>
+          ) : catalog.length === 0 ? (
+            <View style={csStyles.centerState}>
+              <AppIcon name="storefront-outline" size={48} color={COLORS.sub} />
+              <AppText style={{ color: fgSecondary, marginTop: 10 }}>No products yet</AppText>
+            </View>
+          ) : (
+            <>
+              {/* ── Collection banner ── */}
+              {activeColId && bannerImg && (
+                <View style={csStyles.bannerWrap}>
+                  <Image source={{ uri: bannerImg }} style={csStyles.bannerImage} resizeMode="cover" />
+                  <LinearGradient
+                    colors={['transparent', 'rgba(0,0,0,0.55)']}
+                    style={csStyles.bannerOverlay}
+                  >
+                    <AppText style={csStyles.bannerTitle}>
+                      {collections.find(c => c.id === activeColId)?.name ?? ''}
+                    </AppText>
+                    <AppText style={csStyles.bannerSub}>
+                      {displayItems.length} item{displayItems.length !== 1 ? 's' : ''}
+                    </AppText>
+                  </LinearGradient>
+                </View>
+              )}
+
+              {/* ── Active collection or all-items grid ── */}
+              {(activeColId || !collections.length) && (
+                <View style={csStyles.grid}>
+                  {displayItems.map(item => (
+                    <ProfileCatalogCard
+                      key={item.id}
+                      item={item}
+                      sellerUid={sellerUid}
+                      textColor={textColor}
+                      fgSecondary={fgSecondary}
+                    />
+                  ))}
+                </View>
+              )}
+
+              {/* ── When "All" is active and there are collections: show each as a horizontal row ── */}
+              {!activeColId && collections.length > 0 && (
+                <>
+                  {collections.map(col => {
+                    const colItems = catalog.filter(i => i.collectionId === col.id);
+                    if (colItems.length === 0) return null;
+                    return (
+                      <View key={col.id} style={{ marginBottom: 20 }}>
+                        {/* Collection row header */}
+                        <View style={csStyles.sectionHeader}>
+                          <View style={{ flex: 1 }}>
+                            <AppText style={[csStyles.sectionTitle, { color: textColor }]}>
+                              {col.emoji ? `${col.emoji}  ` : ''}{col.name}
+                            </AppText>
+                            <AppText style={[csStyles.sectionSub, { color: fgSecondary }]}>
+                              {colItems.length} item{colItems.length !== 1 ? 's' : ''}
+                            </AppText>
+                          </View>
+                          <TouchableOpacity onPress={() => onSelectCol(col.id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                            <AppText style={csStyles.viewAll}>View all {'>'}</AppText>
+                          </TouchableOpacity>
+                        </View>
+
+                        {/* Horizontal product scroll */}
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={csStyles.hScroll}>
+                          {colItems.map(item => (
+                            <View key={item.id} style={csStyles.hCard}>
+                              {item.imageUri ? (
+                                <Image source={{ uri: item.imageUri }} style={csStyles.hCardImg} resizeMode="cover" />
+                              ) : (
+                                <View style={csStyles.hCardImgPlaceholder}>
+                                  <AppIcon name="cube-outline" size={24} color={COLORS.blue} fixedColor />
+                                </View>
+                              )}
+                              <View style={csStyles.hCardInfo}>
+                                <AppText style={[csStyles.hCardName, { color: textColor }]} numberOfLines={2}>{item.name}</AppText>
+                                {!!item.price && <AppText style={csStyles.hCardPrice}>{item.price}</AppText>}
+                              </View>
+                              <HorizontalCartControl item={item} sellerUid={sellerUid} />
+                            </View>
+                          ))}
+                        </ScrollView>
+                      </View>
+                    );
+                  })}
+
+                  {/* Uncategorised products */}
+                  {uncategorised.length > 0 && (
+                    <View style={{ marginBottom: 20 }}>
+                      <View style={csStyles.sectionHeader}>
+                        <AppText style={[csStyles.sectionTitle, { color: textColor }]}>More products</AppText>
+                      </View>
+                      <View style={csStyles.grid}>
+                        {uncategorised.map(item => (
+                          <ProfileCatalogCard key={item.id} item={item} sellerUid={sellerUid} textColor={textColor} fgSecondary={fgSecondary} />
+                        ))}
+                      </View>
+                    </View>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </ScrollView>
+
+        {/* ── Cart badge bar ── */}
+        {totalItems > 0 && (
+          <TouchableOpacity onPress={onViewCart} activeOpacity={0.85} style={csStyles.cartBar}>
+            <LinearGradient colors={GRADIENTS.primary} style={csStyles.cartBarGrad}>
+              <AppIcon name="cart" size={18} color="#fff" fixedColor />
+              <AppText fixedColor style={csStyles.cartBarText}>View Cart · {totalItems} item{totalItems !== 1 ? 's' : ''}</AppText>
+              <AppIcon name="chevron-forward" size={16} color="#fff" fixedColor />
+            </LinearGradient>
+          </TouchableOpacity>
+        )}
+      </View>
+    </View>
+  );
+}
+
+// ── Tiny cart control for horizontal cards ────────────────────────────────────
+function HorizontalCartControl({ item, sellerUid }: { item: import('../types').CatalogItem; sellerUid: string }) {
+  const { addItem, removeItem, getQuantity, sellerUid: cartSeller } = useCart();
+  const qty = getQuantity(item.id);
+  const handleAdd = () => {
+    if (cartSeller && cartSeller !== sellerUid && qty === 0) {
+      Alert.alert('Start new cart?', 'Your cart has items from another business.', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Clear & Add', style: 'destructive', onPress: () => addItem(item, sellerUid) },
+      ]);
+      return;
+    }
+    addItem(item, sellerUid);
+  };
+  return qty === 0 ? (
+    <TouchableOpacity onPress={handleAdd} activeOpacity={0.85} style={csStyles.hCardAddBtn}>
+      <LinearGradient colors={GRADIENTS.primary} style={csStyles.hCardAddBtnGrad}>
+        <AppIcon name="add" size={15} color="#fff" fixedColor />
+        <AppText fixedColor style={{ fontSize: 12, fontWeight: '700', color: '#fff' }}>Add</AppText>
+      </LinearGradient>
+    </TouchableOpacity>
+  ) : (
+    <View style={csStyles.hCardStepper}>
+      <TouchableOpacity onPress={() => removeItem(item.id)} style={csStyles.hCardStepBtn} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+        <AppIcon name="remove" size={13} color={COLORS.blue} fixedColor />
+      </TouchableOpacity>
+      <AppText style={csStyles.hCardStepQty}>{qty}</AppText>
+      <TouchableOpacity onPress={handleAdd} style={csStyles.hCardStepBtn} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+        <AppIcon name="add" size={13} color={COLORS.blue} fixedColor />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+const { width: SW } = Dimensions.get('window');
+const H_CARD_W = 148;
+
+const csStyles = StyleSheet.create({
+  overlay:  { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' },
+  backdrop: { ...StyleSheet.absoluteFill },
+  sheet: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '92%',
+    overflow: 'hidden',
+  },
+
+  // Header
+  header: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 18, paddingVertical: 14,
+    borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.05)',
+  },
+  headerTitle: { fontSize: 17, fontWeight: '700' },
+
+  // Collection chip bar
+  chipBarWrap: { backgroundColor: '#fff', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.05)' },
+  chipBar: { paddingHorizontal: 14, gap: 8, flexDirection: 'row' },
+  chip: {
+    borderRadius: RADIUS.full,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(30,156,240,0.20)',
+  },
+  chipActive: { borderColor: 'transparent' },
+  chipGrad: { paddingHorizontal: 16, paddingVertical: 7, borderRadius: RADIUS.full },
+  chipActiveText: { fontSize: 13, fontWeight: '700', color: '#fff' },
+  chipText: { fontSize: 13, fontWeight: '600', paddingHorizontal: 14, paddingVertical: 7 },
+
+  centerState: { alignItems: 'center', justifyContent: 'center', padding: 48 },
+
+  // Banner
+  bannerWrap: { position: 'relative', height: 160, marginBottom: 4 },
+  bannerImage: { width: '100%', height: 160 },
+  bannerOverlay: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    paddingHorizontal: 16, paddingVertical: 12,
+  },
+  bannerTitle: { color: '#fff', fontSize: 20, fontWeight: '800' },
+  bannerSub:   { color: 'rgba(255,255,255,0.75)', fontSize: 12, marginTop: 2 },
+
+  // 2-col grid (for selected collection / uncategorised)
+  grid: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 10,
+    paddingHorizontal: 14, paddingTop: 10, paddingBottom: 4,
+  },
+
+  // Section rows (All tab)
+  sectionHeader: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 16, paddingTop: 14, paddingBottom: 8,
+  },
+  sectionTitle: { fontSize: 16, fontWeight: '800' },
+  sectionSub:   { fontSize: 12, marginTop: 1 },
+  viewAll: { fontSize: 12, fontWeight: '700', color: COLORS.blue },
+
+  // Horizontal card scroll
+  hScroll: { paddingHorizontal: 14, gap: 10 },
+  hCard: {
+    width: H_CARD_W,
+    borderRadius: RADIUS.md,
+    backgroundColor: '#fff',
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(30,156,240,0.10)',
+    ...SHADOW.card,
+  },
+  hCardImg:            { width: H_CARD_W, height: 110 },
+  hCardImgPlaceholder: { width: H_CARD_W, height: 100, backgroundColor: 'rgba(30,156,240,0.06)', alignItems: 'center', justifyContent: 'center' },
+  hCardInfo: { paddingHorizontal: 8, paddingTop: 8, paddingBottom: 4, gap: 2 },
+  hCardName:  { fontSize: 12, fontWeight: '700', lineHeight: 16 },
+  hCardPrice: { fontSize: 13, fontWeight: '800', color: COLORS.blue },
+  hCardAddBtn: { marginHorizontal: 8, marginBottom: 8, borderRadius: RADIUS.full, overflow: 'hidden' },
+  hCardAddBtnGrad: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 7, borderRadius: RADIUS.full },
+  hCardStepper: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8, marginHorizontal: 8, marginBottom: 8,
+    backgroundColor: 'rgba(30,156,240,0.08)', borderRadius: RADIUS.full, paddingVertical: 6,
+  },
+  hCardStepBtn: { width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(30,156,240,0.15)', alignItems: 'center', justifyContent: 'center' },
+  hCardStepQty: { fontSize: 13, fontWeight: '800', color: COLORS.text, minWidth: 16, textAlign: 'center' },
+
+  // Bottom cart bar
+  cartBar: { margin: 12, borderRadius: RADIUS.md, overflow: 'hidden' },
+  cartBarGrad: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 18, paddingVertical: 14 },
+  cartBarText: { flex: 1, color: '#fff', fontSize: 14, fontWeight: '700' },
+});
+
+// ─── Profile hero styles ──────────────────────────────────────────────────────
+const profileHeroStyles = StyleSheet.create({
+  // Banner + avatar overlap
+  hero: { position: 'relative', marginBottom: 52 },
+  heroBanner: {
+    height: 110,
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
+  },
+  closeBtn: {
+    position: 'absolute', top: 12, right: 12,
+    width: 30, height: 30, borderRadius: 15,
+    backgroundColor: 'rgba(0,0,0,0.28)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  avatarRing: {
+    position: 'absolute',
+    bottom: -44,
+    alignSelf: 'center',
+    width: 88, height: 88, borderRadius: 44,
+    backgroundColor: '#fff',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 3, borderColor: '#fff',
+    ...SHADOW.card,
+  },
+
+  // Name block
+  nameBlock: {
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingBottom: 16,
+    gap: 2,
+  },
+  name: { fontSize: 20, fontWeight: '800', textAlign: 'center' },
+  verifiedBadge: {
+    width: 18, height: 18, borderRadius: 9,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  accountType: { fontSize: 12, fontWeight: '500' },
+  presence:    { fontSize: 12 },
+
+  // Three action buttons
+  actions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 24,
+    paddingHorizontal: 24,
+    paddingBottom: 16,
+  },
+  actionBtn: { alignItems: 'center', gap: 6 },
+  actionIconWrap: {
+    width: 52, height: 52, borderRadius: 26,
+    backgroundColor: 'rgba(30,156,240,0.10)',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: 'rgba(30,156,240,0.18)',
+  },
+  actionLabel: { fontSize: 12, fontWeight: '600' },
+
+  // Info rows (hours, website, location)
+  infoSection: {
+    paddingHorizontal: 20,
+    paddingBottom: 8,
+    gap: 10,
+  },
+  infoRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
+  },
+  infoText: { fontSize: 14, fontWeight: '500', flex: 1 },
+
+  // Divider
+  divider: {
+    height: 1,
+    backgroundColor: 'rgba(0,0,0,0.07)',
+    marginHorizontal: 16,
+    marginBottom: 16,
+    marginTop: 4,
+  },
+
+  // Catalog entry row (replaces inline catalog in profile sheet)
+  catalogEntryRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
     borderRadius: RADIUS.md,
-    padding: 12,
     marginBottom: 8,
+    gap: 12,
   },
-  img: { width: 52, height: 52, borderRadius: 10 },
-  imgPlaceholder: {
-    width: 52, height: 52, borderRadius: 10,
-    backgroundColor: 'rgba(30,156,240,0.08)',
-    alignItems: 'center', justifyContent: 'center',
+  catalogEntryLeft: {
+    flex: 1,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 12,
   },
-  info: { flex: 1, gap: 2 },
-  name: { fontSize: 13, fontWeight: '700' },
-  price: { fontSize: 13, fontWeight: '800', color: COLORS.blue },
-  desc: { fontSize: 11, lineHeight: 15 },
-  controls: { alignItems: 'center', justifyContent: 'center' },
-  addBtn: { borderRadius: RADIUS.full, overflow: 'hidden' },
-  addBtnGrad: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
-  stepper: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: 'rgba(30,156,240,0.08)',
-    borderRadius: RADIUS.full, paddingHorizontal: 6, paddingVertical: 4,
+  catalogEntryIcon: {
+    width: 40, height: 40, borderRadius: 12,
+    alignItems: 'center' as const, justifyContent: 'center' as const,
   },
-  stepBtn: {
-    width: 24, height: 24, borderRadius: 12,
-    backgroundColor: 'rgba(30,156,240,0.15)',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  stepQty: { fontSize: 13, fontWeight: '700', color: COLORS.text, minWidth: 16, textAlign: 'center' },
+  catalogEntryTitle: { fontSize: 15, fontWeight: '700' as const },
+  catalogEntrySub:   { fontSize: 12, marginTop: 1 },
+});
+
+const profileCatalogStyles = StyleSheet.create({
   cartRow: { borderRadius: RADIUS.md, overflow: 'hidden', marginTop: 4, marginBottom: 8 },
   cartRowGrad: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     paddingHorizontal: 16, paddingVertical: 12, borderRadius: RADIUS.md,
   },
   cartRowText: { flex: 1, color: '#fff', fontSize: 14, fontWeight: '700' },
+
+  // Collection group inside profile sheet
+  colGroup: {
+    borderRadius: RADIUS.md,
+    overflow: 'hidden',
+    marginBottom: 8,
+    backgroundColor: 'rgba(255,255,255,0.45)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.7)',
+    paddingBottom:10
+  },
+  colHeader: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'space-between' as const,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  colHeaderLeft: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 8,
+    flex: 1,
+  },
+  colEmoji:  { fontSize: 18 },
+  colName:   { fontSize: 13, fontWeight: '700' as const },
+  colCount:  { fontSize: 11, marginTop: 1 },
+});
+
+// ─── Premium product card styles (2-col grid) ─────────────────────────────────
+const CARD_W = (Dimensions.get('window').width - 48 - 8) / 2; // 2 cols, 16px side padding, 8px gap
+
+const pcStyles = StyleSheet.create({
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    padding: 10,
+  },
+  card: {
+    width: CARD_W,
+    borderRadius: RADIUS.lg,
+    backgroundColor: '#fff',
+    overflow: 'hidden',
+    ...SHADOW.card,
+    borderWidth: 1,
+    borderColor: 'rgba(30,156,240,0.10)',
+  },
+  img: { width: CARD_W, height: CARD_W * 0.75, },
+  imgPlaceholder: {
+    width: CARD_W, height: CARD_W * 0.65,
+    backgroundColor: 'rgba(30,156,240,0.06)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  info: {
+    paddingHorizontal: 10, paddingTop: 8, paddingBottom: 4, gap: 2,
+  },
+  name:  { fontSize: 13, fontWeight: '700', lineHeight: 17 },
+  price: { fontSize: 14, fontWeight: '800', color: COLORS.blue },
+  desc:  { fontSize: 11, color: COLORS.sub, lineHeight: 15, marginTop: 1 },
+  footer: {
+    paddingHorizontal: 10, paddingBottom: 10, paddingTop: 6,
+    borderTopWidth: 1, borderTopColor: 'rgba(30,156,240,0.07)',
+  },
+  addBtn: { borderRadius: RADIUS.full, overflow: 'hidden' },
+  addBtnGrad: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 5, paddingVertical: 8, borderRadius: RADIUS.full,
+  },
+  addBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+  stepper: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 10, backgroundColor: 'rgba(30,156,240,0.08)',
+    borderRadius: RADIUS.full, paddingVertical: 6,
+  },
+  stepBtn: {
+    width: 26, height: 26, borderRadius: 13,
+    backgroundColor: 'rgba(30,156,240,0.14)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  stepQty: { fontSize: 13, fontWeight: '800', color: COLORS.text, minWidth: 18, textAlign: 'center' },
 });
 
 // ─── CartSheet ────────────────────────────────────────────────────────────────
@@ -3678,51 +4082,51 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
 
-  bubble: { 
-    maxWidth: '75%', 
-    borderRadius: 18, 
-    paddingHorizontal: 14, 
+  bubble: {
+    maxWidth: '75%',
+    borderRadius: 18,
+    paddingHorizontal: 14,
     paddingVertical: 10,
     paddingBottom: 6,
     position: 'relative',
   },
   bubbleIn: { borderBottomLeftRadius: 4, ...SHADOW.card },
-  bubbleTextIn: { 
-    fontSize: 14, 
-    color: '#fff', 
+  bubbleTextIn: {
+    fontSize: 14,
+    color: '#fff',
     lineHeight: 20,
     paddingRight: 60, // Space for time and tick
     marginBottom: 2,
   },
-  timeIn: { 
+  timeIn: {
     position: 'absolute',
     bottom: 4,
     right: 10,
-    fontSize: 10, 
+    fontSize: 10,
     color: 'rgba(255,255,255,0.75)',
   },
 
-  bubbleOut: { 
-    backgroundColor: 'rgba(180,225,245,0.22)', 
-    borderWidth: 1, 
-    borderColor: 'rgba(30,156,240,0.18)', 
+  bubbleOut: {
+    backgroundColor: 'rgba(180,225,245,0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(30,156,240,0.18)',
     borderBottomRightRadius: 4,
     position: 'relative',
-    ...SHADOW.card 
+    ...SHADOW.card
   },
-  bubbleTextOut: { 
-    fontSize: 14, 
-    color: COLORS.text, 
+  bubbleTextOut: {
+    fontSize: 14,
+    color: COLORS.text,
     lineHeight: 20,
     paddingRight: 70, // Space for time and double tick
     marginBottom: 2,
   },
-  timeOutRow: { 
+  timeOutRow: {
     position: 'absolute',
     bottom: 4,
     right: 10,
-    flexDirection: 'row', 
-    alignItems: 'center', 
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 3,
   },
   timeOut: { fontSize: 10, color: COLORS.sub },
@@ -3762,16 +4166,16 @@ const styles = StyleSheet.create({
     gap: 4, ...GLASS.header,
   },
   inputSideBtn: { width: 38, height: 42, alignItems: 'center', justifyContent: 'center' },
-  inputFieldWrap: { 
-    flex: 1, 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    backgroundColor: 'rgba(30,156,240,0.06)', 
-    borderRadius: RADIUS.xl, 
+  inputFieldWrap: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(30,156,240,0.06)',
+    borderRadius: RADIUS.xl,
     borderWidth: 1,
     borderColor: 'rgba(30,156,240,0.18)',
-    paddingHorizontal: 14, 
-    height: 42 
+    paddingHorizontal: 14,
+    height: 42
   },
   inputField: { flex: 1, fontSize: 14, color: COLORS.text, padding: 0, margin: 0, height: 42 },
   emojiBtn: { paddingLeft: 8, alignSelf: 'center' },
@@ -3780,7 +4184,7 @@ const styles = StyleSheet.create({
 
   // Emoji panel
   emojiPanel: {
-    maxHeight: 160, 
+    maxHeight: 160,
     borderTopWidth: 1,
     paddingVertical: 8,
     backgroundColor: 'rgba(180,225,245,0.18)',

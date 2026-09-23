@@ -17,7 +17,7 @@ import { useAuth } from '../context/AuthContext';
 import { AppBg, AppText, AppIcon, useForeground, useTypography } from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
-import { CatalogItem } from '../types';
+import { CatalogItem, CatalogCollection } from '../types';
 import { CatalogShareSheet } from '../components/CatalogShareSheet';
 
 export default function ProfileScreen() {
@@ -77,8 +77,25 @@ export default function ProfileScreen() {
   const [newItemDesc, setNewItemDesc] = useState('');
   const [newItemImage, setNewItemImage] = useState<string | null>(null);
   const [uploadingCatalogImage, setUploadingCatalogImage] = useState(false);
+  const [newItemCollectionId, setNewItemCollectionId] = useState<string | null>(null);
   // Share sheet state — which item is pending share
   const [shareItem, setShareItem] = useState<CatalogItem | null>(null);
+
+  // Collections
+  const [collections, setCollections] = useState<CatalogCollection[]>([]);
+  // Multi-step collection creator:
+  //   null        → closed
+  //   'pick'      → step 1: select products
+  //   'name'      → step 2: name the collection
+  const [collectionStep, setCollectionStep] = useState<null | 'pick' | 'name'>(null);
+  const [newColName, setNewColName] = useState('');
+  const [newColEmoji, setNewColEmoji] = useState('');
+  const [newColItems, setNewColItems] = useState<string[]>([]); // selected item ids
+  const [savingCollection, setSavingCollection] = useState(false);
+  // which collection is expanded in the catalog list (null = all visible)
+  const [expandedCollection, setExpandedCollection] = useState<string | null>(null);
+  // collection picker inside add-item modal
+  const [colPickerOpen, setColPickerOpen] = useState(false);
 
   const shownName = displayName || 'Demo Business';
 
@@ -100,6 +117,7 @@ export default function ProfileScreen() {
           setAutoResponderEnabled(data.autoResponderEnabled || false);
           if (data.workSchedule) setWorkSchedule(data.workSchedule);
           setCatalog(data.catalog || []);
+          setCollections(data.collections || []);
         }
       } catch (err) {
         console.warn('[ProfileScreen] Error loading profile:', err);
@@ -115,10 +133,10 @@ export default function ProfileScreen() {
       setEditingName(false);
       return;
     }
-    
+
     try {
       await setDisplayName(trimmed);
-      
+
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
       if (currentUser) {
@@ -128,7 +146,7 @@ export default function ProfileScreen() {
     } catch (error) {
       console.error('[ProfileScreen] Error saving displayName:', error);
     }
-    
+
     setEditingName(false);
   };
 
@@ -245,9 +263,9 @@ export default function ProfileScreen() {
     return `${hour12}:${String(m).padStart(2, '0')} ${period}`;
   };
 
-  const confirmTime = (date: Date) => {
+  const confirmTime = () => {
     if (!pickerTarget) return;
-    const timeStr = formatPickerDate(date);
+    const timeStr = formatPickerDate(pickerDate);
     const updated = { ...workSchedule };
     if (!updated[pickerTarget.day]) {
       updated[pickerTarget.day] = { open: '8:00 AM', close: '5:00 PM' };
@@ -354,6 +372,7 @@ export default function ProfileScreen() {
         price: newItemPrice.trim(),
         description: newItemDesc.trim() || undefined,
         imageUri: finalImageUri,
+        collectionId: newItemCollectionId ?? null,
       };
 
       const updated = [...catalog, newItem];
@@ -363,6 +382,7 @@ export default function ProfileScreen() {
       setNewItemPrice('');
       setNewItemDesc('');
       setNewItemImage(null);
+      setNewItemCollectionId(null);
 
       // Save to Firestore
       if (currentUser) {
@@ -391,6 +411,109 @@ export default function ProfileScreen() {
     }
   };
 
+  // ── Collection management ──────────────────────────────────────────────────
+  const saveCollections = async (updated: CatalogCollection[]) => {
+    setCollections(updated);
+    try {
+      const authInstance = getAuth();
+      const currentUser = authInstance.currentUser;
+      if (currentUser) {
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({ collections: updated });
+      }
+    } catch (err) {
+      console.warn('[ProfileScreen] Error saving collections:', err);
+    }
+  };
+
+  const addCollection = async () => {
+    if (!newColName.trim()) return;
+    setSavingCollection(true);
+    try {
+      const authInstance = getAuth();
+      const currentUser = authInstance.currentUser;
+
+      const newCol: CatalogCollection = {
+        id:        Date.now().toString(),
+        name:      newColName.trim(),
+        emoji:     newColEmoji.trim() || null,   // null not undefined — Firestore rejects undefined
+        createdAt: Date.now(),
+      };
+
+      // Stamp the selected items with the new collection id.
+      // strip() removes every undefined field before writing — Firestore rejects undefined.
+      const strip = <T extends object>(obj: T): T =>
+        Object.fromEntries(
+          Object.entries(obj).filter(([, v]) => v !== undefined)
+        ) as T;
+
+      const updatedCatalog = catalog.map(item =>
+        newColItems.includes(item.id)
+          ? strip({ ...item, collectionId: newCol.id })
+          : strip({ ...item }),
+      );
+
+      // Also strip undefined from the collection object itself
+      const updatedCollections = [...collections, strip(newCol)];
+
+      if (currentUser) {
+        const fsDb = db as ReturnType<typeof firestore>;
+        await fsDb.collection('users').doc(currentUser.uid).update({
+          collections: updatedCollections,
+          catalog:     updatedCatalog,
+        });
+      }
+
+      setCatalog(updatedCatalog);
+      setCollections(updatedCollections);
+      setNewColName('');
+      setNewColEmoji('');
+      setNewColItems([]);
+      setCollectionStep(null);
+      setExpandedCollection(newCol.id);
+    } catch (err) {
+      console.warn('[ProfileScreen] Error saving collection:', err);
+    } finally {
+      setSavingCollection(false);
+    }
+  };
+
+  const removeCollection = async (colId: string) => {
+    Alert.alert(
+      'Delete Collection?',
+      'The collection will be removed. Items inside will become uncategorised.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            // un-assign items belonging to this collection
+            const updatedCatalog = catalog.map(i =>
+              i.collectionId === colId ? { ...i, collectionId: null } : i,
+            );
+            setCatalog(updatedCatalog);
+            const updatedCols = collections.filter(c => c.id !== colId);
+            try {
+              const authInstance = getAuth();
+              const currentUser = authInstance.currentUser;
+              if (currentUser) {
+                const fsDb = db as ReturnType<typeof firestore>;
+                await fsDb.collection('users').doc(currentUser.uid).update({
+                  catalog: updatedCatalog,
+                  collections: updatedCols,
+                });
+              }
+            } catch (err) {
+              console.warn('[ProfileScreen] Error removing collection:', err);
+            }
+            setCollections(updatedCols);
+          },
+        },
+      ],
+    );
+  };
+
   // ── Pick photo ────────────────────────────────────────────────────────────
   const pickPhoto = async () => {
     if (Platform.OS !== 'web') {
@@ -406,19 +529,19 @@ export default function ProfileScreen() {
       aspect: [1, 1],
       quality: 0.85,
     });
-    
+
     if (!result.canceled && result.assets[0]) {
       const uri = result.assets[0].uri;
-      
+
       try {
         const authInstance = getAuth();
         const currentUser = authInstance.currentUser;
-        
+
         if (!currentUser) {
           await setAvatarUri(uri);
           return;
         }
-        
+
         const fsDb = db as ReturnType<typeof firestore>;
         const fileName = generateFileName('jpg');
         const downloadURL = await uploadFile(uri, 'avatar', {
@@ -427,9 +550,9 @@ export default function ProfileScreen() {
         }, (progress) => {
           console.log(`[ProfileScreen] Upload progress: ${progress}%`);
         });
-        
+
         await setAvatarUri(uri);
-        
+
         await fsDb.collection('users').doc(currentUser.uid).update({ photoURL: downloadURL });
       } catch (error: any) {
         console.error('[ProfileScreen] Error saving avatar:', error);
@@ -457,7 +580,7 @@ export default function ProfileScreen() {
         <AppText style={[styles.infoLabel, { fontFamily }]}>{label}</AppText>
         {editingField === field ? (
           <TextInput
-            ref={fieldInputRef} 
+            ref={fieldInputRef}
             multiline={isMultiline}
             style={[styles.infoInput, { color: textColor, fontFamily }]}
             value={draftValue}
@@ -599,7 +722,7 @@ export default function ProfileScreen() {
             placeholder="Add email address"
             keyboardType="email-address"
           />
-          
+
           {/* Website */}
           <EditableField
             field="website"
@@ -628,7 +751,7 @@ export default function ProfileScreen() {
             <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />
           </TouchableOpacity>
         </View>
-        
+
         {/* ── Auto Responder Settings ── */}
         <View style={styles.section}>
           <AppText style={[styles.sectionTitle, { color: COLORS.sub, fontFamily }]}>AUTO RESPONDER</AppText>
@@ -719,19 +842,30 @@ export default function ProfileScreen() {
 
         {/* ── Catalog ── */}
         <View style={styles.section}>
+          {/* Section header with two action buttons */}
           <View style={styles.sectionHeader}>
             <AppText style={[styles.sectionTitle, { color: COLORS.sub, fontFamily }]}>CATALOG</AppText>
-            <TouchableOpacity
-              onPress={() => setCatalogModalOpen(true)}
-              style={styles.addBtn}
-              activeOpacity={0.8}
-            >
-              <AppIcon name="add-circle" size={18} color={COLORS.blue} fixedColor />
-              <AppText style={[styles.addBtnText, { fontFamily }]}>Add Item</AppText>
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <TouchableOpacity
+                onPress={() => { setNewColItems([]); setCollectionStep('pick'); }}
+                style={[styles.addBtn, { backgroundColor: 'rgba(30,156,240,0.08)' }]}
+                activeOpacity={0.8}
+              >
+                <AppIcon name="folder-open-outline" size={16} color={COLORS.blue} fixedColor />
+                <AppText style={[styles.addBtnText, { fontFamily }]}>Collection</AppText>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => setCatalogModalOpen(true)}
+                style={styles.addBtn}
+                activeOpacity={0.8}
+              >
+                <AppIcon name="add-circle" size={18} color={COLORS.blue} fixedColor />
+                <AppText style={[styles.addBtnText, { fontFamily }]}>Add Item</AppText>
+              </TouchableOpacity>
+            </View>
           </View>
 
-          {catalog.length === 0 ? (
+          {catalog.length === 0 && collections.length === 0 ? (
             <View style={styles.emptyCard}>
               <AppIcon name="storefront-outline" size={36} color={COLORS.textFaint} />
               <AppText style={[styles.emptyText, { color: COLORS.textFaint, fontFamily }]}>
@@ -739,46 +873,125 @@ export default function ProfileScreen() {
               </AppText>
             </View>
           ) : (
-            catalog.map((item) => (
-              <View key={item.id} style={styles.catalogCard}>
-                {item.imageUri ? (
-                  <Image source={{ uri: item.imageUri }} style={styles.catalogItemImg} />
-                ) : (
-                  <View style={styles.catalogItemPlaceholder}>
-                    <AppIcon name="cube-outline" size={20} color={COLORS.blue} fixedColor />
+            <>
+              {/* ── Collections ── */}
+              {collections.map((col) => {
+                const colItems = catalog.filter(i => i.collectionId === col.id);
+                const isOpen = expandedCollection === col.id;
+                return (
+                  <View key={col.id} style={styles.collectionGroup}>
+                    {/* Collection header row */}
+                    <TouchableOpacity
+                      style={styles.collectionHeader}
+                      activeOpacity={0.75}
+                      onPress={() => setExpandedCollection(isOpen ? null : col.id)}
+                    >
+                      <View style={styles.collectionHeaderLeft}>
+                        <View style={styles.collectionIconWrap}>
+                          <AppText style={styles.collectionEmoji}>{col.emoji || '📦'}</AppText>
+                        </View>
+                        <View>
+                          <AppText style={[styles.collectionName, { color: textColor, fontFamily }]}>
+                            {col.name}
+                          </AppText>
+                          <AppText style={[styles.collectionCount, { color: FG.secondary }]}>
+                            {colItems.length} item{colItems.length !== 1 ? 's' : ''}
+                          </AppText>
+                        </View>
+                      </View>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                        <TouchableOpacity
+                          onPress={() => removeCollection(col.id)}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          style={{ padding: 4 }}
+                        >
+                          <AppIcon name="trash-outline" size={16} color={COLORS.missed} fixedColor />
+                        </TouchableOpacity>
+                        <AppIcon
+                          name={isOpen ? 'chevron-up' : 'chevron-down'}
+                          size={18}
+                          color={COLORS.sub}
+                        />
+                      </View>
+                    </TouchableOpacity>
+
+                    {/* Items inside this collection */}
+                    {isOpen && (
+                      colItems.length === 0 ? (
+                        <View style={styles.colEmptyHint}>
+                          <AppText style={[{ color: FG.secondary, fontSize: 12, fontStyle: 'italic' }]}>
+                            No items in this collection yet. Assign items using "Add Item".
+                          </AppText>
+                        </View>
+                      ) : (
+                        colItems.map((item) => (
+                          <CatalogItemRow
+                            key={item.id}
+                            item={item}
+                            textColor={textColor}
+                            fgSecondary={FG.secondary}
+                            fontFamily={fontFamily}
+                            onShare={() => setShareItem(item)}
+                            onRemove={() => removeCatalogItem(item.id)}
+                          />
+                        ))
+                      )
+                    )}
                   </View>
-                )}
-                <View style={styles.catalogItemContent}>
-                  <AppText style={[styles.catalogItemName, { color: textColor, fontFamily }]}>
-                    {item.name}
-                  </AppText>
-                  {item.price ? (
-                    <AppText style={[styles.catalogItemPrice, { fontFamily }]}>
-                      {item.price}
-                    </AppText>
-                  ) : null}
-                  {item.description ? (
-                    <AppText style={[styles.catalogItemDesc, { color: FG.secondary, fontFamily }]} numberOfLines={2}>
-                      {item.description}
-                    </AppText>
-                  ) : null}
-                </View>
-                <TouchableOpacity
-                  onPress={() => setShareItem(item)}
-                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  style={styles.deleteBtn}
-                >
-                  <AppIcon name="share-social-outline" size={20} color={COLORS.blue} fixedColor />
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => removeCatalogItem(item.id)}
-                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  style={styles.deleteBtn}
-                >
-                  <AppIcon name="close-circle" size={20} color={COLORS.missed} fixedColor />
-                </TouchableOpacity>
-              </View>
-            ))
+                );
+              })}
+
+              {/* ── Uncategorised items ── */}
+              {(() => {
+                const uncategorised = catalog.filter(i => !i.collectionId);
+                if (uncategorised.length === 0 && collections.length > 0) return null;
+                return (
+                  <View style={styles.collectionGroup}>
+                    {collections.length > 0 && (
+                      <TouchableOpacity
+                        style={styles.collectionHeader}
+                        activeOpacity={0.75}
+                        onPress={() => setExpandedCollection(
+                          expandedCollection === '__uncategorised' ? null : '__uncategorised',
+                        )}
+                      >
+                        <View style={styles.collectionHeaderLeft}>
+                          <View style={styles.collectionIconWrap}>
+                            <AppText style={styles.collectionEmoji}>🗂️</AppText>
+                          </View>
+                          <View>
+                            <AppText style={[styles.collectionName, { color: textColor, fontFamily }]}>
+                              Uncategorised
+                            </AppText>
+                            <AppText style={[styles.collectionCount, { color: FG.secondary }]}>
+                              {uncategorised.length} item{uncategorised.length !== 1 ? 's' : ''}
+                            </AppText>
+                          </View>
+                        </View>
+                        <AppIcon
+                          name={expandedCollection === '__uncategorised' ? 'chevron-up' : 'chevron-down'}
+                          size={18}
+                          color={COLORS.sub}
+                        />
+                      </TouchableOpacity>
+                    )}
+                    {(collections.length === 0 || expandedCollection === '__uncategorised') &&
+                      uncategorised.map((item) => (
+                        <CatalogItemRow
+                          key={item.id}
+                          item={item}
+                          textColor={textColor}
+                          fgSecondary={FG.secondary}
+                          fontFamily={fontFamily}
+                          onShare={() => setShareItem(item)}
+                          onRemove={() => removeCatalogItem(item.id)}
+                        />
+                      ))
+                    }
+                  </View>
+                );
+              })()}
+            </>
           )}
         </View>
       </ScrollView>
@@ -804,7 +1017,7 @@ export default function ProfileScreen() {
                   New Item
                 </AppText>
                 <TouchableOpacity
-                  onPress={() => { setCatalogModalOpen(false); setNewItemName(''); setNewItemPrice(''); setNewItemDesc(''); setNewItemImage(null); }}
+                  onPress={() => { setCatalogModalOpen(false); setNewItemName(''); setNewItemPrice(''); setNewItemDesc(''); setNewItemImage(null); setNewItemCollectionId(null); }}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 >
                   <AppIcon name="close" size={22} color={COLORS.sub} />
@@ -870,6 +1083,25 @@ export default function ProfileScreen() {
                   />
                 </View>
 
+                {/* Collection assignment */}
+                {collections.length > 0 && (
+                  <>
+                    <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Collection</AppText>
+                    <TouchableOpacity
+                      style={[styles.modalInput, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 14 }]}
+                      onPress={() => setColPickerOpen(true)}
+                      activeOpacity={0.8}
+                    >
+                      <AppText style={[styles.modalInputText, { color: newItemCollectionId ? textColor : COLORS.textFaint, paddingVertical: 0 }]}>
+                        {newItemCollectionId
+                          ? (() => { const c = collections.find(x => x.id === newItemCollectionId); return c ? `${c.emoji || '📦'} ${c.name}` : 'Select collection'; })()
+                          : 'None (uncategorised)'}
+                      </AppText>
+                      <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />
+                    </TouchableOpacity>
+                  </>
+                )}
+
                 {/* Add Button */}
                 <TouchableOpacity onPress={addCatalogItem} activeOpacity={0.85} style={{ marginTop: 12 }} disabled={uploadingCatalogImage}>
                   <LinearGradient colors={GRADIENTS.primary} style={styles.modalPrimaryBtn}>
@@ -889,7 +1121,255 @@ export default function ProfileScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* ── Work Hours Modal (contains inline time picker to avoid nested Modal on iOS) ── */}
+      {/* ── Create Collection — 2-step playlist-style modal ── */}
+      <Modal
+        visible={collectionStep !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => {
+          if (collectionStep === 'name') { setCollectionStep('pick'); return; }
+          setCollectionStep(null);
+          setNewColName(''); setNewColEmoji(''); setNewColItems([]);
+        }}
+      >
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalSheet, { maxHeight: '90%' }]}>
+              <View style={styles.modalHandle} />
+
+              {/* ── Step indicator ── */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 4, marginBottom: 16 }}>
+                <View style={[colModalStyles.stepDot, { backgroundColor: COLORS.blue }]} />
+                <View style={[colModalStyles.stepLine, { backgroundColor: collectionStep === 'name' ? COLORS.blue : 'rgba(0,0,0,0.10)' }]} />
+                <View style={[colModalStyles.stepDot, { backgroundColor: collectionStep === 'name' ? COLORS.blue : 'rgba(0,0,0,0.15)' }]} />
+              </View>
+
+              {collectionStep === 'pick' ? (
+                /* ── STEP 1: Pick products ─────────────────────────────────── */
+                <>
+                  <View style={styles.modalHeaderRow}>
+                    <TouchableOpacity onPress={() => { setCollectionStep(null); setNewColItems([]); }} style={{ padding: 4 }}>
+                      <AppIcon name="close" size={22} color={COLORS.sub} />
+                    </TouchableOpacity>
+                    <AppText style={[styles.modalTitle, { color: textColor, fontFamily, flex: 1, textAlign: 'center' }]}>
+                      Select Products
+                    </AppText>
+                    <TouchableOpacity
+                      onPress={() => { if (newColItems.length > 0) setCollectionStep('name'); }}
+                      disabled={newColItems.length === 0}
+                      style={{ opacity: newColItems.length === 0 ? 0.35 : 1 }}
+                    >
+                      <LinearGradient colors={GRADIENTS.primary} style={colModalStyles.nextBtn}>
+                        <AppText fixedColor style={colModalStyles.nextBtnText}>
+                          Next ({newColItems.length})
+                        </AppText>
+                        <AppIcon name="arrow-forward" size={15} color="#fff" fixedColor />
+                      </LinearGradient>
+                    </TouchableOpacity>
+                  </View>
+
+                  <AppText style={[colModalStyles.stepHint, { color: FG.secondary }]}>
+                    Tap products to add them to your collection
+                  </AppText>
+
+                  {catalog.length === 0 ? (
+                    <View style={[styles.emptyCard, { marginHorizontal: 0, marginTop: 8 }]}>
+                      <AppIcon name="storefront-outline" size={32} color={COLORS.textFaint} />
+                      <AppText style={[styles.emptyText, { color: COLORS.textFaint, fontFamily }]}>
+                        Add some products to your catalog first.
+                      </AppText>
+                    </View>
+                  ) : (
+                    <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+                      <View style={colModalStyles.productGrid}>
+                        {catalog.map(item => {
+                          const selected = newColItems.includes(item.id);
+                          return (
+                            <TouchableOpacity
+                              key={item.id}
+                              style={[colModalStyles.productTile, selected && colModalStyles.productTileSelected]}
+                              activeOpacity={0.78}
+                              onPress={() => setNewColItems(prev =>
+                                prev.includes(item.id) ? prev.filter(x => x !== item.id) : [...prev, item.id]
+                              )}
+                            >
+                              {/* Image or placeholder */}
+                              {item.imageUri ? (
+                                <Image source={{ uri: item.imageUri }} style={colModalStyles.productTileImg} resizeMode="cover" />
+                              ) : (
+                                <View style={colModalStyles.productTileImgPlaceholder}>
+                                  <AppIcon name="cube-outline" size={24} color={COLORS.blue} fixedColor />
+                                </View>
+                              )}
+                              {/* Checkmark overlay when selected */}
+                              {selected && (
+                                <View style={colModalStyles.checkOverlay} pointerEvents="none">
+                                  <LinearGradient colors={['rgba(30,156,240,0.55)', 'rgba(10,114,196,0.55)']} style={colModalStyles.checkOverlayGrad}>
+                                    <AppIcon name="checkmark-circle" size={28} color="#fff" fixedColor />
+                                  </LinearGradient>
+                                </View>
+                              )}
+                              {/* Name + price */}
+                              <View style={colModalStyles.productTileInfo}>
+                                <AppText style={[colModalStyles.productTileName, { color: textColor }]} numberOfLines={1}>
+                                  {item.name}
+                                </AppText>
+                                {!!item.price && (
+                                  <AppText style={colModalStyles.productTilePrice}>{item.price}</AppText>
+                                )}
+                              </View>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    </ScrollView>
+                  )}
+                </>
+              ) : (
+                /* ── STEP 2: Name the collection ───────────────────────────── */
+                <>
+                  <View style={styles.modalHeaderRow}>
+                    <TouchableOpacity onPress={() => setCollectionStep('pick')} style={{ padding: 4 }}>
+                      <AppIcon name="chevron-back" size={22} color={COLORS.blue} fixedColor />
+                    </TouchableOpacity>
+                    <AppText style={[styles.modalTitle, { color: textColor, fontFamily, flex: 1, textAlign: 'center' }]}>
+                      Name Your Collection
+                    </AppText>
+                    <View style={{ width: 30 }} />
+                  </View>
+
+                  {/* Selected items preview strip */}
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={colModalStyles.previewStrip}>
+                    {catalog.filter(i => newColItems.includes(i.id)).map(item => (
+                      <View key={item.id} style={colModalStyles.previewChip}>
+                        {item.imageUri ? (
+                          <Image source={{ uri: item.imageUri }} style={colModalStyles.previewChipImg} />
+                        ) : (
+                          <View style={colModalStyles.previewChipPlaceholder}>
+                            <AppIcon name="cube-outline" size={14} color={COLORS.blue} fixedColor />
+                          </View>
+                        )}
+                        <AppText style={[colModalStyles.previewChipName, { color: textColor }]} numberOfLines={1}>
+                          {item.name}
+                        </AppText>
+                      </View>
+                    ))}
+                  </ScrollView>
+
+                  <AppText style={[colModalStyles.stepHint, { color: FG.secondary, marginBottom: 12 }]}>
+                    {newColItems.length} product{newColItems.length !== 1 ? 's' : ''} selected
+                  </AppText>
+
+                  {/* Emoji */}
+                  <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Emoji (optional)</AppText>
+                  <View style={styles.modalInput}>
+                    <TextInput
+                      style={[styles.modalInputText, { color: textColor, fontFamily }]}
+                      placeholder="e.g. 🌸 🍹 👗"
+                      placeholderTextColor={COLORS.textFaint}
+                      value={newColEmoji}
+                      onChangeText={setNewColEmoji}
+                      returnKeyType="next"
+                      maxLength={4}
+                    />
+                  </View>
+
+                  {/* Collection name */}
+                  <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Collection Name</AppText>
+                  <View style={styles.modalInput}>
+                    <TextInput
+                      style={[styles.modalInputText, { color: textColor, fontFamily }]}
+                      placeholder="e.g. Beverages, Flowers, Clothing"
+                      placeholderTextColor={COLORS.textFaint}
+                      value={newColName}
+                      onChangeText={setNewColName}
+                      returnKeyType="done"
+                      autoFocus
+                    />
+                  </View>
+
+                  <TouchableOpacity
+                    onPress={addCollection}
+                    activeOpacity={0.85}
+                    disabled={savingCollection || !newColName.trim()}
+                    style={{ marginTop: 4 }}
+                  >
+                    <LinearGradient
+                      colors={newColName.trim() ? GRADIENTS.primary : ['#ccc', '#bbb']}
+                      style={styles.modalPrimaryBtn}
+                    >
+                      {savingCollection
+                        ? <ActivityIndicator size="small" color="#fff" />
+                        : <>
+                            <AppIcon name="checkmark-circle-outline" size={18} color="#fff" fixedColor style={{ marginRight: 6 }} />
+                            <AppText fixedColor style={styles.modalPrimaryBtnText}>Create Collection</AppText>
+                          </>
+                      }
+                    </LinearGradient>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ── Collection Picker Modal (inside Add Item flow) ── */}
+      <Modal
+        visible={colPickerOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setColPickerOpen(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalSheet, { maxHeight: '60%' }]}>
+            <View style={styles.modalHandle} />
+            <View style={styles.modalHeaderRow}>
+              <AppText style={[styles.modalTitle, { color: textColor, fontFamily }]}>Assign Collection</AppText>
+              <TouchableOpacity onPress={() => setColPickerOpen(false)}>
+                <AppIcon name="close" size={22} color={COLORS.sub} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {/* None option */}
+              <TouchableOpacity
+                style={[styles.catalogCard, newItemCollectionId === null && { borderColor: COLORS.blue, borderWidth: 1.5 }]}
+                onPress={() => { setNewItemCollectionId(null); setColPickerOpen(false); }}
+                activeOpacity={0.75}
+              >
+                <View style={styles.catalogItemPlaceholder}>
+                  <AppIcon name="close-circle-outline" size={20} color={COLORS.sub} fixedColor />
+                </View>
+                <View style={styles.catalogItemContent}>
+                  <AppText style={[styles.catalogItemName, { color: textColor, fontFamily }]}>None (uncategorised)</AppText>
+                </View>
+                {newItemCollectionId === null && <AppIcon name="checkmark-circle" size={20} color={COLORS.blue} fixedColor />}
+              </TouchableOpacity>
+              {collections.map(col => (
+                <TouchableOpacity
+                  key={col.id}
+                  style={[styles.catalogCard, newItemCollectionId === col.id && { borderColor: COLORS.blue, borderWidth: 1.5 }]}
+                  onPress={() => { setNewItemCollectionId(col.id); setColPickerOpen(false); }}
+                  activeOpacity={0.75}
+                >
+                  <View style={[styles.catalogItemPlaceholder, { backgroundColor: 'rgba(30,156,240,0.10)' }]}>
+                    <AppText style={{ fontSize: 20 }}>{col.emoji || '📦'}</AppText>
+                  </View>
+                  <View style={styles.catalogItemContent}>
+                    <AppText style={[styles.catalogItemName, { color: textColor, fontFamily }]}>{col.name}</AppText>
+                    <AppText style={[styles.catalogItemDesc, { color: FG.secondary }]}>
+                      {catalog.filter(i => i.collectionId === col.id).length} items
+                    </AppText>
+                  </View>
+                  {newItemCollectionId === col.id && <AppIcon name="checkmark-circle" size={20} color={COLORS.blue} fixedColor />}
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── Work Hours Modal ── */}
       <Modal
         visible={hoursModalOpen}
         transparent
@@ -902,66 +1382,66 @@ export default function ProfileScreen() {
 
             {/* ── Day schedule list ── */}
             <>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                  <AppText style={[styles.modalTitle, { marginBottom: 0, color: textColor, fontFamily }]}>Work Hours</AppText>
-                  <TouchableOpacity onPress={() => setHoursModalOpen(false)}>
-                    <AppIcon name="close" size={22} color={COLORS.sub} />
-                  </TouchableOpacity>
-                </View>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <AppText style={[styles.modalTitle, { marginBottom: 0, color: textColor, fontFamily }]}>Work Hours</AppText>
+                <TouchableOpacity onPress={() => setHoursModalOpen(false)}>
+                  <AppIcon name="close" size={22} color={COLORS.sub} />
+                </TouchableOpacity>
+              </View>
 
-                <ScrollView showsVerticalScrollIndicator={false}>
-                  {DAYS.map((day) => {
-                    const schedule = workSchedule[day] || { open: 'Closed', close: 'Closed' };
-                    const isClosed = schedule.open === 'Closed';
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {DAYS.map((day) => {
+                  const schedule = workSchedule[day] || { open: 'Closed', close: 'Closed' };
+                  const isClosed = schedule.open === 'Closed';
 
-                    return (
-                      <View key={day} style={styles.dayRow}>
-                        <View style={styles.dayToggleWrap}>
-                          <Switch
-                            value={!isClosed}
-                            onValueChange={(val) => {
-                              const updated = { ...workSchedule };
-                              if (val) {
-                                updated[day] = { open: '8:00 AM', close: '5:00 PM' };
-                              } else {
-                                updated[day] = { open: 'Closed', close: 'Closed' };
-                              }
-                              setWorkSchedule(updated);
-                              saveWorkSchedule(updated);
-                            }}
-                            trackColor={{ false: 'rgba(0,0,0,0.1)', true: COLORS.blue }}
-                            thumbColor={'#fff'}
-                            style={{ transform: [{ scale: 0.8 }] }}
-                          />
-                          <AppText style={[styles.dayLabel, { color: textColor, fontFamily }]}>{day}</AppText>
-                        </View>
-
-                        <View style={styles.dayTimes}>
-                          {isClosed ? (
-                            <AppText style={[styles.closedText, { fontFamily, color: COLORS.sub }]}>Closed</AppText>
-                          ) : (
-                            <>
-                              <TouchableOpacity
-                                style={styles.timePill}
-                                onPress={() => openTimePicker(day, 'open')}
-                              >
-                                <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.open}</AppText>
-                              </TouchableOpacity>
-                              <AppText style={{ color: COLORS.sub, fontSize: 12 }}>to</AppText>
-                              <TouchableOpacity
-                                style={styles.timePill}
-                                onPress={() => openTimePicker(day, 'close')}
-                              >
-                                <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.close}</AppText>
-                              </TouchableOpacity>
-                            </>
-                          )}
-                        </View>
+                  return (
+                    <View key={day} style={styles.dayRow}>
+                      <View style={styles.dayToggleWrap}>
+                        <Switch
+                          value={!isClosed}
+                          onValueChange={(val) => {
+                            const updated = { ...workSchedule };
+                            if (val) {
+                              updated[day] = { open: '8:00 AM', close: '5:00 PM' };
+                            } else {
+                              updated[day] = { open: 'Closed', close: 'Closed' };
+                            }
+                            setWorkSchedule(updated);
+                            saveWorkSchedule(updated);
+                          }}
+                          trackColor={{ false: 'rgba(0,0,0,0.1)', true: COLORS.blue }}
+                          thumbColor={'#fff'}
+                          style={{ transform: [{ scale: 0.8 }] }}
+                        />
+                        <AppText style={[styles.dayLabel, { color: textColor, fontFamily }]}>{day}</AppText>
                       </View>
-                    );
-                  })}
-                </ScrollView>
-              </>
+
+                      <View style={styles.dayTimes}>
+                        {isClosed ? (
+                          <AppText style={[styles.closedText, { fontFamily, color: COLORS.sub }]}>Closed</AppText>
+                        ) : (
+                          <>
+                            <TouchableOpacity
+                              style={styles.timePill}
+                              onPress={() => openTimePicker(day, 'open')}
+                            >
+                              <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.open}</AppText>
+                            </TouchableOpacity>
+                            <AppText style={{ color: COLORS.sub, fontSize: 12 }}>to</AppText>
+                            <TouchableOpacity
+                              style={styles.timePill}
+                              onPress={() => openTimePicker(day, 'close')}
+                            >
+                              <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.close}</AppText>
+                            </TouchableOpacity>
+                          </>
+                        )}
+                      </View>
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            </>
           </View>
         </View>
       </Modal>
@@ -987,6 +1467,150 @@ export default function ProfileScreen() {
     </View>
   );
 }
+
+// ─── CatalogItemRow ───────────────────────────────────────────────────────────
+function CatalogItemRow({
+  item, textColor, fgSecondary, fontFamily, onShare, onRemove,
+}: {
+  item: import('../types').CatalogItem;
+  textColor: string;
+  fgSecondary: string;
+  fontFamily: string;
+  onShare: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <View style={styles.catalogCard}>
+      {item.imageUri ? (
+        <Image source={{ uri: item.imageUri }} style={styles.catalogItemImg} />
+      ) : (
+        <View style={styles.catalogItemPlaceholder}>
+          <AppIcon name="cube-outline" size={20} color={COLORS.blue} fixedColor />
+        </View>
+      )}
+      <View style={styles.catalogItemContent}>
+        <AppText style={[styles.catalogItemName, { color: textColor, fontFamily }]}>
+          {item.name}
+        </AppText>
+        {item.price ? (
+          <AppText style={[styles.catalogItemPrice, { fontFamily }]}>{item.price}</AppText>
+        ) : null}
+        {item.description ? (
+          <AppText style={[styles.catalogItemDesc, { color: fgSecondary, fontFamily }]} numberOfLines={2}>
+            {item.description}
+          </AppText>
+        ) : null}
+      </View>
+      <TouchableOpacity
+        onPress={onShare}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        style={styles.deleteBtn}
+      >
+        <AppIcon name="share-social-outline" size={20} color={COLORS.blue} fixedColor />
+      </TouchableOpacity>
+      <TouchableOpacity
+        onPress={onRemove}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        style={styles.deleteBtn}
+      >
+        <AppIcon name="close-circle" size={20} color={COLORS.missed} fixedColor />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+// ─── Collection modal styles ──────────────────────────────────────────────────
+const TILE_SIZE = 150;
+
+const colModalStyles = StyleSheet.create({
+  // Step progress indicator
+  stepDot:  { width: 8, height: 8, borderRadius: 4, flex: 0 },
+  stepLine: { flex: 1, height: 2, marginHorizontal: 4 },
+
+  // Next button (step 1 header)
+  nextBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 14, paddingVertical: 8,
+    borderRadius: RADIUS.full,
+  },
+  nextBtnText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+
+  stepHint: { fontSize: 12, marginBottom: 8, marginLeft: 2 },
+
+  // Product grid (step 1)
+  productGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    paddingBottom: 20,
+    paddingTop: 4,
+  },
+  productTile: {
+    width: TILE_SIZE,
+    borderRadius: RADIUS.md,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.85)',
+    borderWidth: 2,
+    borderColor: 'transparent',
+    ...SHADOW.card,
+  },
+  productTileSelected: {
+    borderColor: COLORS.blue,
+  },
+  productTileImg: {
+    width: TILE_SIZE,
+    height: TILE_SIZE,
+  },
+  productTileImgPlaceholder: {
+    width: TILE_SIZE,
+    height: TILE_SIZE * 0.7,
+    backgroundColor: 'rgba(30,156,240,0.07)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkOverlay: {
+    position: 'absolute',
+    top: 0, left: 0,
+    width: TILE_SIZE,
+    height: TILE_SIZE,
+  },
+  checkOverlayGrad: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  productTileInfo: {
+    padding: 8,
+    gap: 2,
+  },
+  productTileName:  { fontSize: 12, fontWeight: '700' },
+  productTilePrice: { fontSize: 12, fontWeight: '800', color: COLORS.blue },
+
+  // Selected items preview strip (step 2)
+  previewStrip: {
+    paddingHorizontal: 2,
+    paddingBottom: 12,
+    gap: 8,
+    flexDirection: 'row',
+  },
+  previewChip: {
+    alignItems: 'center',
+    gap: 4,
+    width: 60,
+  },
+  previewChipImg: {
+    width: 52, height: 52, borderRadius: 10,
+  },
+  previewChipPlaceholder: {
+    width: 52, height: 52, borderRadius: 10,
+    backgroundColor: 'rgba(30,156,240,0.08)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  previewChipName: {
+    fontSize: 10, fontWeight: '600', textAlign: 'center',
+    maxWidth: 58,
+  },
+});
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
@@ -1219,7 +1843,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    width: 120, // Prevents days from shifting the other elements
+    width: 120,
   },
   dayLabel: { fontSize: 14, fontWeight: '600' },
   dayTimes: { flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, justifyContent: 'flex-end' },
@@ -1312,4 +1936,36 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   customTimeBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
-});
+
+  // ── Collections ─────────────────────────────────────────────────────────────
+  collectionGroup: {
+    borderRadius: 14,
+    overflow: 'hidden',
+    marginBottom: 4,
+    backgroundColor: 'rgba(255,255,255,0.45)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.7)',
+  },
+  collectionHeader: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'space-between' as const,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  collectionHeaderLeft: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 10,
+    flex: 1,
+  },
+  collectionIconWrap: {
+    width: 38, height: 38, borderRadius: 10,
+    backgroundColor: 'rgba(30,156,240,0.10)',
+    alignItems: 'center' as const, justifyContent: 'center' as const,
+  },
+  collectionEmoji:  { fontSize: 20 },
+  collectionName:   { fontSize: 14, fontWeight: '700' as const },
+  collectionCount:  { fontSize: 11, marginTop: 1 },
+  colEmptyHint:     { paddingHorizontal: 14, paddingBottom: 12 },
+}); 
