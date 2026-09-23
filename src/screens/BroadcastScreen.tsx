@@ -76,9 +76,11 @@ export default function BroadcastScreen() {
   const [saving,       setSaving]       = useState(false);
 
   // ── Compose state ───────────────────────────────────────────────────────────
-  const [message,      setMessage]      = useState('');
-  const [sending,      setSending]      = useState(false);
-  const [progress,     setProgress]     = useState({ done: 0, total: 0 });
+  const [message,           setMessage]           = useState('');
+  const [sending,           setSending]           = useState(false);
+  const [progress,          setProgress]          = useState({ done: 0, total: 0 });
+  const [composePickerOpen, setComposePickerOpen] = useState(false);
+  const [savingRecipients,  setSavingRecipients]  = useState(false);
   const isSendingRef = useRef(false);
 
   // ── Delete state ────────────────────────────────────────────────────────────
@@ -171,6 +173,27 @@ export default function BroadcastScreen() {
         },
       ],
     );
+  };
+
+  // ── Update recipients from the compose view ──────────────────────────────────
+  const handleUpdateComposeRecipients = async (ids: string[]) => {
+    if (!activeList) return;
+    if (ids.length === 0) {
+      Alert.alert('No recipients', 'Select at least one contact.');
+      return;
+    }
+    setSavingRecipients(true);
+    try {
+      await updateBroadcastRecipients(activeList.id, ids);
+      // Patch activeList locally so the compose view reflects the change instantly
+      // without waiting for the Firestore onSnapshot round-trip.
+      setActiveList({ ...activeList, recipients: ids });
+    } catch (err) {
+      console.error('[BroadcastScreen] updateComposeRecipients:', err);
+      Alert.alert('Error', 'Failed to update recipients. Please try again.');
+    } finally {
+      setSavingRecipients(false);
+    }
   };
 
   // ── Send ──────────────────────────────────────────────────────────────────────
@@ -467,13 +490,30 @@ export default function BroadcastScreen() {
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={styles.composeContent}
         >
-          {/* Recipient summary pill */}
-          <View style={[styles.recipientPill, bevel]}>
-            <AppIcon name="people" size={16} color={COLORS.blue} fixedColor />
-            <AppText style={[styles.recipientPillText, { color: textColor }]} numberOfLines={2}>
-              {resolveNames(activeList.recipients)}
-            </AppText>
-          </View>
+          {/* Recipients — tappable, opens picker to edit inline */}
+          <AppText style={[styles.fieldLabel, { color: FG.secondary }]}>RECIPIENTS</AppText>
+          <TouchableOpacity
+            style={[styles.recipientsCard, bevel]}
+            activeOpacity={0.8}
+            onPress={() => setComposePickerOpen(true)}
+            disabled={sending || savingRecipients}
+          >
+            <View style={styles.recipientsLeft}>
+              <AppIcon name="people" size={20} color={COLORS.blue} fixedColor />
+              <View style={{ flex: 1 }}>
+                <AppText style={[styles.recipientsTitle, { color: textColor, fontFamily }]}>
+                  {activeList.recipients.length} recipient{activeList.recipients.length !== 1 ? 's' : ''}
+                </AppText>
+                <AppText style={[styles.recipientsSub, { color: FG.secondary }]} numberOfLines={1}>
+                  {resolveNames(activeList.recipients)}
+                </AppText>
+              </View>
+            </View>
+            {savingRecipients
+              ? <ActivityIndicator size="small" color={COLORS.blue} />
+              : <AppIcon name="create-outline" size={18} color={COLORS.blue} fixedColor />
+            }
+          </TouchableOpacity>
 
           {/* Message input */}
           <AppText style={[styles.fieldLabel, { color: FG.secondary }]}>MESSAGE</AppText>
@@ -542,6 +582,18 @@ export default function BroadcastScreen() {
             </LinearGradient>
           </TouchableOpacity>
         </View>
+
+        {/* Participant picker — edit recipients without leaving the compose view */}
+        <ParticipantPickerSheet
+          visible={composePickerOpen}
+          selected={activeList.recipients}
+          title="Edit Recipients"
+          onConfirm={(ids) => {
+            setComposePickerOpen(false);
+            handleUpdateComposeRecipients(ids);
+          }}
+          onClose={() => setComposePickerOpen(false)}
+        />
       </View>
     );
   }
@@ -646,12 +698,6 @@ const styles = StyleSheet.create({
 
   // Compose
   composeContent: { paddingHorizontal: 16, paddingBottom: 20, gap: 12 },
-
-  recipientPill: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    borderRadius: RADIUS.md, padding: 12,
-  },
-  recipientPillText: { flex: 1, fontSize: 13 },
 
   messageCard: {
     borderRadius: RADIUS.md, padding: 14,

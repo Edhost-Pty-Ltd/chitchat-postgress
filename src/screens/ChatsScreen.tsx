@@ -26,7 +26,7 @@ import { RootStackParamList } from '../types';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 import BroadcastScreen from './BroadcastScreen';
 type NavProp   = NativeStackNavigationProp<RootStackParamList, 'Chats'>;
-type TabType   = 'Chats' | 'Groups';
+type TabType   = 'Chats' | 'Groups' | 'Broadcast';
 type SheetMode = 'select' | 'newContact' | 'newGroup';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
