@@ -5,7 +5,7 @@ import {
   Image, Alert, Platform, TextInput, Modal,
   KeyboardAvoidingView, Switch, ActivityIndicator,
 } from 'react-native';
-import DatePicker from 'react-native-date-picker';
+import DateTimePickerModal from 'react-native-modal-datetime-picker';
 import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
@@ -1369,130 +1369,92 @@ export default function ProfileScreen() {
         </View>
       </Modal>
 
-      {/* ── Work Hours Modal (contains inline time picker to avoid nested Modal on iOS) ── */}
+      {/* ── Work Hours Modal ── */}
       <Modal
         visible={hoursModalOpen}
         transparent
         animationType="slide"
-        onRequestClose={() => {
-          if (pickerVisible) {
-            setPickerVisible(false);
-            setPickerTarget(null);
-          } else {
-            setHoursModalOpen(false);
-          }
-        }}
+        onRequestClose={() => setHoursModalOpen(false)}
       >
         <View style={styles.modalOverlay}>
           <View style={[styles.modalSheet, { maxHeight: '90%' }]}>
             <View style={styles.modalHandle} />
 
-            {pickerVisible ? (
-              /* ── Inline Time Picker view (replaces day list) ── */
-              <>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                  <TouchableOpacity onPress={() => { setPickerVisible(false); setPickerTarget(null); }} style={{ padding: 4 }}>
-                    <AppIcon name="chevron-back" size={22} color={COLORS.blue} fixedColor />
-                  </TouchableOpacity>
-                  <AppText style={[styles.modalTitle, { marginBottom: 0, color: textColor, fontFamily, fontSize: 16 }]}>
-                    {pickerTarget
-                      ? `${pickerTarget.day} — ${pickerTarget.field === 'open' ? 'Opens at' : 'Closes at'}`
-                      : 'Select Time'}
-                  </AppText>
-                  <View style={{ width: 30 }} />
-                </View>
+            {/* ── Day schedule list ── */}
+            <>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <AppText style={[styles.modalTitle, { marginBottom: 0, color: textColor, fontFamily }]}>Work Hours</AppText>
+                <TouchableOpacity onPress={() => setHoursModalOpen(false)}>
+                  <AppIcon name="close" size={22} color={COLORS.sub} />
+                </TouchableOpacity>
+              </View>
 
-                <View style={{ alignItems: 'center', marginVertical: 12 }}>
-                  <DatePicker
-                    date={pickerDate}
-                    onDateChange={setPickerDate}
-                    mode="time"
-                    locale="en_US"
-                  />
-                </View>
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {DAYS.map((day) => {
+                  const schedule = workSchedule[day] || { open: 'Closed', close: 'Closed' };
+                  const isClosed = schedule.open === 'Closed';
 
-                <View style={styles.pickerActions}>
-                  <TouchableOpacity
-                    onPress={() => { setPickerVisible(false); setPickerTarget(null); }}
-                    style={[styles.pickerActionBtn, styles.pickerCancelBtn]}
-                  >
-                    <AppText style={[styles.pickerActionText, { color: COLORS.sub, fontFamily }]}>Cancel</AppText>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    onPress={confirmTime}
-                    style={[styles.pickerActionBtn, styles.pickerConfirmBtn]}
-                  >
-                    <AppText fixedColor style={[styles.pickerActionText, { color: '#fff', fontFamily }]}>Set Time</AppText>
-                  </TouchableOpacity>
-                </View>
-              </>
-            ) : (
-              /* ── Day schedule list ── */
-              <>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                  <AppText style={[styles.modalTitle, { marginBottom: 0, color: textColor, fontFamily }]}>Work Hours</AppText>
-                  <TouchableOpacity onPress={() => setHoursModalOpen(false)}>
-                    <AppIcon name="close" size={22} color={COLORS.sub} />
-                  </TouchableOpacity>
-                </View>
-
-                <ScrollView showsVerticalScrollIndicator={false}>
-                  {DAYS.map((day) => {
-                    const schedule = workSchedule[day] || { open: 'Closed', close: 'Closed' };
-                    const isClosed = schedule.open === 'Closed';
-
-                    return (
-                      <View key={day} style={styles.dayRow}>
-                        <View style={styles.dayToggleWrap}>
-                          <Switch
-                            value={!isClosed}
-                            onValueChange={(val) => {
-                              const updated = { ...workSchedule };
-                              if (val) {
-                                updated[day] = { open: '8:00 AM', close: '5:00 PM' };
-                              } else {
-                                updated[day] = { open: 'Closed', close: 'Closed' };
-                              }
-                              setWorkSchedule(updated);
-                              saveWorkSchedule(updated);
-                            }}
-                            trackColor={{ false: 'rgba(0,0,0,0.1)', true: COLORS.blue }}
-                            thumbColor={'#fff'}
-                            style={{ transform: [{ scale: 0.8 }] }}
-                          />
-                          <AppText style={[styles.dayLabel, { color: textColor, fontFamily }]}>{day}</AppText>
-                        </View>
-
-                        <View style={styles.dayTimes}>
-                          {isClosed ? (
-                            <AppText style={[styles.closedText, { fontFamily, color: COLORS.sub }]}>Closed</AppText>
-                          ) : (
-                            <>
-                              <TouchableOpacity
-                                style={styles.timePill}
-                                onPress={() => openTimePicker(day, 'open')}
-                              >
-                                <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.open}</AppText>
-                              </TouchableOpacity>
-                              <AppText style={{ color: COLORS.sub, fontSize: 12 }}>to</AppText>
-                              <TouchableOpacity
-                                style={styles.timePill}
-                                onPress={() => openTimePicker(day, 'close')}
-                              >
-                                <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.close}</AppText>
-                              </TouchableOpacity>
-                            </>
-                          )}
-                        </View>
+                  return (
+                    <View key={day} style={styles.dayRow}>
+                      <View style={styles.dayToggleWrap}>
+                        <Switch
+                          value={!isClosed}
+                          onValueChange={(val) => {
+                            const updated = { ...workSchedule };
+                            if (val) {
+                              updated[day] = { open: '8:00 AM', close: '5:00 PM' };
+                            } else {
+                              updated[day] = { open: 'Closed', close: 'Closed' };
+                            }
+                            setWorkSchedule(updated);
+                            saveWorkSchedule(updated);
+                          }}
+                          trackColor={{ false: 'rgba(0,0,0,0.1)', true: COLORS.blue }}
+                          thumbColor={'#fff'}
+                          style={{ transform: [{ scale: 0.8 }] }}
+                        />
+                        <AppText style={[styles.dayLabel, { color: textColor, fontFamily }]}>{day}</AppText>
                       </View>
-                    );
-                  })}
-                </ScrollView>
-              </>
-            )}
+
+                      <View style={styles.dayTimes}>
+                        {isClosed ? (
+                          <AppText style={[styles.closedText, { fontFamily, color: COLORS.sub }]}>Closed</AppText>
+                        ) : (
+                          <>
+                            <TouchableOpacity
+                              style={styles.timePill}
+                              onPress={() => openTimePicker(day, 'open')}
+                            >
+                              <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.open}</AppText>
+                            </TouchableOpacity>
+                            <AppText style={{ color: COLORS.sub, fontSize: 12 }}>to</AppText>
+                            <TouchableOpacity
+                              style={styles.timePill}
+                              onPress={() => openTimePicker(day, 'close')}
+                            >
+                              <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.close}</AppText>
+                            </TouchableOpacity>
+                          </>
+                        )}
+                      </View>
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            </>
           </View>
         </View>
       </Modal>
+
+      {/* ── Time Picker Modal ── */}
+      <DateTimePickerModal
+        isVisible={pickerVisible}
+        mode="time"
+        date={pickerDate}
+        onConfirm={confirmTime}
+        onCancel={() => { setPickerVisible(false); setPickerTarget(null); }}
+        is24Hour={false}
+      />
 
       {/* ── Catalog Share Sheet ── */}
       {shareItem && (
