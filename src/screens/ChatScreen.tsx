@@ -46,6 +46,7 @@ import { FileMessageBubble } from '../components/FileMessageBubble';
 import { VoiceRecordingOverlay } from '../components/VoiceRecordingOverlay';
 import { ForwardModal } from '../components/ForwardModal';
 import { MessageInfoModal } from '../components/MessageInfoModal';
+import { CatalogBubble } from '../components/CatalogBubble';
 import { useAuth } from '../hooks/useAuth';
 import { useMessages, FireMessage } from '../hooks/useMessages';
 import { useVoicePlayer } from '../hooks/useVoicePlayer';
@@ -68,6 +69,7 @@ import { TypingIndicator } from '../components/TypingIndicator';
 import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
+import { useCart } from '../context/CartContext';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'Chat'>;
@@ -224,6 +226,14 @@ export default function ChatScreen() {
   // ── Auth — get current user ID ──────────────────────────────────
   const { user } = useAuth();
   const userId = user?.uid ?? null;
+
+  // ── Cart ────────────────────────────────────────────────────────
+  const { totalItems, formatOrderSummary, clearCart } = useCart();
+  const [cartSheetVisible, setCartSheetVisible] = useState(false);
+
+  // ── Seller catalog (loaded when profile modal opens for 1-on-1 chats) ──
+  const [sellerCatalog, setSellerCatalog] = useState<import('../types').CatalogItem[]>([]);
+  const [loadingCatalog, setLoadingCatalog] = useState(false);
 
   // ── Messages — real-time Firestore stream ───────────────────────
   const { messages, loading, sendMessage } = useMessages(chatId, userId);
@@ -468,6 +478,28 @@ export default function ChatScreen() {
   useEffect(() => {
     if (!profileModalOpen || !isGroup || !chatId) return;
 
+  useEffect(() => {
+    if (!profileModalOpen || isGroup || !otherUserId) {
+      if (!profileModalOpen) setSellerCatalog([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingCatalog(true);
+    (async () => {
+      try {
+        const fsDbCat = db as ReturnType<typeof firestore>;
+        const snap = await fsDbCat.collection('users').doc(otherUserId).get();
+        if (!cancelled && snap.exists()) {
+          setSellerCatalog(snap.data()?.catalog ?? []);
+        }
+      } catch (err) {
+        console.warn('[ChatScreen] Failed to load seller catalog:', err);
+      } finally {
+        if (!cancelled) setLoadingCatalog(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [profileModalOpen, isGroup, otherUserId]);
     const fetchGroupMembers = async () => {
       setLoadingMembers(true);
       try {
@@ -630,6 +662,31 @@ export default function ChatScreen() {
 
     fetchPastMembers();
   }, [profileModalOpen, isGroup, chatId]);
+
+  // ── Fetch seller catalog when profile modal opens (1-on-1 chats only) ──────
+  // Reads users/{otherUserId}.catalog so the customer can browse and add items.
+  useEffect(() => {
+    if (!profileModalOpen || isGroup || !otherUserId) {
+      if (!profileModalOpen) setSellerCatalog([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingCatalog(true);
+    (async () => {
+      try {
+        const fsDbCat = db as ReturnType<typeof firestore>;
+        const snap = await fsDbCat.collection('users').doc(otherUserId).get();
+        if (!cancelled && snap.exists()) {
+          setSellerCatalog(snap.data()?.catalog ?? []);
+        }
+      } catch (err) {
+        console.warn('[ChatScreen] Failed to load seller catalog:', err);
+      } finally {
+        if (!cancelled) setLoadingCatalog(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [profileModalOpen, isGroup, otherUserId]);
 
   // ── Check blocked status ─────────────────────────────────────────
   useEffect(() => {
@@ -1987,6 +2044,16 @@ export default function ChatScreen() {
             </View>
           )
         )}
+
+        {/* ── Catalog product card ─────────────────────────────────── */}
+        {item.type === 'catalog' && item.catalogItem && (
+          <CatalogBubble
+            item={item.catalogItem}
+            isOutgoing={isOut}
+            sellerUid={item.senderId}
+            timestamp={formatTime(item.timestamp)}
+          />
+        )}
       </View>
     );
 
@@ -2245,6 +2312,23 @@ export default function ChatScreen() {
               }
               onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
             />
+          )}
+
+          {/* ── Cart floating badge button ─────────────────────────────────── */}
+          {totalItems > 0 && (
+            <TouchableOpacity
+              style={styles.cartFab}
+              onPress={() => setCartSheetVisible(true)}
+              activeOpacity={0.85}
+            >
+              <LinearGradient colors={GRADIENTS.primary} style={styles.cartFabInner}>
+                <AppIcon name="cart" size={20} color="#fff" fixedColor />
+                <AppText fixedColor style={styles.cartFabLabel}>View Cart</AppText>
+                <View style={styles.cartBadge}>
+                  <AppText fixedColor style={styles.cartBadgeText}>{totalItems}</AppText>
+                </View>
+              </LinearGradient>
+            </TouchableOpacity>
           )}
 
           {/* ── Permission denied message ── */}
@@ -2760,6 +2844,25 @@ export default function ChatScreen() {
         </Modal>
       )}
 
+      {/* ── Cart Sheet ── */}
+      <Modal
+        visible={cartSheetVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCartSheetVisible(false)}
+      >
+        <CartSheet
+          onClose={() => setCartSheetVisible(false)}
+          onSendOrder={async () => {
+            const summary = formatOrderSummary();
+            if (!summary || !userId) return;
+            setCartSheetVisible(false);
+            await sendMessage(summary);
+            clearCart();
+          }}
+        />
+      </Modal>
+
       {/* ── Profile Modal ── */}
       <Modal
         visible={profileModalOpen}
@@ -2962,6 +3065,52 @@ export default function ChatScreen() {
                   </View>
                 )}
 
+                {/* ── Catalog (1-on-1 chats only) ──────────────────────────────── */}
+                {!isGroup && (
+                  <>
+                    <AppText style={[styles.profileSectionLabel, { color: FG.secondary }]}>
+                      CATALOG
+                    </AppText>
+
+                    {loadingCatalog ? (
+                      <View style={[styles.profileMemberLoadingBox, bevel]}>
+                        <ActivityIndicator size="small" color={COLORS.blue} />
+                        <AppText style={[styles.profileMemberLoadingText, { color: FG.secondary }]}>
+                          Loading catalog…
+                        </AppText>
+                      </View>
+                    ) : sellerCatalog.length === 0 ? (
+                      <View style={[styles.infoMediaBox, bevel]}>
+                        <AppIcon name="storefront-outline" size={28} color={FG.secondary} />
+                        <AppText style={[styles.infoMediaEmpty, { color: FG.secondary }]}>
+                          No products listed yet
+                        </AppText>
+                      </View>
+                    ) : (
+                      <>
+                        {sellerCatalog.map(catalogProduct => (
+                          <ProfileCatalogCard
+                            key={catalogProduct.id}
+                            item={catalogProduct}
+                            sellerUid={otherUserId ?? ''}
+                            bevel={bevel}
+                            textColor={textColor}
+                            fgSecondary={FG.secondary}
+                          />
+                        ))}
+
+                        {/* View Cart shortcut — only shows when cart has items */}
+                        <CartBadgeRow
+                          onViewCart={() => {
+                            setProfileModalOpen(false);
+                            setCartSheetVisible(true);
+                          }}
+                        />
+                      </>
+                    )}
+                  </>
+                )}
+
                 {/* Privacy section for group chats - Leave Group */}
                 {isGroup && (
                   <>
@@ -3150,6 +3299,335 @@ export default function ChatScreen() {
     </>
   );
 }
+
+
+// ─── ProfileCatalogCard ───────────────────────────────────────────────────────
+// Compact product card used inside the profile bottom sheet.
+// Shows image, name, price, description + an Add/stepper control via useCart.
+function ProfileCatalogCard({
+  item, sellerUid, bevel, textColor, fgSecondary,
+}: {
+  item: import('../types').CatalogItem;
+  sellerUid: string;
+  bevel: any;
+  textColor: string;
+  fgSecondary: string;
+}) {
+  const { addItem, removeItem, getQuantity, sellerUid: cartSeller } = useCart();
+  const qty = getQuantity(item.id);
+
+  const handleAdd = () => {
+    if (cartSeller && cartSeller !== sellerUid && qty === 0) {
+      Alert.alert(
+        'Start new cart?',
+        'Your cart has items from another business. Adding this item will clear your current cart.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Clear & Add', style: 'destructive', onPress: () => addItem(item, sellerUid) },
+        ],
+      );
+      return;
+    }
+    addItem(item, sellerUid);
+  };
+
+  return (
+    <View style={[profileCatalogStyles.card, bevel]}>
+      {/* Left — image */}
+      {item.imageUri ? (
+        <Image source={{ uri: item.imageUri }} style={profileCatalogStyles.img} resizeMode="cover" />
+      ) : (
+        <View style={profileCatalogStyles.imgPlaceholder}>
+          <AppIcon name="cube-outline" size={22} color={COLORS.blue} fixedColor />
+        </View>
+      )}
+
+      {/* Middle — info */}
+      <View style={profileCatalogStyles.info}>
+        <AppText style={[profileCatalogStyles.name, { color: textColor }]} numberOfLines={1}>
+          {item.name}
+        </AppText>
+        {!!item.price && (
+          <AppText style={profileCatalogStyles.price}>{item.price}</AppText>
+        )}
+        {!!item.description && (
+          <AppText style={[profileCatalogStyles.desc, { color: fgSecondary }]} numberOfLines={2}>
+            {item.description}
+          </AppText>
+        )}
+      </View>
+
+      {/* Right — cart control */}
+      <View style={profileCatalogStyles.controls}>
+        {qty === 0 ? (
+          <TouchableOpacity onPress={handleAdd} activeOpacity={0.85} style={profileCatalogStyles.addBtn}>
+            <LinearGradient colors={GRADIENTS.primary} style={profileCatalogStyles.addBtnGrad}>
+              <AppIcon name="add" size={16} color="#fff" fixedColor />
+            </LinearGradient>
+          </TouchableOpacity>
+        ) : (
+          <View style={profileCatalogStyles.stepper}>
+            <TouchableOpacity onPress={() => removeItem(item.id)} style={profileCatalogStyles.stepBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <AppIcon name="remove" size={14} color={COLORS.blue} fixedColor />
+            </TouchableOpacity>
+            <AppText style={profileCatalogStyles.stepQty}>{qty}</AppText>
+            <TouchableOpacity onPress={handleAdd} style={profileCatalogStyles.stepBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <AppIcon name="add" size={14} color={COLORS.blue} fixedColor />
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
+    </View>
+  );
+}
+
+// ─── CartBadgeRow ─────────────────────────────────────────────────────────────
+// Shows a "View Cart (n items)" row at the bottom of the catalog list only when
+// the cart is non-empty. Tapping it navigates the user to the CartSheet.
+function CartBadgeRow({ onViewCart }: { onViewCart: () => void }) {
+  const { totalItems } = useCart();
+  if (totalItems === 0) return null;
+  return (
+    <TouchableOpacity onPress={onViewCart} activeOpacity={0.85} style={profileCatalogStyles.cartRow}>
+      <LinearGradient colors={GRADIENTS.primary} style={profileCatalogStyles.cartRowGrad}>
+        <AppIcon name="cart" size={18} color="#fff" fixedColor />
+        <AppText fixedColor style={profileCatalogStyles.cartRowText}>
+          View Cart · {totalItems} {totalItems === 1 ? 'item' : 'items'}
+        </AppText>
+        <AppIcon name="chevron-forward" size={16} color="#fff" fixedColor />
+      </LinearGradient>
+    </TouchableOpacity>
+  );
+}
+
+const profileCatalogStyles = StyleSheet.create({
+  card: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: RADIUS.md,
+    padding: 12,
+    marginBottom: 8,
+  },
+  img: { width: 52, height: 52, borderRadius: 10 },
+  imgPlaceholder: {
+    width: 52, height: 52, borderRadius: 10,
+    backgroundColor: 'rgba(30,156,240,0.08)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  info: { flex: 1, gap: 2 },
+  name: { fontSize: 13, fontWeight: '700' },
+  price: { fontSize: 13, fontWeight: '800', color: COLORS.blue },
+  desc: { fontSize: 11, lineHeight: 15 },
+  controls: { alignItems: 'center', justifyContent: 'center' },
+  addBtn: { borderRadius: RADIUS.full, overflow: 'hidden' },
+  addBtnGrad: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  stepper: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(30,156,240,0.08)',
+    borderRadius: RADIUS.full, paddingHorizontal: 6, paddingVertical: 4,
+  },
+  stepBtn: {
+    width: 24, height: 24, borderRadius: 12,
+    backgroundColor: 'rgba(30,156,240,0.15)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  stepQty: { fontSize: 13, fontWeight: '700', color: COLORS.text, minWidth: 16, textAlign: 'center' },
+  cartRow: { borderRadius: RADIUS.md, overflow: 'hidden', marginTop: 4, marginBottom: 8 },
+  cartRowGrad: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 16, paddingVertical: 12, borderRadius: RADIUS.md,
+  },
+  cartRowText: { flex: 1, color: '#fff', fontSize: 14, fontWeight: '700' },
+});
+
+// ─── CartSheet ────────────────────────────────────────────────────────────────
+// Inline component (same file as ChatScreen) so it can access the same
+// useCart hook without a separate context consumer setup in a new file.
+// Shows all cart items with quantity steppers, total price, and a
+// "Send Order" button that writes the formatted summary as a chat message.
+function CartSheet({ onClose, onSendOrder }: { onClose: () => void; onSendOrder: () => void }) {
+  const { items, totalPrice, totalItems, addItem, removeItem, setQuantity, clearCart } = useCart();
+
+  if (items.length === 0) {
+    return (
+      <View style={cartStyles.overlay}>
+        <View style={cartStyles.sheet}>
+          <View style={cartStyles.handle} />
+          <View style={cartStyles.header}>
+            <AppText style={cartStyles.title}>Your Cart</AppText>
+            <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <AppIcon name="close" size={22} color={COLORS.sub} />
+            </TouchableOpacity>
+          </View>
+          <View style={cartStyles.emptyWrap}>
+            <AppIcon name="cart-outline" size={48} color={COLORS.sub} />
+            <AppText style={cartStyles.emptyText}>Your cart is empty</AppText>
+          </View>
+        </View>
+      </View>
+    );
+  }
+
+  // Derive currency prefix from first item's price (e.g. "R", "$")
+  const currencyPrefix = items[0]?.item.price.match(/^[^0-9]*/)?.[0] ?? '';
+
+  return (
+    <View style={cartStyles.overlay}>
+      <TouchableOpacity style={cartStyles.backdrop} activeOpacity={1} onPress={onClose} />
+      <View style={cartStyles.sheet}>
+        <View style={cartStyles.handle} />
+
+        {/* Header */}
+        <View style={cartStyles.header}>
+          <AppText style={cartStyles.title}>Your Cart ({totalItems})</AppText>
+          <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <AppIcon name="close" size={22} color={COLORS.sub} />
+          </TouchableOpacity>
+        </View>
+
+        {/* Item list */}
+        <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 320 }}>
+          {items.map(cartItem => (
+            <View key={cartItem.item.id} style={cartStyles.row}>
+              {/* Thumbnail */}
+              {cartItem.item.imageUri ? (
+                <Image source={{ uri: cartItem.item.imageUri }} style={cartStyles.thumb} />
+              ) : (
+                <View style={cartStyles.thumbPlaceholder}>
+                  <AppIcon name="cube-outline" size={18} color={COLORS.blue} fixedColor />
+                </View>
+              )}
+
+              {/* Name + price */}
+              <View style={cartStyles.rowInfo}>
+                <AppText style={cartStyles.rowName} numberOfLines={1}>{cartItem.item.name}</AppText>
+                <AppText style={cartStyles.rowPrice}>{cartItem.item.price}</AppText>
+              </View>
+
+              {/* Stepper */}
+              <View style={cartStyles.stepper}>
+                <TouchableOpacity
+                  onPress={() => removeItem(cartItem.item.id)}
+                  style={cartStyles.stepBtn}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <AppIcon name="remove" size={16} color={COLORS.blue} fixedColor />
+                </TouchableOpacity>
+                <AppText style={cartStyles.stepQty}>{cartItem.quantity}</AppText>
+                <TouchableOpacity
+                  onPress={() => addItem(cartItem.item, cartItem.sellerUid)}
+                  style={cartStyles.stepBtn}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <AppIcon name="add" size={16} color={COLORS.blue} fixedColor />
+                </TouchableOpacity>
+              </View>
+            </View>
+          ))}
+        </ScrollView>
+
+        {/* Total */}
+        {totalPrice !== null && (
+          <View style={cartStyles.totalRow}>
+            <AppText style={cartStyles.totalLabel}>Total</AppText>
+            <AppText style={cartStyles.totalValue}>{currencyPrefix}{totalPrice.toFixed(2)}</AppText>
+          </View>
+        )}
+
+        {/* Actions */}
+        <View style={cartStyles.actions}>
+          <TouchableOpacity onPress={() => { clearCart(); onClose(); }} style={cartStyles.clearBtn}>
+            <AppText style={cartStyles.clearBtnText}>Clear</AppText>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={onSendOrder} activeOpacity={0.85} style={cartStyles.sendBtn}>
+            <LinearGradient colors={GRADIENTS.primary} style={cartStyles.sendBtnGrad}>
+              <AppIcon name="send" size={16} color="#fff" fixedColor style={{ marginRight: 6 }} />
+              <AppText fixedColor style={cartStyles.sendBtnText}>Send Order</AppText>
+            </LinearGradient>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+const cartStyles = StyleSheet.create({
+  overlay:  { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' },
+  backdrop: { ...StyleSheet.absoluteFill },
+  sheet: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingBottom: 34,
+  },
+  handle: {
+    alignSelf: 'center', width: 40, height: 4, borderRadius: 2,
+    backgroundColor: '#e0e0e0', marginTop: 10, marginBottom: 6,
+  },
+  header: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 20, paddingVertical: 14,
+    borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.05)',
+  },
+  title: { fontSize: 17, fontWeight: '700', color: COLORS.text },
+
+  emptyWrap: { alignItems: 'center', paddingVertical: 48, gap: 12 },
+  emptyText: { fontSize: 14, color: COLORS.sub },
+
+  row: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingHorizontal: 16, paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.04)',
+  },
+  thumb: { width: 44, height: 44, borderRadius: 10 },
+  thumbPlaceholder: {
+    width: 44, height: 44, borderRadius: 10,
+    backgroundColor: 'rgba(30,156,240,0.08)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  rowInfo:  { flex: 1 },
+  rowName:  { fontSize: 13, fontWeight: '600', color: COLORS.text },
+  rowPrice: { fontSize: 13, fontWeight: '700', color: COLORS.blue, marginTop: 2 },
+
+  stepper: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: 'rgba(30,156,240,0.08)',
+    borderRadius: RADIUS.full, paddingHorizontal: 6, paddingVertical: 4,
+  },
+  stepBtn: {
+    width: 26, height: 26, borderRadius: 13,
+    backgroundColor: 'rgba(30,156,240,0.12)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  stepQty: { fontSize: 14, fontWeight: '700', color: COLORS.text, minWidth: 18, textAlign: 'center' },
+
+  totalRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 20, paddingVertical: 14,
+    borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.06)',
+  },
+  totalLabel: { fontSize: 14, fontWeight: '600', color: COLORS.sub },
+  totalValue: { fontSize: 18, fontWeight: '800', color: COLORS.text },
+
+  actions: {
+    flexDirection: 'row', gap: 12,
+    paddingHorizontal: 16, paddingTop: 8,
+  },
+  clearBtn: {
+    paddingHorizontal: 20, paddingVertical: 14,
+    borderRadius: RADIUS.md,
+    backgroundColor: 'rgba(0,0,0,0.05)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  clearBtnText: { fontSize: 14, fontWeight: '700', color: COLORS.sub },
+  sendBtn: { flex: 1, borderRadius: RADIUS.md, overflow: 'hidden' },
+  sendBtnGrad: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingVertical: 14, borderRadius: RADIUS.md,
+  },
+  sendBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+});
 
 
 const styles = StyleSheet.create({
@@ -4030,5 +4508,43 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
     marginBottom: 8,
+  },
+
+  // ── Cart FAB ────────────────────────────────────────────────────────────────
+  cartFab: {
+    position: 'absolute',
+    bottom: 80,
+    alignSelf: 'center',
+    borderRadius: RADIUS.full,
+    overflow: 'hidden',
+    zIndex: 20,
+    ...SHADOW.button,
+  },
+  cartFabInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 18,
+    paddingVertical: 11,
+    gap: 6,
+    borderRadius: RADIUS.full,
+  },
+  cartFabLabel: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  cartBadge: {
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  cartBadgeText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: COLORS.blue,
   },
 });

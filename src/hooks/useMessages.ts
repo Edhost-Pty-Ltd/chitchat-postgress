@@ -6,6 +6,7 @@ import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { fetchUserPrivacySettings } from './usePrivacySettings';
 import { loadLocalMessages, mergeLocalMessages } from './useLocalMessages';
+import { CatalogItem } from '../types';
 
 export interface FireMessage {
   messageId:    string;
@@ -15,7 +16,7 @@ export interface FireMessage {
   voiceUrl:     string | null;
   videoUrl:     string | null;
   fileUrl:      string | null;
-  type:         'text' | 'image' | 'voice' | 'video' | 'file' | 'location' | 'system';
+  type:         'text' | 'image' | 'voice' | 'video' | 'file' | 'location' | 'system' | 'catalog';
   timestamp:    Date | null;
   expiresAt:    Date | null;
   readBy:       string[];
@@ -26,6 +27,8 @@ export interface FireMessage {
   mimeType:     string | null;
   thumbnailUrl: string | null;
   blockedMessage?: boolean;
+  // Catalog product card
+  catalogItem?: CatalogItem | null;
   location?: {
     latitude: number; longitude: number; accuracy?: number;
     altitude?: number | null; altitudeAccuracy?: number | null;
@@ -35,7 +38,7 @@ export interface FireMessage {
   liveLocationExpiry?: Date | null;
   replyTo?: {
     messageId: string; senderId: string; text: string | null;
-    type: 'text' | 'image' | 'voice' | 'video' | 'file' | 'location' | 'system';
+    type: 'text' | 'image' | 'voice' | 'video' | 'file' | 'location' | 'system' | 'catalog';
   } | null;
 }
 
@@ -90,6 +93,7 @@ export function useMessages(chatId: string | null, currentUserId: string | null)
               mimeType:           d.mimeType   ?? null,
               thumbnailUrl:       d.thumbnailUrl ?? null,
               blockedMessage:     d.blockedMessage ?? false,
+              catalogItem:        d.catalogItem ?? null,
               location:           d.location   ?? null,
               isLiveLocation:     d.isLiveLocation ?? false,
               liveLocationExpiry: toDate(d.liveLocationExpiry),

@@ -392,3 +392,100 @@ export async function sendNumberChangeNotification(
     return { success: false, count: 0 };
   }
 }
+
+// ── Send a catalog product-card message ───────────────────────────────────────
+// Writes a message of type 'catalog' into the chat thread. The full CatalogItem
+// is embedded in the message document so the receiver sees name/price/image
+// without needing to fetch the sender's profile.
+export async function sendCatalogItemMessage(
+  chatId:    string,
+  senderId:  string,
+  item:      import('../types').CatalogItem,
+): Promise<{ success: boolean; messageId: string }> {
+  try {
+    const chatRef  = fsDb().collection('chats').doc(chatId);
+    const chatSnap = await chatRef.get();
+    if (!chatSnap.exists) return { success: false, messageId: '' };
+
+    const members      = chatSnap.data()!.members ?? [];
+    const otherMembers = members.filter((id: string) => id !== senderId);
+    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
+    const batch        = fsDb().batch();
+
+    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
+    batch.set(msgRef, {
+      messageId:   msgRef.id,
+      senderId,
+      text:        null,
+      type:        'catalog',
+      catalogItem: {
+        id:          item.id,
+        name:        item.name,
+        price:       item.price,
+        description: item.description ?? null,
+        imageUri:    item.imageUri ?? null,
+      },
+      timestamp:   firestore.FieldValue.serverTimestamp(),
+      expiresAt,
+      readBy:      [senderId],
+      deliveredTo: [],
+    });
+
+    const unreadUpdates = Object.fromEntries(
+      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
+    );
+    batch.update(chatRef, {
+      'lastMessage.text':      `🛍️ ${item.name}`,
+      'lastMessage.senderId':  senderId,
+      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
+      ...unreadUpdates,
+    });
+
+    await batch.commit();
+    return { success: true, messageId: msgRef.id };
+  } catch (err) {
+    console.error('[sendCatalogItemMessage] error:', err);
+    return { success: false, messageId: '' };
+  }
+}
+
+// ── Send a broadcast message to multiple recipients ───────────────────────────
+// Each recipient receives the message as a normal private DM — they have no
+// visibility into who else received it (same as WhatsApp Broadcast).
+//
+// Strategy:
+//   • Chunk recipients into groups of 10 and process each chunk with
+//     Promise.allSettled so one blocked/unreachable contact never kills
+//     the whole send.
+//   • Chunks run sequentially to respect Firestore write-rate limits.
+//   • Returns { sent, failed } so the caller can show "Sent to 11/12 contacts".
+export async function sendBroadcastMessage(
+  senderId:    string,
+  recipients:  string[],
+  text:        string,
+  onProgress?: (done: number, total: number) => void,
+): Promise<{ sent: number; failed: number }> {
+  if (!text.trim() || recipients.length === 0) return { sent: 0, failed: 0 };
+
+  const { chunkArray } = await import('../utils/phoneUtils');
+  const chunks = chunkArray(recipients, 10);
+  let sent = 0;
+  let failed = 0;
+
+  for (const chunk of chunks) {
+    const results = await Promise.allSettled(
+      chunk.map(async (recipientUid) => {
+        const chatId = await getOrCreateDirectChat(senderId, recipientUid);
+        await sendMessage(chatId, senderId, text);
+      }),
+    );
+
+    for (const result of results) {
+      result.status === 'fulfilled' ? sent++ : failed++;
+    }
+
+    onProgress?.(sent + failed, recipients.length);
+  }
+
+  return { sent, failed };
+}

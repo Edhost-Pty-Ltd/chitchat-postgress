@@ -14,6 +14,7 @@ import { ThemeProvider } from './src/context/ThemeContext';
 import { CallProvider } from './src/context/CallContext';
 import { NotificationProvider } from './src/context/NotificationContext';
 import { FloatingCallProvider } from './src/context/FloatingCallContext';
+import { CartProvider } from './src/context/CartContext';
 import AppNavigator from './src/navigation/AppNavigator';
 import ToastOverlay from './src/components/ToastNotification';
 import { FloatingCallManager } from './src/components/FloatingCallManager';
@@ -116,6 +117,7 @@ export default function App() {
           <CallProvider>
             <NotificationProvider>
               <FloatingCallProvider>
+                <CartProvider>
                   <ActivityWatcher />
                   <PushNotificationManager />
                   <NavigationContainer>
@@ -125,6 +127,7 @@ export default function App() {
                     <FloatingCallManager />
                     <BiometricGate />
                   </NavigationContainer>
+                </CartProvider>
               </FloatingCallProvider>
             </NotificationProvider>
           </CallProvider>

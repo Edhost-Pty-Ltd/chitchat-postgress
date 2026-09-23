@@ -49,6 +49,7 @@ const ChangeNumberScreen         = makeLazy(() => import('../screens/ChangeNumbe
 const NotificationsScreen        = makeLazy(() => import('../screens/NotificationsScreen'));
 const LinkedDevicesScreen        = makeLazy(() => import('../screens/LinkedDevicesScreen'));
 const BlockedContactsScreen      = makeLazy(() => import('../screens/BlockedContactsScreen'));
+const BroadcastScreen            = makeLazy(() => import('../screens/BroadcastScreen'));
 
 import { IncomingCallManager } from '../components';
 
@@ -216,6 +217,7 @@ export default function AppNavigator() {
               <Stack.Screen name="Notifications" component={NotificationsScreen as any} />
               <Stack.Screen name="LinkedDevices" component={LinkedDevicesScreen as any} />
               <Stack.Screen name="BlockedContacts" component={BlockedContactsScreen as any} />
+              <Stack.Screen name="Broadcast" component={BroadcastScreen as any} />
             </>
           ) : (
             <>

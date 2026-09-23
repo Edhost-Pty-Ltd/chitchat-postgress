@@ -3,7 +3,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import {
   View, TouchableOpacity, StyleSheet, ScrollView,
   Image, Alert, Platform, TextInput, Modal,
-  KeyboardAvoidingView, Switch,
+  KeyboardAvoidingView, Switch, ActivityIndicator,
 } from 'react-native';
 import DatePicker from 'react-native-date-picker';
 import { useNavigation } from '@react-navigation/native';
@@ -17,15 +17,8 @@ import { useAuth } from '../context/AuthContext';
 import { AppBg, AppText, AppIcon, useForeground, useTypography } from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
-
-// ─── Catalog Item Type ────────────────────────────────────────────────────────
-interface CatalogItem {
-  id: string;
-  name: string;
-  price: string;
-  description?: string;
-  imageUri?: string | null;
-}
+import { CatalogItem } from '../types';
+import { CatalogShareSheet } from '../components/CatalogShareSheet';
 
 export default function ProfileScreen() {
   const navigation = useNavigation();
@@ -83,6 +76,9 @@ export default function ProfileScreen() {
   const [newItemPrice, setNewItemPrice] = useState('');
   const [newItemDesc, setNewItemDesc] = useState('');
   const [newItemImage, setNewItemImage] = useState<string | null>(null);
+  const [uploadingCatalogImage, setUploadingCatalogImage] = useState(false);
+  // Share sheet state — which item is pending share
+  const [shareItem, setShareItem] = useState<CatalogItem | null>(null);
 
   const shownName = displayName || 'Demo Business';
 
@@ -329,32 +325,53 @@ export default function ProfileScreen() {
       return;
     }
 
-    const newItem: CatalogItem = {
-      id: Date.now().toString(),
-      name: newItemName.trim(),
-      price: newItemPrice.trim(),
-      description: newItemDesc.trim() || undefined,
-      imageUri: newItemImage,
-    };
-
-    const updated = [...catalog, newItem];
-    setCatalog(updated);
-    setCatalogModalOpen(false);
-    setNewItemName('');
-    setNewItemPrice('');
-    setNewItemDesc('');
-    setNewItemImage(null);
-
-    // Save to Firestore
     try {
       const authInstance = getAuth();
       const currentUser = authInstance.currentUser;
+
+      // ── Upload image to Firebase Storage if one was picked ──────────────
+      let finalImageUri: string | null = newItemImage;
+      if (newItemImage && currentUser) {
+        setUploadingCatalogImage(true);
+        try {
+          const fileName = generateFileName('jpg');
+          finalImageUri = await uploadFile(newItemImage, 'avatar', {
+            userId: currentUser.uid,
+            fileName: `catalog_${fileName}`,
+          });
+        } catch (uploadErr) {
+          console.warn('[ProfileScreen] Catalog image upload failed, saving local URI:', uploadErr);
+          // Fall back to local URI so the item is still saved
+          finalImageUri = newItemImage;
+        } finally {
+          setUploadingCatalogImage(false);
+        }
+      }
+
+      const newItem: CatalogItem = {
+        id: Date.now().toString(),
+        name: newItemName.trim(),
+        price: newItemPrice.trim(),
+        description: newItemDesc.trim() || undefined,
+        imageUri: finalImageUri,
+      };
+
+      const updated = [...catalog, newItem];
+      setCatalog(updated);
+      setCatalogModalOpen(false);
+      setNewItemName('');
+      setNewItemPrice('');
+      setNewItemDesc('');
+      setNewItemImage(null);
+
+      // Save to Firestore
       if (currentUser) {
         const fsDb = db as ReturnType<typeof firestore>;
         await fsDb.collection('users').doc(currentUser.uid).update({ catalog: updated });
       }
     } catch (err) {
-      console.warn('[ProfileScreen] Error saving catalog:', err);
+      console.warn('[ProfileScreen] Error saving catalog item:', err);
+      setUploadingCatalogImage(false);
     }
   };
 
@@ -747,6 +764,13 @@ export default function ProfileScreen() {
                   ) : null}
                 </View>
                 <TouchableOpacity
+                  onPress={() => setShareItem(item)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  style={styles.deleteBtn}
+                >
+                  <AppIcon name="share-social-outline" size={20} color={COLORS.blue} fixedColor />
+                </TouchableOpacity>
+                <TouchableOpacity
                   onPress={() => removeCatalogItem(item.id)}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   style={styles.deleteBtn}
@@ -847,10 +871,16 @@ export default function ProfileScreen() {
                 </View>
 
                 {/* Add Button */}
-                <TouchableOpacity onPress={addCatalogItem} activeOpacity={0.85} style={{ marginTop: 12 }}>
+                <TouchableOpacity onPress={addCatalogItem} activeOpacity={0.85} style={{ marginTop: 12 }} disabled={uploadingCatalogImage}>
                   <LinearGradient colors={GRADIENTS.primary} style={styles.modalPrimaryBtn}>
-                    <AppIcon name="add-circle-outline" size={18} color="#fff" fixedColor style={{ marginRight: 6 }} />
-                    <AppText fixedColor style={styles.modalPrimaryBtnText}>Add to Catalog</AppText>
+                    {uploadingCatalogImage ? (
+                      <ActivityIndicator size="small" color="#fff" style={{ marginRight: 8 }} />
+                    ) : (
+                      <AppIcon name="add-circle-outline" size={18} color="#fff" fixedColor style={{ marginRight: 6 }} />
+                    )}
+                    <AppText fixedColor style={styles.modalPrimaryBtnText}>
+                      {uploadingCatalogImage ? 'Uploading…' : 'Add to Catalog'}
+                    </AppText>
                   </LinearGradient>
                 </TouchableOpacity>
               </ScrollView>
@@ -983,6 +1013,15 @@ export default function ProfileScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* ── Catalog Share Sheet ── */}
+      {shareItem && (
+        <CatalogShareSheet
+          visible={!!shareItem}
+          item={shareItem}
+          onClose={() => setShareItem(null)}
+        />
+      )}
     </View>
   );
 }
