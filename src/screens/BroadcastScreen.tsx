@@ -337,7 +337,7 @@ export default function BroadcastScreen() {
 
         {/* Create FAB */}
         <TouchableOpacity
-          style={[styles.fab, bevel]}
+          style={[styles.fab, bevel, { bottom: 20 }]}
           activeOpacity={0.85}
           onPress={() => { resetCreate(); setView('create'); }}
         >
@@ -636,7 +636,7 @@ const styles = StyleSheet.create({
 
   // FAB
   fab: {
-    position: 'absolute', bottom: 100, right: 20,
+    position: 'absolute', right: 20,
     borderRadius: RADIUS.full, overflow: 'hidden',
     ...SHADOW.button,
   },

@@ -18,7 +18,7 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import { readAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 
-import { BottomNav } from '../components';
+
 import { ParticipantPickerSheet } from '../components/ParticipantPickerSheet';
 import { useAuth } from '../context/AuthContext';
 import { useContacts, AppContact } from '../hooks/useContacts';
@@ -1574,7 +1574,7 @@ export default function CalendarScreen() {
 
       {/* ── FAB ──────────────────────────────────────────────────────────── */}
       <TouchableOpacity
-        style={[styles.fab, bevel, { bottom: insets.bottom + 150 },
+        style={[styles.fab, bevel, { bottom: 20 },
           Platform.OS === 'web' && styles.fabWeb]}
         activeOpacity={0.85}
         onPress={openMeetingSheet}
@@ -1582,7 +1582,7 @@ export default function CalendarScreen() {
         <AppIcon name="add" size={28} color={COLORS.blue} fixedColor />
       </TouchableOpacity>
 
-      <BottomNav active="calendar" />
+
     </View>
   );
 }

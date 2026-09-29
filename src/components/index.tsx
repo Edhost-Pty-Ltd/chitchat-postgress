@@ -79,8 +79,13 @@ const TABS: {
   { id: 'settings', icon: 'person-outline',      iconActive: 'person',      label: 'You',     screen: 'Settings' },
 ]; 
 
-interface BottomNavProps { active: TabKey; }
-export function BottomNav({ active }: BottomNavProps) {
+interface BottomNavProps {
+  active: TabKey;
+  /** If provided, tab presses call this instead of navigation.navigate().
+   *  Used by TabNavigator's CustomTabBar to drive the tab navigator directly. */
+  onTabPress?: (tabId: TabKey) => void;
+}
+export function BottomNav({ active, onTabPress }: BottomNavProps) {
   const navigation = useNavigation<NavProp>();
   const { FG } = useForeground();
   const { fontFamily } = useTypography();
@@ -111,7 +116,7 @@ export function BottomNav({ active }: BottomNavProps) {
             key={t.id}
             style={styles.navItem}
             activeOpacity={0.75}
-            onPress={() => navigation.navigate(t.screen as any)}
+            onPress={() => onTabPress ? onTabPress(t.id) : navigation.navigate(t.screen as any)}
           >
             <View>
               {t.id === 'settings' ? (

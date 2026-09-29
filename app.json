@@ -9,7 +9,6 @@
     "experiments": {
       "precompiledFrameworks": false
     },
-
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.edhost.ChitChatBusiness",
@@ -22,16 +21,18 @@
       },
       "bitcode": false
     },
-
     "autolinking": {
       "ios": {
-        "buildFromSource": [".*"]
+        "buildFromSource": [
+          ".*"
+        ]
       },
       "android": {
-        "buildFromSource": [".*"]
+        "buildFromSource": [
+          ".*"
+        ]
       }
     },
-
     "plugins": [
       [
         "expo-contacts",
@@ -39,11 +40,11 @@
           "contactsPermission": "ChitChat uses your contacts to help you invite friends to meetings."
         }
       ],
-
       [
         "expo-build-properties",
         {
           "ios": {
+            "enableSceneSupport": true,
             "deploymentTarget": "16.4",
             "useFrameworks": "static",
             "forceStaticLinking": [
@@ -61,19 +62,15 @@
           }
         }
       ],
-
       "@react-native-firebase/app",
-      
       "@config-plugins/react-native-webrtc",
       "expo-font",
-
       [
         "expo-audio",
         {
           "microphonePermission": "ChitChat Business needs access to your microphone to record voice notes."
         }
       ],
-
       [
         "expo-image-picker",
         {
@@ -81,7 +78,6 @@
           "cameraPermission": "ChitChat Business needs camera access to take photos and videos."
         }
       ],
-
       [
         "expo-camera",
         {
@@ -89,7 +85,6 @@
           "microphonePermission": "ChitChat Business needs microphone access to record videos with sound."
         }
       ],
-
       [
         "expo-media-library",
         {
@@ -98,9 +93,7 @@
           "isAccessMediaLocationEnabled": true
         }
       ],
-
       "expo-video",
-
       [
         "expo-notifications",
         {
@@ -108,19 +101,18 @@
           "mode": "production"
         }
       ],
-
       "@react-native-firebase/auth",
       "@react-native-community/datetimepicker",
-      
       [
         "@config-plugins/react-native-webrtc",
         {
           "cameraPermission": "ChitChat Business needs access to your camera for video calls.",
           "microphonePermission": "ChitChat Business needs access to your microphone for video calls."
         }
-      ]
+      ],
+      "expo-sharing",
+      "expo-status-bar"
     ],
-
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -156,17 +148,14 @@
       ],
       "softwareKeyboardLayoutMode": "pan"
     },
-
     "web": {
       "favicon": "./assets/favicon.png"
     },
-
     "extra": {
       "eas": {
         "projectId": "5a60de81-ed09-49dd-9ab9-3e6d63f9436d"
       }
     },
-
     "owner": "alex_sly"
   }
 }

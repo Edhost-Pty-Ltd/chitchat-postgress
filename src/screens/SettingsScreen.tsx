@@ -5,7 +5,7 @@ import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons'; // kept for IoniconName type
-import { Avatar, BottomNav, UserAvatar } from '../components';
+import { Avatar, UserAvatar } from '../components';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { useAuth } from '../context/AuthContext';
@@ -116,7 +116,7 @@ export default function SettingsScreen() {
         ))}
       </ScrollView>
 
-      <BottomNav active="settings" />
+
     </View>
   );
 }

@@ -4,7 +4,7 @@ import { View, FlatList, TouchableOpacity, StyleSheet, Platform, ActivityIndicat
 import { LinearGradient } from 'expo-linear-gradient';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
-import { BottomNav, UserAvatar, StatusViewer, CreateStatusModal } from '../components';
+import { UserAvatar, StatusViewer, CreateStatusModal } from '../components';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { useAuth } from '../hooks/useAuth';
 import { useStatus, type StatusGroup } from '../hooks/useStatus';
@@ -342,7 +342,7 @@ export default function StatusScreen() {
         </>
       )}
 
-      <BottomNav active="status" />
+
 
       {/* Create Status Modal */}
       <CreateStatusModal

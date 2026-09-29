@@ -10,7 +10,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { BottomNav } from '../components';
+
 import { useAuth } from '../hooks/useAuth';
 import { useChats, ChatPreview } from '../hooks/useChats';
 import { useContacts, AppContact } from '../hooks/useContacts';
@@ -1015,7 +1015,7 @@ export default function ChatsScreen() {
       {/* ── FAB — hidden on Broadcast tab (BroadcastScreen has its own FAB) ── */}
       {tab !== 'Broadcast' && (
         <TouchableOpacity
-          style={[styles.fab, bevel, { bottom: insets.bottom + 150 }, Platform.OS === 'web' && styles.fabWeb]}
+          style={[styles.fab, bevel, { bottom: 20 }, Platform.OS === 'web' && styles.fabWeb]}
           activeOpacity={0.85}
           onPress={() => setSheetOpen(true)}
         >
@@ -1023,7 +1023,7 @@ export default function ChatsScreen() {
         </TouchableOpacity>
       )}
 
-      <BottomNav active="chats" />
+
     </View>
   );
 }
@@ -1146,8 +1146,8 @@ const styles = StyleSheet.create({
   badgeText:      { color: '#fff', fontSize: 11, fontWeight: '700' },
 
   // ── FAB ──────────────────────────────────────────────────────────────────
-  fab:      { position: 'absolute', right: 20, bottom: 130, width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
-  fabWeb:   { right: 16, bottom: 120 },
+  fab:      { position: 'absolute', right: 20, bottom: 20, width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
+  fabWeb:   { right: 16, bottom: 20 },
   fabInner: { flex: 1, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
 
   // ── Bottom sheet ──────────────────────────────────────────────────────────
