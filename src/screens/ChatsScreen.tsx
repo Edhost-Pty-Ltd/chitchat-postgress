@@ -970,9 +970,9 @@ export default function ChatsScreen() {
           const active = tab === t;
           return active ? (
             <TouchableOpacity key={t} onPress={() => setTab(t)} activeOpacity={0.85}>
-              <LinearGradient colors={GRADIENTS.primary} style={styles.tabPillActive}>
+              <View style={[styles.tabPillActive, { backgroundColor: COLORS.blue }]}>
                 <AppText style={styles.tabLabelActive}>{t}</AppText>
-              </LinearGradient>
+              </View>
             </TouchableOpacity>
           ) : (
             <TouchableOpacity key={t} style={[styles.tabPillInactive, bevel]}
@@ -1015,11 +1015,11 @@ export default function ChatsScreen() {
       {/* ── FAB — hidden on Broadcast tab (BroadcastScreen has its own FAB) ── */}
       {tab !== 'Broadcast' && (
         <TouchableOpacity
-          style={[styles.fab, bevel, { bottom: 20 }, Platform.OS === 'web' && styles.fabWeb]}
+          style={[styles.fab, { bottom: 20 }, Platform.OS === 'web' && styles.fabWeb]}
           activeOpacity={0.85}
           onPress={() => setSheetOpen(true)}
         >
-          <AppIcon name="add" size={28} color={COLORS.blue} fixedColor />
+          <AppIcon name="add" size={28} color="#fff" fixedColor />
         </TouchableOpacity>
       )}
 
@@ -1037,13 +1037,6 @@ const styles = StyleSheet.create({
   avatarCircle: {
     width: 50, height: 50, borderRadius: 25,
     alignItems: 'center', justifyContent: 'center',
-    borderWidth: 2, borderColor: 'rgba(255,255,255,0.50)',
-    borderTopColor: 'rgba(255,255,255,0.75)',
-    shadowColor: '#1E9CF0',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.20,
-    shadowRadius: 6,
-    elevation: 3,
     overflow: 'hidden',
   },
   avatarImage: {
@@ -1071,14 +1064,8 @@ const styles = StyleSheet.create({
   },
   searchBubble: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: 'rgba(30,156,240,0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.18)',
-    shadowColor: '#1E9CF0',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.12,
-    shadowRadius: 6,
-    elevation: 2,
+    backgroundColor: '#E9E9EB',
+    borderWidth: 0,
     borderRadius: RADIUS.full,
     paddingHorizontal: 14, height: 42,
     overflow: 'hidden',
@@ -1086,15 +1073,7 @@ const styles = StyleSheet.create({
   searchInput: { flex: 1, fontSize: 14, color: COLORS.text, padding: 0 },
   searchIconBtn: {
     width: 38, height: 38, borderRadius: 19,
-    backgroundColor: 'rgba(180,225,245,0.22)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.45)',
-    borderTopColor: 'rgba(255,255,255,0.60)',
-    shadowColor: '#0e6ea8',
-    shadowOffset: { width: 2, height: 3 },
-    shadowOpacity: 0.16,
-    shadowRadius: 8,
-    elevation: 3,
+    backgroundColor: 'transparent',
     alignItems: 'center', 
     justifyContent: 'center',
   },
@@ -1105,7 +1084,9 @@ const styles = StyleSheet.create({
   tabPillInactive: { 
     paddingHorizontal: 22, 
     paddingVertical: 9, 
-    borderRadius: RADIUS.full, 
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.15)',
   },
   tabLabel:        { fontSize: 14, fontWeight: '600', color: COLORS.sub },
   tabLabelActive:  { fontSize: 14, fontWeight: '700', color: '#fff' },
@@ -1146,7 +1127,7 @@ const styles = StyleSheet.create({
   badgeText:      { color: '#fff', fontSize: 11, fontWeight: '700' },
 
   // ── FAB ──────────────────────────────────────────────────────────────────
-  fab:      { position: 'absolute', right: 20, bottom: 20, width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
+  fab:      { position: 'absolute', right: 20, bottom: 20, width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.blue, shadowColor: '#007AFF', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.30, shadowRadius: 8, elevation: 6 },
   fabWeb:   { right: 16, bottom: 20 },
   fabInner: { flex: 1, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
 
@@ -1315,7 +1296,7 @@ const styles = StyleSheet.create({
   },
   ringInner: {
     width: 50, height: 50, borderRadius: 25,
-    backgroundColor: 'rgba(255,255,255,0.95)', overflow: 'hidden',
+    backgroundColor: COLORS.sky1, overflow: 'hidden',
   },
 
   // Dropdown menu
@@ -1355,8 +1336,8 @@ const styles = StyleSheet.create({
 
   // Selected contact state
   contactRowSelected: {
-    backgroundColor: 'rgba(30,156,240,0.12)',
-    borderColor: 'rgba(30,156,240,0.30)',
+    backgroundColor: 'rgba(0,122,255,0.10)',
+    borderColor: 'rgba(0,122,255,0.25)',
   },
   contactRowDisabled: {
     opacity: 0.55,

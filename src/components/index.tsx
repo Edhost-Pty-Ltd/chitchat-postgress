@@ -136,9 +136,9 @@ export function BottomNav({ active, onTabPress }: BottomNavProps) {
                   )}
                 </View>
               ) : isActive ? (
-                <LinearGradient colors={GRADIENTS.primary} style={styles.iconTileActive}>
+                <View style={[styles.iconTileActive, { backgroundColor: COLORS.blue }]}>
                   <AppIcon name={t.iconActive} size={20} color="#fff" fixedColor />
-                </LinearGradient>
+                </View>
               ) : (
                 <View style={styles.iconTileInactive}>
                   <AppIcon name={t.icon} size={20} color={FG.secondary} />
@@ -233,18 +233,23 @@ export function AppHeader({ title, showBack, rightIcon, onRightPress }: AppHeade
 const styles = StyleSheet.create({
   avatarCircle: {
     alignItems: 'center', justifyContent: 'center',
-    borderWidth: 2, borderColor: 'rgba(255,255,255,0.50)',
   },
   avatarText: { color: '#fff', fontWeight: '700' },
-  statusDot:  { position: 'absolute', borderWidth: 2, borderColor: COLORS.sky1 },
+  statusDot:  { position: 'absolute', borderWidth: 2, borderColor: '#FFFFFF' },
 
   navBar: {
     flexDirection: 'row',
     borderRadius: 50,
     paddingVertical: 10,
     paddingHorizontal: 8,
-    marginHorizontal: 20,
+    marginHorizontal: 12,
     marginTop: 6,
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
+    elevation: 4,
   },
   navItem: {
     flex: 1,
@@ -260,7 +265,6 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS.md,
     alignItems: 'center',
     justifyContent: 'center',
-    ...SHADOW.button,
   },
 
   // Inactive — plain container, no glass tile (avoids Android overflow artifacts)
@@ -275,7 +279,7 @@ const styles = StyleSheet.create({
   // "You" tab avatar
   navAvatarImg: {
     width: 30, height: 30, borderRadius: 15,
-    borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.7)',
+    borderWidth: 1.5, borderColor: 'rgba(0,0,0,0.10)',
   },
   navAvatarFallback: {
     width: 30, height: 30, borderRadius: 15,

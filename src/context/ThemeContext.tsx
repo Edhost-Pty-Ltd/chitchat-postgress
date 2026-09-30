@@ -19,7 +19,7 @@ export interface GradientPreset {
 }
 
 export const GRADIENT_PRESETS: GradientPreset[] = [
-  { id: 'sky',       label: 'Sky Blue',  colors: ['#87CEEB', '#C5E8F7', '#E8F6FF'] },
+  { id: 'sky',       label: 'Default Light', colors: ['#F2F2F7', '#F2F2F7', '#FFFFFF'] },
   { id: 'ocean',     label: 'Ocean',     colors: ['#0f2027', '#203a43', '#2c5364'] },
   { id: 'sunset',    label: 'Sunset',    colors: ['#f7971e', '#ffd200', '#f7971e'] },
   { id: 'rose',      label: 'Rose',      colors: ['#f953c6', '#b91d73', '#f953c6'] },
@@ -148,17 +148,17 @@ export interface ForegroundTokens {
 }
 
 const LIGHT_FG: ForegroundTokens = {
-  primary:     '#1a2840',
-  secondary:   '#5a7fa0',
-  faint:       'rgba(90,127,160,0.55)',
-  icon:        '#5a7fa0',
-  glassBg:     'transparent',
-  glassBorder: 'rgba(30,156,240,0.18)',
-  bevelBorder: 'rgba(255,255,255,0.25)',
-  bevelTop:    'rgba(255,255,255,0.85)',
-  bevelLeft:   'rgba(255,255,255,0.55)',
-  bevelBottom: 'rgba(10,77,122,0.35)',
-  bevelRight:  'rgba(10,77,122,0.22)',
+  primary:     '#1C1C1E',
+  secondary:   '#8E8E93',
+  faint:       'rgba(142,142,147,0.60)',
+  icon:        '#8E8E93',
+  glassBg:     '#FFFFFF',
+  glassBorder: 'rgba(0,0,0,0.08)',
+  bevelBorder: 'rgba(0,0,0,0.06)',
+  bevelTop:    'rgba(255,255,255,0.90)',
+  bevelLeft:   'rgba(255,255,255,0.60)',
+  bevelBottom: 'rgba(0,0,0,0.06)',
+  bevelRight:  'rgba(0,0,0,0.04)',
 };
 
 const DARK_FG: ForegroundTokens = {
@@ -320,10 +320,8 @@ export function useGlass() {
   const { FG } = useContext(ThemeContext);
   const isDark = FG.icon.includes('255');
 
-  // Memoized style objects — stable references prevent unnecessary re-renders
-  // in consumers that spread these into style props.
   const bevel = useMemo(() => ({
-    backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.85)',
+    backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : '#FFFFFF',
     borderWidth: 0,
   }), [isDark]);
 
@@ -333,7 +331,7 @@ export function useGlass() {
     borderRadius: 19,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
-    backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(30,156,240,0.10)',
+    backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(0,122,255,0.10)',
     borderWidth: 0,
   }), [isDark]);
 
@@ -409,7 +407,16 @@ export const AppBg = memo(function AppBg({ style, children }: AppBgProps) {
       </View>
     );
   }
+  // Gradient preset — for the default 'sky' (now flat light), use solid colour for performance
   const preset = GRADIENT_PRESETS.find((p) => p.id === background.gradientId) ?? GRADIENT_PRESETS[0];
+  const isFlat = preset.colors.every((c) => c === preset.colors[0]);
+  if (isFlat) {
+    return (
+      <View style={[StyleSheet.absoluteFill, { backgroundColor: preset.colors[0] }, style]}>
+        {children}
+      </View>
+    );
+  }
   return (
     <LinearGradient colors={preset.colors} style={[StyleSheet.absoluteFill, style]}>
       {children}
