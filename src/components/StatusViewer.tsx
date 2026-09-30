@@ -64,35 +64,36 @@ export function StatusViewer({
   onDeleteStatus,
 }: StatusViewerProps) {
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
-  const [isPaused, setIsPaused] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [showOptions, setShowOptions] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [isPaused,     setIsPaused]     = useState(false);
+  const [loading,      setLoading]      = useState(true);   // true until media is ready
+  const [showOptions,  setShowOptions]  = useState(false);
+  const [progress,     setProgress]     = useState(0);
+  // mediaReady: flips to true when image onLoadEnd fires (or immediately for text).
+  // The timer only starts once this is true — prevents the progress bar racing
+  // ahead of a slow image load and showing a black screen mid-bar.
+  const [mediaReady,   setMediaReady]   = useState(false);
 
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Signals that the current item finished and we should advance — avoids
-  // calling goNext() inside a setProgress updater (setState during render).
-  const shouldAdvanceRef = useRef(false);
+  const timerRef          = useRef<ReturnType<typeof setInterval> | null>(null);
+  const shouldAdvanceRef  = useRef(false);
 
   const currentStatus = statuses[currentIndex];
-  const isOwner = currentStatus?.userId === currentUserId;
+  const isOwner    = currentStatus?.userId === currentUserId;
   const isExcluded = currentStatus?.excludedUsers?.includes(currentUserId) || false;
-  const viewCount = currentStatus?.viewedBy?.length || 0;
-  const isVideo = currentStatus?.mediaType === 'video';
+  const viewCount  = currentStatus?.viewedBy?.length || 0;
+  const isVideo    = currentStatus?.mediaType === 'video';
+  const isText     = currentStatus?.mediaType === 'text';
 
-  // Image/text display duration: 7 s (matches original behaviour).
-  // Videos run for their natural duration via the player events.
+  // Image/text display duration: 7 s.
   const IMAGE_DURATION = 7000;
 
-  // ── Video player (always created, loaded only for video items) ──────────────
-  // timeUpdateEventInterval: fire timeUpdate every 100ms for smooth progress.
-  const player = useVideoPlayer(null, (p) => {
+  // ── Video player ────────────────────────────────────────────────────────────
+  // Pass the initial URL directly so the player starts buffering immediately —
+  // no null→replace cycle on first render.
+  const initialVideoUrl = (isVideo && currentStatus?.mediaUrl) ? currentStatus.mediaUrl : null;
+  const player = useVideoPlayer(initialVideoUrl, (p) => {
     p.loop = false;
     p.timeUpdateEventInterval = 0.1;
   });
-  // Guard: don't advance on playToEnd until the video has actually started.
-  // expo-video fires playToEnd when replacing the source (null → new URL),
-  // which would otherwise skip the video immediately.
   const videoReadyRef = useRef(false);
 
   const goNext = useCallback(() => {
@@ -104,12 +105,15 @@ export function StatusViewer({
     }
   }, [currentIndex, statuses.length, onClose]);
 
-  // ── Load video when current item changes ─────────────────────────────────
+  // ── Load video when current item changes ───────────────────────────────────
   useEffect(() => {
     if (!visible || !currentStatus) return;
     if (isVideo && currentStatus.mediaUrl) {
-      videoReadyRef.current = false;   // block premature playToEnd
-      player.replace(currentStatus.mediaUrl);
+      videoReadyRef.current = false;
+      setLoading(true);
+      setMediaReady(false);
+      // replace unconditionally — expo-video deduplicates internally if URL is same
+        player.replace(currentStatus.mediaUrl);
       if (!isPaused) player.play();
     } else {
       try { player.pause(); } catch {}
@@ -117,44 +121,94 @@ export function StatusViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStatus?.statusId, visible, isVideo]);
 
-  // Video: update progress bar from timeUpdate; mark ready on first tick
+  // Video: progress from timeUpdate; hide loading once first frame arrives
   useEventListener(player, 'timeUpdate', ({ currentTime }: { currentTime: number }) => {
     if (!isVideo) return;
-    if (currentTime > 0) videoReadyRef.current = true;  // video is genuinely playing
+    if (currentTime > 0) {
+      videoReadyRef.current = true;
+      setLoading(false);
+      setMediaReady(true);
+    }
     const dur = player.duration && player.duration > 0 ? player.duration : 30;
     setProgress(Math.min(currentTime / dur, 1));
   });
 
-  // Only advance on playToEnd once the video has actually played
+  // Advance on playToEnd only once video has genuinely played
   useEventListener(player, 'playToEnd', () => {
     if (isVideo && videoReadyRef.current) goNext();
   });
 
-  // Pause / resume video on long-press hold
+  // Pause / resume video on long-press
   useEffect(() => {
     if (!isVideo) return;
     if (isPaused) { try { player.pause(); } catch {} }
-    else { try { player.play(); } catch {} }
+    else          { try { player.play();  } catch {} }
   }, [isPaused, isVideo]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Image / text auto-advance timer ────────────────────────────────────────
+  // ── Reset mediaReady when item changes (images/text) ──────────────────────
+  // For images: check if the URL is already in the RN disk/memory cache.
+  // If it is, skip the loading overlay entirely — image renders in one frame.
   useEffect(() => {
-    if (!visible || isPaused || !currentStatus || isVideo) return;
+    if (isVideo) return; // video handles its own ready state above
+    setProgress(0);
+    shouldAdvanceRef.current = false;
+
+    if (isText) {
+      // Text has no network load
+      setLoading(false);
+      setMediaReady(true);
+      return;
+    }
+
+    const url = currentStatus?.mediaUrl;
+    if (!url) {
+      setLoading(false);
+      setMediaReady(true);
+      return;
+    }
+
+    // queryCache returns a map of url → cache type ('memory'|'disk'|'disk/memory')
+    // If the entry exists, the image is already decoded — skip the loading state.
+    // Guard: queryCache may be undefined on older RN bridge versions.
+    const qc = Image.queryCache;
+    if (!qc) {
+      setLoading(true);
+      setMediaReady(false);
+      return;
+    }
+    qc([url]).then((result) => {
+      if (result[url]) {
+        // Already cached — show image immediately, no loading overlay
+        setLoading(false);
+        setMediaReady(true);
+      } else {
+        // Not cached yet — show gradient overlay until onLoadEnd fires
+        setLoading(true);
+        setMediaReady(false);
+      }
+    }).catch(() => {
+      // queryCache not supported (Android) — fall back to showing loader
+      setLoading(true);
+      setMediaReady(false);
+    });
+  }, [currentIndex, isVideo, isText, currentStatus?.mediaUrl]);
+
+  // ── Image / text timer — starts only after mediaReady ─────────────────────
+  useEffect(() => {
+    if (!visible || isPaused || !currentStatus || isVideo || !mediaReady) return;
 
     // Mark as viewed
     if (!currentStatus.viewedBy.includes(currentUserId)) {
       onStatusViewed(currentStatus.statusId);
     }
 
-    setProgress(0);
-    const interval = 50;
+    const interval  = 50;
     const increment = interval / IMAGE_DURATION;
 
     timerRef.current = setInterval(() => {
       setProgress((prev) => {
         const next = prev + increment;
         if (next >= 1) {
-          // Signal advance — don't call goNext() here (setState during render).
           shouldAdvanceRef.current = true;
           return 1;
         }
@@ -163,7 +217,7 @@ export function StatusViewer({
     }, interval);
 
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [visible, currentIndex, isPaused, isVideo, currentStatus, currentUserId, onStatusViewed, goNext]);
+  }, [visible, currentIndex, isPaused, isVideo, mediaReady, currentStatus, currentUserId, onStatusViewed, goNext]);
 
   // Mark video statuses viewed immediately on open
   useEffect(() => {
@@ -173,9 +227,7 @@ export function StatusViewer({
     }
   }, [visible, currentIndex, isVideo, currentStatus, currentUserId, onStatusViewed]);
 
-  // Advance to the next item after the image/text timer completes.
-  // Using a separate effect avoids calling goNext() inside the setProgress
-  // updater, which would be a setState-during-render violation.
+  // Advance after timer completes
   useEffect(() => {
     if (progress >= 1 && shouldAdvanceRef.current) {
       shouldAdvanceRef.current = false;
@@ -286,8 +338,13 @@ export function StatusViewer({
               source={{ uri: currentStatus.mediaUrl }}
               style={styles.media}
               resizeMode="contain"
-              onLoadStart={() => setLoading(true)}
-              onLoadEnd={() => setLoading(false)}
+              onLoadStart={() => { /* loading state managed by queryCache check */ }}
+              onLoadEnd={() => {
+                setLoading(false);
+                // Only set mediaReady if not already set by queryCache — avoids
+                // restarting the timer on a redundant onLoadEnd from cached images
+                setMediaReady((prev) => prev ? prev : true);
+              }}
             />
           ) : currentStatus.mediaType === 'video' && currentStatus.mediaUrl ? (
             /* pointerEvents="none" lets touches pass through to the tapZones above */
@@ -330,10 +387,15 @@ export function StatusViewer({
           />
         )}
 
-        {/* Loading indicator */}
+        {/* Loading overlay — gradient placeholder so the viewer never shows pure black.
+            Shown while the image is fetching or the video hasn't sent its first frame. */}
         {loading && (
           <View style={styles.loadingOverlay} pointerEvents="none">
-            <ActivityIndicator size="large" color="#ffffff" />
+            <LinearGradient
+              colors={['#0a1628', '#1a3a5c', '#0d2137']}
+              style={StyleSheet.absoluteFill}
+            />
+            <ActivityIndicator size="large" color="rgba(255,255,255,0.85)" />
           </View>
         )}
 
@@ -440,7 +502,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#000000',
   },
   background: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -480,10 +542,10 @@ const styles = StyleSheet.create({
     lineHeight: 22,
   },
   loadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.3)',
+    overflow: 'hidden',
   },
   topGradient: {
     position: 'absolute',
@@ -635,7 +697,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   tapZones: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     flexDirection: 'row',
   },
   tapLeft: {

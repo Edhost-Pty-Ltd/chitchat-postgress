@@ -1,5 +1,5 @@
 ﻿// ─── Screen: Status ──────────────────────────────────────────────────────────
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { View, FlatList, TouchableOpacity, StyleSheet, Platform, ActivityIndicator, Image } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import firestore from '@react-native-firebase/firestore';
@@ -64,6 +64,31 @@ export default function StatusScreen() {
     markAsViewed,
     deleteStatus,
   } = useStatus(userId);
+
+  // ── Prefetch media so the viewer opens without a black frame ─────────────
+  // Fire-and-forget: start downloading image URLs into the RN image cache as
+  // soon as the status list arrives. By the time the user taps a row the image
+  // is already local, so the viewer renders it instantly.
+  const prefetchedRef = useRef(new Set<string>());
+  useEffect(() => {
+    const allStatuses = [
+      ...myStatuses,
+      ...contactStatuses.flatMap((g) => g.statuses),
+    ];
+    allStatuses.forEach((s) => {
+      // Prefetch the main media URL for images, and the thumbnail for videos
+      const urls = [
+        s.mediaType === 'image'  ? s.mediaUrl       : null,
+        s.mediaType === 'video'  ? s.thumbnailUrl   : null,
+        s.photoURL,                                          // avatar
+      ].filter((u): u is string => !!u && !prefetchedRef.current.has(u));
+
+      urls.forEach((url) => {
+        prefetchedRef.current.add(url);
+        Image.prefetch(url).catch(() => {}); // silent — cache is best-effort
+      });
+    });
+  }, [myStatuses, contactStatuses]);
 
   // ── Resolve poster names via phone book ─────────────────────────────────────
   // Status docs store a denormalized displayName (often "Unknown" for phone-auth
