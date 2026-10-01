@@ -656,7 +656,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: RADIUS.full,
-    shadowColor: '#1E9CF0',
+    shadowColor: '#4A99E9',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.40,
     shadowRadius: 12,
@@ -673,7 +673,7 @@ const styles = StyleSheet.create({
   tabRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingBottom: 14 },
   tabPill: {
     paddingHorizontal: 18, paddingVertical: 8, borderRadius: RADIUS.full,
-    shadowColor: '#1E9CF0',
+    shadowColor: '#4A99E9',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.40,
     shadowRadius: 12,
@@ -728,7 +728,7 @@ const styles = StyleSheet.create({
   },
   handle: {
     alignSelf: 'center', width: 40, height: 4, borderRadius: 2,
-    backgroundColor: 'rgba(30,156,240,0.30)', marginTop: 10, marginBottom: 4,
+    backgroundColor: 'rgba(74,153,233,0.30)', marginTop: 10, marginBottom: 4,
   },
   sheetHeader: {
     flexDirection: 'row', alignItems: 'center',

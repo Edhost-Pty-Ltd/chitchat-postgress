@@ -14,6 +14,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useWebRTC } from '../hooks/useWebRTC';
 import { useAuth } from '../hooks/useAuth';
 import { useFloatingCall } from '../context/FloatingCallContext';
+import { useRingtone } from '../hooks/useRingtone';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
@@ -91,6 +92,18 @@ export default function AudioCallScreen() {
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const unsubscribeCallRef = useRef<(() => void) | null>(null);
+
+  // Ringtone — play while connecting (outgoing), stop when connected or screen unmounts
+  const ringtone = useRingtone();
+  useEffect(() => {
+    if (isOutgoing) ringtone.play();
+    return () => { ringtone.stop(); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Stop ringtone the moment the call connects
+  useEffect(() => {
+    if (callStatus === 'connected') ringtone.stop();
+  }, [callStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Initialize WebRTC and call setup
   useEffect(() => {
@@ -219,6 +232,7 @@ export default function AudioCallScreen() {
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
   const hangUp = async () => {
+    ringtone.stop();
     try {
       // End call in Firestore
       const fsDb = db as ReturnType<typeof firestore>;
@@ -481,8 +495,8 @@ const styles = StyleSheet.create({
     borderRadius: 20,
   },
   iconBtnActive: {
-    backgroundColor: 'rgba(30,156,240,0.35)',
-    borderColor: 'rgba(30,156,240,0.55)',
+    backgroundColor: 'rgba(74,153,233,0.35)',
+    borderColor: 'rgba(74,153,233,0.55)',
   },
   topName:   { fontSize: 15, fontWeight: '700', color: '#fff' },
   topStatus: { fontSize: 11, color: 'rgba(255,255,255,0.65)', marginTop: 2 },

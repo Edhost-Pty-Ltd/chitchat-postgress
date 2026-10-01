@@ -9,10 +9,10 @@ export const COLORS = {
   bg2:       '#FFFFFF',
 
   // ── Brand blue ─────────────────────────────────────────────────────────
-  blue:      '#007AFF',
-  blueDark:  '#0060DF',
-  blueDeep:  '#0060DF',
-  blueGlow:  'rgba(0,122,255,0.20)',
+  blue:      '#4A99E9',
+  blueDark:  '#3A82CF',
+  blueDeep:  '#3A82CF',
+  blueGlow:  'rgba(74,153,233,0.20)',
 
   // ── Surfaces ──────────────────────────────────────────────────────────
   glass:         '#FFFFFF',
@@ -43,12 +43,12 @@ export const COLORS = {
 } as const;
 
 export const GRADIENTS = {
-  primary:  ['#007AFF', '#0060DF']                              as [string, string],
-  sky:      ['#007AFF', '#007AFF', '#0060DF']                   as [string, string, string],
+  primary:  ['#4A99E9', '#3A82CF']                              as [string, string],
+  sky:      ['#4A99E9', '#4A99E9', '#3A82CF']                   as [string, string, string],
   bg:       ['#F2F2F7', '#F2F2F7', '#FFFFFF']                   as [string, string, string],
   card:     ['#FFFFFF', '#FFFFFF']                              as [string, string],
-  glow:     ['rgba(0,122,255,0.15)', 'rgba(0,122,255,0.0)']    as [string, string],
-  chatSent: ['#007AFF', '#007AFF']                              as [string, string],
+  glow:     ['rgba(74,153,233,0.15)', 'rgba(74,153,233,0.0)']  as [string, string],
+  chatSent: ['#4A99E9', '#4A99E9']                              as [string, string],
   chatRecv: ['#FFFFFF', '#FFFFFF']                              as [string, string],
 } as const;
 
@@ -92,14 +92,14 @@ export const SHADOW = {
     elevation:     2,
   },
   button: {
-    shadowColor:   '#007AFF',
+    shadowColor:   '#4A99E9',
     shadowOffset:  { width: 0, height: 3 },
     shadowOpacity: 0.25,
     shadowRadius:  8,
     elevation:     6,
   },
   glow: {
-    shadowColor:   '#007AFF',
+    shadowColor:   '#4A99E9',
     shadowOffset:  { width: 0, height: 0 },
     shadowOpacity: 0.20,
     shadowRadius:  12,

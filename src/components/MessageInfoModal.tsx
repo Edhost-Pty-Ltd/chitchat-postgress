@@ -272,7 +272,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 4,
     borderRadius: 2,
-    backgroundColor: 'rgba(30,156,240,0.40)',
+    backgroundColor: 'rgba(74,153,233,0.40)',
     alignSelf: 'center',
     marginTop: 12,
     marginBottom: 8,
@@ -284,7 +284,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(30,156,240,0.15)',
+    borderBottomColor: 'rgba(74,153,233,0.15)',
   },
   title: {
     fontSize: 18,

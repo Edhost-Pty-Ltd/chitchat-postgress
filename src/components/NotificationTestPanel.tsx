@@ -104,7 +104,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   messageBtn: {
-    backgroundColor: '#1E9CF0',
+    backgroundColor: '#4A99E9',
   },
   callBtn: {
     backgroundColor: '#10b981',

@@ -31,15 +31,15 @@ export async function uploadFile(
   type:        UploadType,
   params:      { userId?: string; chatId?: string; fileName: string },
   onProgress?: (pct: number) => void,
+  mimeTypeOverride?: string,   // caller-supplied MIME type, bypasses URI-extension guessing
 ): Promise<string> {
-  const path = buildPath(type, params);
-  console.log('[Storage] Uploading file:', localUri, '→', path);
+  const path        = buildPath(type, params);
+  const contentType = mimeTypeOverride ?? getMimeType(localUri);
+  console.log('[Storage] Uploading file:', localUri, '→', path, '(', contentType, ')');
 
   if (Platform.OS !== 'web') {
-    // ── Native: @react-native-firebase/storage ──────────────────────────────
-    // putFile() streams directly from a local URI — no blob/XHR needed.
     const nativeRef = (storage as ReturnType<typeof import('@react-native-firebase/storage').default>).ref(path);
-    const task = nativeRef.putFile(localUri, { contentType: getMimeType(localUri) });
+    const task = nativeRef.putFile(localUri, { contentType });
 
     if (onProgress) {
       task.on('state_changed', (snapshot: any) => {
@@ -54,7 +54,6 @@ export async function uploadFile(
     console.log('[Storage] Upload complete:', url);
     return url;
   } else {
-    // ── Web: firebase/storage JS SDK ────────────────────────────────────────
     const { ref, uploadBytesResumable, getDownloadURL } = await import('firebase/storage');
 
     const blob: Blob = await new Promise((resolve, reject) => {
@@ -68,9 +67,7 @@ export async function uploadFile(
 
     const storageRef = ref(storage as any, path);
     return new Promise((resolve, reject) => {
-      const task = uploadBytesResumable(storageRef, blob, {
-        contentType: getMimeType(localUri),
-      });
+      const task = uploadBytesResumable(storageRef, blob, { contentType });
       task.on(
         'state_changed',
         (snapshot) => {

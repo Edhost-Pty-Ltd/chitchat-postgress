@@ -125,7 +125,7 @@ const styles = StyleSheet.create({
     height: 140,
     borderRadius: 70,
     backgroundColor: 'transparent',
-    shadowColor: '#1E9CF0',
+    shadowColor: '#4A99E9',
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.95,
     shadowRadius: 50,
@@ -148,6 +148,6 @@ const styles = StyleSheet.create({
   },
   dot: {
     width: 6, height: 6, borderRadius: 3,
-    backgroundColor: 'rgba(30,156,240,0.35)',
+    backgroundColor: 'rgba(74,153,233,0.35)',
   },
 });

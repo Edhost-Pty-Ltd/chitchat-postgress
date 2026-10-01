@@ -173,7 +173,7 @@ const styles = StyleSheet.create({
   },
   swipeBar: {
     width: 36, height: 3, borderRadius: 2,
-    backgroundColor: 'rgba(30,156,240,0.25)',
+    backgroundColor: 'rgba(74,153,233,0.25)',
     alignSelf: 'center', marginBottom: 6,
   },
 });

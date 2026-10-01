@@ -230,7 +230,7 @@ function DeviceCard({ device, FG, textColor, fontFamily, onLogout }: DeviceCardP
   return (
     <View style={[styles.card, bevel]}>
       {/* Icon */}
-      <View style={[styles.deviceIconWrap, { backgroundColor: 'rgba(30,156,240,0.10)' }]}>
+      <View style={[styles.deviceIconWrap, { backgroundColor: 'rgba(74,153,233,0.10)' }]}>
         <AppIcon name={DEVICE_ICON[device.type]} size={22} color={COLORS.blue} fixedColor />
       </View>
 

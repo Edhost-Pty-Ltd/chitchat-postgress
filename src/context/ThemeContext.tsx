@@ -54,7 +54,7 @@ export const TEXT_COLOR_PRESETS = [
   { id: 'auto',    label: 'Auto',       hex: null         },
   { id: 'white',   label: 'White',      hex: '#ffffff'    },
   { id: 'black',   label: 'Black',      hex: '#0a0a0a'    },
-  { id: 'blue',    label: 'Ocean Blue', hex: '#1E9CF0'    },
+  { id: 'blue',    label: 'Ocean Blue', hex: '#4A99E9'    },
   { id: 'indigo',  label: 'Indigo',     hex: '#6366f1'    },
   { id: 'rose',    label: 'Rose',       hex: '#f43f5e'    },
   { id: 'amber',   label: 'Amber',      hex: '#f59e0b'    },
@@ -67,7 +67,7 @@ export const TEXT_COLOR_PRESETS = [
 
 export const ICON_COLOR_PRESETS = [
   { id: 'auto',    label: 'Auto',       hex: null         }, // uses FG.icon (adapts to bg)
-  { id: 'blue',    label: 'Blue',       hex: '#1E9CF0'    },
+  { id: 'blue',    label: 'Blue',       hex: '#4A99E9'    },
   { id: 'white',   label: 'White',      hex: '#ffffff'    },
   { id: 'black',   label: 'Black',      hex: '#0a0a0a'    },
   { id: 'indigo',  label: 'Indigo',     hex: '#6366f1'    },
@@ -331,7 +331,7 @@ export function useGlass() {
     borderRadius: 19,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
-    backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(0,122,255,0.10)',
+    backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(74,153,233,0.10)',
     borderWidth: 0,
   }), [isDark]);
 
@@ -379,7 +379,7 @@ export const AppIcon = memo(function AppIcon({
     <View style={[{
       width: tileSize, height: tileSize, borderRadius: tileSize * 0.28,
       alignItems: 'center', justifyContent: 'center',
-      backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(30,156,240,0.10)',
+      backgroundColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(74,153,233,0.10)',
     }, style]}>
       {icon}
     </View>

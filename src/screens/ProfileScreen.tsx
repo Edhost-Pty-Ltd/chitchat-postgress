@@ -782,6 +782,11 @@ export default function ProfileScreen() {
               <AppText style={[styles.infoLabel, { fontFamily, marginBottom: 6 }]}>
                 Auto Reply Message
               </AppText>
+              {autoResponderPending && (
+                <AppText style={{ fontSize: 12, color: COLORS.blue, marginBottom: 8, fontFamily }}>
+                  ✏️  Edit your message below then tap Save to activate.
+                </AppText>
+              )}
 
               {autoResponderPending ? (
                 // Pending edit — free text, save required
@@ -848,7 +853,7 @@ export default function ProfileScreen() {
             <View style={{ flexDirection: 'row', gap: 8 }}>
               <TouchableOpacity
                 onPress={() => { setNewColItems([]); setCollectionStep('pick'); }}
-                style={[styles.addBtn, { backgroundColor: 'rgba(30,156,240,0.08)' }]}
+                style={[styles.addBtn, { backgroundColor: 'rgba(74,153,233,0.08)' }]}
                 activeOpacity={0.8}
               >
                 <AppIcon name="folder-open-outline" size={16} color={COLORS.blue} fixedColor />
@@ -1204,7 +1209,7 @@ export default function ProfileScreen() {
                               {/* Checkmark overlay when selected */}
                               {selected && (
                                 <View style={colModalStyles.checkOverlay} pointerEvents="none">
-                                  <LinearGradient colors={['rgba(30,156,240,0.55)', 'rgba(10,114,196,0.55)']} style={colModalStyles.checkOverlayGrad}>
+                                  <LinearGradient colors={['rgba(74,153,233,0.55)', 'rgba(10,114,196,0.55)']} style={colModalStyles.checkOverlayGrad}>
                                     <AppIcon name="checkmark-circle" size={28} color="#fff" fixedColor />
                                   </LinearGradient>
                                 </View>
@@ -1352,7 +1357,7 @@ export default function ProfileScreen() {
                   onPress={() => { setNewItemCollectionId(col.id); setColPickerOpen(false); }}
                   activeOpacity={0.75}
                 >
-                  <View style={[styles.catalogItemPlaceholder, { backgroundColor: 'rgba(30,156,240,0.10)' }]}>
+                  <View style={[styles.catalogItemPlaceholder, { backgroundColor: 'rgba(74,153,233,0.10)' }]}>
                     <AppText style={{ fontSize: 20 }}>{col.emoji || '📦'}</AppText>
                   </View>
                   <View style={styles.catalogItemContent}>
@@ -1564,7 +1569,7 @@ const colModalStyles = StyleSheet.create({
   productTileImgPlaceholder: {
     width: TILE_SIZE,
     height: TILE_SIZE * 0.7,
-    backgroundColor: 'rgba(30,156,240,0.07)',
+    backgroundColor: 'rgba(74,153,233,0.07)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1603,7 +1608,7 @@ const colModalStyles = StyleSheet.create({
   },
   previewChipPlaceholder: {
     width: 52, height: 52, borderRadius: 10,
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    backgroundColor: 'rgba(74,153,233,0.08)',
     alignItems: 'center', justifyContent: 'center',
   },
   previewChipName: {
@@ -1671,7 +1676,7 @@ const styles = StyleSheet.create({
   },
   iconCircle: {
     width: 38, height: 38, borderRadius: 19,
-    backgroundColor: 'rgba(30,156,240,0.10)',
+    backgroundColor: 'rgba(74,153,233,0.10)',
     alignItems: 'center', justifyContent: 'center',
   },
   infoContent: { flex: 1 },
@@ -1761,7 +1766,7 @@ const styles = StyleSheet.create({
   },
   catalogItemPlaceholder: {
     width: 48, height: 48, borderRadius: 10,
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    backgroundColor: 'rgba(74,153,233,0.08)',
     alignItems: 'center', justifyContent: 'center',
   },
   catalogItemContent: { flex: 1 },
@@ -1822,7 +1827,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     backgroundColor: '#f0f7ff',
     borderWidth: 2,
-    borderColor: 'rgba(30,156,240,0.2)',
+    borderColor: 'rgba(74,153,233,0.2)',
     borderStyle: 'dashed',
   },
   itemImagePreview: { width: 72, height: 72, borderRadius: 36 },
@@ -1850,9 +1855,9 @@ const styles = StyleSheet.create({
   timePill: {
     paddingHorizontal: 12, paddingVertical: 7,
     borderRadius: 8,
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    backgroundColor: 'rgba(74,153,233,0.08)',
     borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.15)',
+    borderColor: 'rgba(74,153,233,0.15)',
   },
   timePillText: { fontSize: 13, fontWeight: '600' },
   closedBadge: {
@@ -1881,7 +1886,7 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   pickerItemActive: {
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    backgroundColor: 'rgba(74,153,233,0.08)',
   },
   pickerItemText: { fontSize: 15 },
 
@@ -1925,7 +1930,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     backgroundColor: '#fff',
     borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.20)',
+    borderColor: 'rgba(74,153,233,0.20)',
   },
   customTimeBtn: {
     backgroundColor: COLORS.blue,
@@ -1961,7 +1966,7 @@ const styles = StyleSheet.create({
   },
   collectionIconWrap: {
     width: 38, height: 38, borderRadius: 10,
-    backgroundColor: 'rgba(30,156,240,0.10)',
+    backgroundColor: 'rgba(74,153,233,0.10)',
     alignItems: 'center' as const, justifyContent: 'center' as const,
   },
   collectionEmoji:  { fontSize: 20 },

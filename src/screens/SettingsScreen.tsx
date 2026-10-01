@@ -159,7 +159,7 @@ const styles = StyleSheet.create({
   },
   iconCircle: {
     width: 36, height: 36, borderRadius: 18,
-    backgroundColor: 'rgba(30,156,240,0.10)',
+    backgroundColor: 'rgba(74,153,233,0.10)',
     alignItems: 'center', justifyContent: 'center',
   },
   iconCircleDanger: {

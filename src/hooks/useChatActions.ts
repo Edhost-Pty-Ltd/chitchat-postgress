@@ -304,7 +304,16 @@ export async function sendFileMessage(
   onProgress?: (progress: number) => void,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
-    const fileUrl = await uploadFile(fileUri, 'chatMedia', { chatId, fileName }, onProgress);
+    // Pass the caller-supplied mimeType as an override so Android content URIs
+    // (which have no file extension) get the correct Content-Type rather than
+    // falling back to application/octet-stream which Firebase Storage may reject.
+    const fileUrl = await uploadFile(
+      fileUri,
+      'chatMedia',
+      { chatId, fileName },
+      onProgress,
+      mimeType || 'application/octet-stream',
+    );
 
     const chatRef  = fsDb().collection('chats').doc(chatId);
     const chatSnap = await chatRef.get();

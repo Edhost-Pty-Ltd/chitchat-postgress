@@ -813,7 +813,7 @@ function MeetingDetailSheet({
                 </View>
               )}
               {isUpcoming && (
-                <View style={[styles.detailStatusBadge, { backgroundColor: 'rgba(30,156,240,0.15)' }]}>
+                <View style={[styles.detailStatusBadge, { backgroundColor: 'rgba(74,153,233,0.15)' }]}>
                   <AppText style={[styles.detailStatusText, { color: COLORS.blue }]}>Upcoming</AppText>
                 </View>
               )}
@@ -1593,7 +1593,7 @@ const styles = StyleSheet.create({
   header: { paddingHorizontal: 14, paddingBottom: 10, gap: 8 },
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   appName: { fontSize: 22, fontWeight: '800', letterSpacing: -0.5 },
-  searchBubble: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(30,156,240,0.06)', borderWidth: 1, borderColor: 'rgba(30,156,240,0.18)', borderRadius: RADIUS.full, paddingHorizontal: 14, height: 42 },
+  searchBubble: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(74,153,233,0.06)', borderWidth: 1, borderColor: 'rgba(74,153,233,0.18)', borderRadius: RADIUS.full, paddingHorizontal: 14, height: 42 },
   searchInput: { flex: 1, fontSize: 14, padding: 0 },
   tabBar: { flexDirection: 'row', paddingHorizontal: 14, marginBottom: 10, gap: 6 },
   tabPillActive: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 22, paddingVertical: 9, borderRadius: RADIUS.full, ...SHADOW.button },
@@ -1629,7 +1629,7 @@ const styles = StyleSheet.create({
   calDayCircle: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
   calDayNumber: { fontSize: 13, fontWeight: '600' },
   calDot: { width: 5, height: 5, borderRadius: 3, marginTop: 1 },
-  calTodayBtn: { alignSelf: 'center', marginTop: 6, paddingHorizontal: 14, paddingVertical: 5, borderRadius: RADIUS.full, backgroundColor: 'rgba(30,156,240,0.12)' },
+  calTodayBtn: { alignSelf: 'center', marginTop: 6, paddingHorizontal: 14, paddingVertical: 5, borderRadius: RADIUS.full, backgroundColor: 'rgba(74,153,233,0.12)' },
   calTodayText: { fontSize: 12, fontWeight: '700' },
   calSelectedLabel: { fontSize: 12, fontWeight: '700', letterSpacing: 0.5, paddingHorizontal: 16, paddingBottom: 4 },
 
@@ -1659,12 +1659,12 @@ const styles = StyleSheet.create({
   meetingTitle: { fontSize: 15, fontWeight: '700', flexShrink: 1 },
   meetingMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   meetingMetaText: { fontSize: 12 },
-  organizerBadge: { backgroundColor: 'rgba(30,156,240,0.15)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: RADIUS.full },
+  organizerBadge: { backgroundColor: 'rgba(74,153,233,0.15)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: RADIUS.full },
   organizerBadgeText: { fontSize: 10, fontWeight: '700', color: COLORS.blue },
 
   liveBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(34,197,94,0.16)', paddingHorizontal: 7, paddingVertical: 2, borderRadius: RADIUS.full },
   liveBadgeText: { fontSize: 10, fontWeight: '800', color: '#16a34a', letterSpacing: 0.5 },
-  minutesBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: 'rgba(30,156,240,0.14)', paddingHorizontal: 7, paddingVertical: 2, borderRadius: RADIUS.full },
+  minutesBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: 'rgba(74,153,233,0.14)', paddingHorizontal: 7, paddingVertical: 2, borderRadius: RADIUS.full },
   minutesBadgeText: { fontSize: 10, fontWeight: '800', color: COLORS.blue, letterSpacing: 0.5 },
   activeHint: { fontSize: 11, color: '#16a34a', fontWeight: '600', marginTop: 2 },
   minutesHint: { fontSize: 11, color: COLORS.blue, fontWeight: '600', marginTop: 2 },
@@ -1683,7 +1683,7 @@ const styles = StyleSheet.create({
   fabWeb: { right: 16 },
   overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.45)' },
   sheet: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '85%', borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden', ...SHADOW.glow },
-  handle: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(30,156,240,0.30)', marginTop: 10, marginBottom: 4 },
+  handle: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(74,153,233,0.30)', marginTop: 10, marginBottom: 4 },
 
   sheetSubHeader: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, gap: 10 },
   iconPad: { padding: 4 },
@@ -1698,7 +1698,7 @@ const styles = StyleSheet.create({
   autoReminderTitle: { fontSize: 13, fontWeight: '700' },
   autoReminderSub: { fontSize: 11, color: COLORS.sub, marginTop: 2 },
   phoneHint: { fontSize: 11, color: COLORS.sub, marginLeft: 6, marginTop: 6 },
-  participantChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(30,156,240,0.10)', borderRadius: RADIUS.full, paddingHorizontal: 8, paddingVertical: 3 },
+  participantChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(74,153,233,0.10)', borderRadius: RADIUS.full, paddingHorizontal: 8, paddingVertical: 3 },
   chipText: { fontSize: 12, fontWeight: '600', maxWidth: 70 },
 
   emptyWrap: { alignItems: 'center', gap: 12, flex: 1, justifyContent: 'center', paddingBottom: 80 },
@@ -1722,7 +1722,7 @@ const styles = StyleSheet.create({
 
   recCard: {
     borderRadius: RADIUS.lg, padding: 14, marginBottom: 10,
-    borderWidth: 1, borderColor: 'rgba(30,156,240,0.18)',
+    borderWidth: 1, borderColor: 'rgba(74,153,233,0.18)',
   },
   recPlayBtn: {
     width: 40, height: 40, borderRadius: 20,
@@ -1732,7 +1732,7 @@ const styles = StyleSheet.create({
   },
   recProgressTrack: {
     height: 3, borderRadius: 2,
-    backgroundColor: 'rgba(30,156,240,0.18)',
+    backgroundColor: 'rgba(74,153,233,0.18)',
     marginTop: 10, overflow: 'hidden',
   },
   recProgressFill: {
@@ -1744,8 +1744,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     gap: 6, paddingVertical: 9, paddingHorizontal: 12,
     borderRadius: RADIUS.md,
-    borderWidth: 1, borderColor: 'rgba(30,156,240,0.25)',
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    borderWidth: 1, borderColor: 'rgba(74,153,233,0.25)',
+    backgroundColor: 'rgba(74,153,233,0.08)',
   },
   recActionText: { fontSize: 12, fontWeight: '700' },
 });

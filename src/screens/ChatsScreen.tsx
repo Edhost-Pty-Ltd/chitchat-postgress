@@ -1127,7 +1127,7 @@ const styles = StyleSheet.create({
   badgeText:      { color: '#fff', fontSize: 11, fontWeight: '700' },
 
   // ── FAB ──────────────────────────────────────────────────────────────────
-  fab:      { position: 'absolute', right: 20, bottom: 20, width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.blue, shadowColor: '#007AFF', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.30, shadowRadius: 8, elevation: 6 },
+  fab:      { position: 'absolute', right: 20, bottom: 20, width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.blue, shadowColor: COLORS.blue, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.30, shadowRadius: 8, elevation: 6 },
   fabWeb:   { right: 16, bottom: 20 },
   fabInner: { flex: 1, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
 
@@ -1142,7 +1142,7 @@ const styles = StyleSheet.create({
   },
   handle: {
     alignSelf: 'center', width: 40, height: 4, borderRadius: 2,
-    backgroundColor: 'rgba(30,156,240,0.30)', marginTop: 10, marginBottom: 4,
+    backgroundColor: 'rgba(74,153,233,0.30)', marginTop: 10, marginBottom: 4,
   },
 
   // ── Sheet shared ──────────────────────────────────────────────────────────

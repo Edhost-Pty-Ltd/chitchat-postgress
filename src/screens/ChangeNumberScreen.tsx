@@ -183,7 +183,7 @@ export default function ChangeNumberScreen() {
         <LinearGradient colors={['#87CEEB', '#C5E8F7', '#E8F6FF']} style={StyleSheet.absoluteFill} />
 
         {/* Header */}
-        <View style={[styles.header, { backgroundColor: 'transparent', borderBottomColor: 'rgba(30,156,240,0.18)' }]}>
+        <View style={[styles.header, { backgroundColor: 'transparent', borderBottomColor: 'rgba(74,153,233,0.18)' }]}>
           <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
             <AppIcon name="chevron-back" size={26} color={COLORS.blue} fixedColor />
           </TouchableOpacity>
@@ -350,8 +350,8 @@ const styles = StyleSheet.create({
   headerTitle: { flex: 1, textAlign: 'center', fontSize: 17, fontWeight: '700' },
   webNoticeIcon: {
     width: 80, height: 80, borderRadius: 40,
-    backgroundColor: 'rgba(30,156,240,0.12)',
-    borderWidth: 1, borderColor: 'rgba(30,156,240,0.25)',
+    backgroundColor: 'rgba(74,153,233,0.12)',
+    borderWidth: 1, borderColor: 'rgba(74,153,233,0.25)',
     alignItems: 'center', justifyContent: 'center',
   },
 
@@ -376,9 +376,8 @@ const styles = StyleSheet.create({
   backRowText: { fontSize: 13, color: COLORS.blue, fontWeight: '600', marginLeft: 2 },
 
   otpRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 6, marginBottom: 16 },
-  otpRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 6, marginBottom: 16 },
   otpBox: { width: 46, height: 54, borderRadius: RADIUS.md, alignItems: 'center', justifyContent: 'center', overflow: 'hidden', ...GLASS.input },
-  otpBoxFilled: { borderColor: COLORS.blue, backgroundColor: 'rgba(30,156,240,0.10)' },
+  otpBoxFilled: { borderColor: COLORS.blue, backgroundColor: 'rgba(74,153,233,0.10)' },
   otpBoxFocused: { borderColor: COLORS.blue, borderWidth: 2 },
   otpHiddenInput: { position: 'absolute', width: 1, height: 1, opacity: 0 },
   otpDigitText: { fontSize: 20, fontWeight: '700', color: COLORS.text, lineHeight: 24, includeFontPadding: false } as any,
@@ -388,7 +387,7 @@ const styles = StyleSheet.create({
   resendLabel: { fontSize: 13, color: COLORS.sub },
   resendLink:  { fontSize: 13, color: COLORS.blue, fontWeight: '700' },
 
-  hintBox: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 14, padding: 10, backgroundColor: 'rgba(30,156,240,0.06)', borderRadius: RADIUS.sm, borderWidth: 1, borderColor: 'rgba(30,156,240,0.15)' },
+  hintBox: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 14, padding: 10, backgroundColor: 'rgba(74,153,233,0.06)', borderRadius: RADIUS.sm, borderWidth: 1, borderColor: 'rgba(74,153,233,0.15)' },
   hintText: { fontSize: 12, color: COLORS.sub },
 });
 
@@ -398,7 +397,7 @@ const pick = StyleSheet.create({
   searchWrap: { flexDirection: 'row', alignItems: 'center', margin: 12, marginBottom: 6, paddingHorizontal: 10 },
   searchInput:{ flex: 1, paddingVertical: 11, fontSize: 14 },
   item:       { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, paddingVertical: 13, gap: 12 },
-  itemSel:    { backgroundColor: 'rgba(30,156,240,0.08)' },
+  itemSel:    { backgroundColor: 'rgba(74,153,233,0.08)' },
   flag:       { fontSize: 24, width: 32, textAlign: 'center' },
   name:       { flex: 1, fontSize: 15 },
   dial:       { fontSize: 14, fontWeight: '600' },

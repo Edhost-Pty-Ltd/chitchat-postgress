@@ -13,7 +13,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   View, TouchableOpacity, StyleSheet, Dimensions, Platform,
   Modal, ScrollView, Pressable, Animated, ActivityIndicator,
-  BackHandler, Alert, AlertButton, Share,
+  BackHandler, Alert, AlertButton, Share, AppState,
 } from 'react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -209,6 +209,8 @@ export default function VideoCallScreen() {
   const [switchingCamera, setSwitchingCamera] = useState(false);
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [showCameraToggle, setShowCameraToggle] = useState(false);
+  // Incremented on every camera flip to force RTCView to remount with the new track
+  const [flipKey, setFlipKey] = useState(0);
 
   // Screen share
   const [screenSharing, setScreenSharing] = useState(false);
@@ -529,6 +531,33 @@ export default function VideoCallScreen() {
     return () => backHandler.remove();
   }, [duration, callId, isOutgoing, otherParty, participants, minimizeCall, navigation, activeLocalStream]);
 
+  // ── iOS: minimize on background / lock screen ───────────────────
+  // On iOS there is no hardware back button, so the Android handler above
+  // never fires when the user locks the phone or swipes home. AppState
+  // 'background'/'inactive' catches both cases.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'background' || nextState === 'inactive') {
+        const isLocalMain = participants[0]?.isLocal || false;
+        minimizeCall({
+          callId,
+          displayName: otherParty.displayName,
+          avatar: otherParty.displayName.split(' ').map((n: string) => n[0]).join('').toUpperCase(),
+          color: COLORS.blue,
+          duration: fmt(duration),
+          isVideo: true,
+          isOutgoing,
+          localStream: activeLocalStream,
+          remoteStream,
+          localIsMain: isLocalMain,
+          otherParty,
+        });
+        navigation.goBack();
+      }
+    });
+    return () => sub.remove();
+  }, [duration, callId, isOutgoing, otherParty, participants, minimizeCall, navigation, activeLocalStream, remoteStream]);
+
   useEffect(() => { updateDuration(fmt(duration)); }, [duration]); // eslint-disable-line
 
   const fmt = (s: number) =>
@@ -563,6 +592,8 @@ export default function VideoCallScreen() {
       const facingMode = newFacing === 'front' ? 'user' : 'environment';
       await switchCameraWebRTC(facingMode);
       setFacing(newFacing);
+      // Bump key so the local StreamTile remounts with the new video track
+      setFlipKey((k) => k + 1);
     } catch (err) {
       console.error('[VideoCall] flip failed:', err);
     } finally {
@@ -1143,6 +1174,7 @@ export default function VideoCallScreen() {
             stream={activeLocalStream}
             mirror={!screenSharing && facing === 'front'}
             muted
+            key={`local-${flipKey}`}
             fallback={canShowCamera
               ? <CameraTile facing={facing} />
               : <View style={[StyleSheet.absoluteFill, { backgroundColor: '#0a1a30' }]} />}
@@ -1372,6 +1404,21 @@ export default function VideoCallScreen() {
           <AppText fixedColor style={styles.controlLabel}>Audio only</AppText>
         </View>
 
+        {/* Camera on/off toggle — clearly labelled so it's distinct from screen share */}
+        <View style={styles.controlCol}>
+          <TouchableOpacity
+            style={[styles.controlBtn, !cameraEnabled && styles.controlBtnActive]}
+            onPress={() => {
+              const next = !cameraEnabled;
+              setCameraEnabled(next);
+              toggleVideo(next);
+            }}
+          >
+            <AppIcon name={cameraEnabled ? 'videocam-outline' : 'videocam-off-outline'} size={24} color="#fff" fixedColor />
+          </TouchableOpacity>
+          <AppText fixedColor style={styles.controlLabel}>{cameraEnabled ? 'Camera' : 'Cam off'}</AppText>
+        </View>
+
         <View style={styles.controlCol}>
           <TouchableOpacity style={styles.hangUpBtn} onPress={hangUp}>
             <AppIcon name="call" size={28} color="#fff" fixedColor />
@@ -1520,7 +1567,7 @@ export default function VideoCallScreen() {
 
               <View style={styles.reportActions}>
                 <TouchableOpacity
-                  style={[styles.reportBtn, { backgroundColor: 'rgba(30,156,240,0.15)', borderColor: 'rgba(30,156,240,0.35)' }]}
+                  style={[styles.reportBtn, { backgroundColor: 'rgba(74,153,233,0.15)', borderColor: 'rgba(74,153,233,0.35)' }]}
                   onPress={exportMinutesPdf}
                   disabled={!minutesText}
                 >
@@ -1622,8 +1669,8 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   sideBtnActive: {
-    backgroundColor: 'rgba(30,156,240,0.35)',
-    borderColor: 'rgba(30,156,240,0.55)',
+    backgroundColor: 'rgba(74,153,233,0.35)',
+    borderColor: 'rgba(74,153,233,0.55)',
   },
   sideBtnDisabled: { opacity: 0.6 },
 
@@ -1695,7 +1742,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 8,
     paddingVertical: 10, paddingHorizontal: 14,
     borderRadius: RADIUS.md,
-    backgroundColor: 'rgba(30,156,240,0.72)',
+    backgroundColor: 'rgba(74,153,233,0.72)',
     ...SHADOW.card,
   },
   aloneText: { flex: 1, fontSize: 13, fontWeight: '600', color: '#fff' },
@@ -1737,7 +1784,7 @@ const styles = StyleSheet.create({
   reportContent: { paddingHorizontal: 18, paddingBottom: 40, paddingTop: 6 },
   reportMeta: {
     borderRadius: RADIUS.lg, padding: 14, gap: 8,
-    borderWidth: 1, borderColor: 'rgba(30,156,240,0.20)',
+    borderWidth: 1, borderColor: 'rgba(74,153,233,0.20)',
   },
   reportMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   reportMetaText: { fontSize: 13 },

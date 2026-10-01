@@ -411,7 +411,26 @@ export default function CreateAccountScreen() {
 
   // ── OTP helpers ───────────────────────────────────────────────────────────
   const handleOtpChange = (text: string, i: number) => {
-    const digit = text.replace(/\D/g, '').slice(-1);
+    const digits = text.replace(/\D/g, '');
+
+    // Autofill / paste: iOS & Android deliver the full code into one field.
+    // Distribute every digit across the boxes and auto-submit when complete.
+    if (digits.length > 1) {
+      const next = ['', '', '', '', '', ''];
+      for (let k = 0; k < 6; k++) next[k] = digits[k] || '';
+      setOtp(next);
+      const lastFilled = Math.min(digits.length, 6) - 1;
+      otpRefs.current[Math.max(0, lastFilled)]?.focus();
+      if (digits.length >= 6) {
+        otpRefs.current[5]?.blur();
+        // Auto-verify once the full code is present
+        setTimeout(() => handleVerify(), 100);
+      }
+      return;
+    }
+
+    // Single-digit manual entry
+    const digit = digits.slice(-1);
     const next = [...otp];
     next[i] = digit;
     setOtp(next);
@@ -715,9 +734,15 @@ export default function CreateAccountScreen() {
                           handleOtpKey(nativeEvent.key, i)
                         }
                         keyboardType="number-pad"
-                        maxLength={1}
+                        // The first box accepts the full autofilled code; the
+                        // handler then distributes the digits across all boxes.
+                        maxLength={i === 0 ? 6 : 1}
+                        textContentType="oneTimeCode"
+                        autoComplete={i === 0 ? 'sms-otp' : 'off'}
+                        importantForAutofill={i === 0 ? 'yes' : 'no'}
                         textAlign="center"
                         selectTextOnFocus
+                        autoFocus={i === 0}
                       />
                     ))}
                   </View>
@@ -1051,34 +1076,35 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1.5,
     borderColor: COLORS.blue,
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    backgroundColor: 'rgba(74,153,233,0.08)',
   },
   secondaryBtnText: { color: COLORS.blue, fontSize: 15, fontWeight: '700' },
   phoneHighlight: { fontWeight: '700', color: COLORS.text },
 
-    otpRow: {
+  otpRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 20,
-    gap: 8, // Ensures consistent spacing between boxes
+    marginBottom: 24,
+    marginTop: 8,
+    gap: 8, // Even spacing between boxes (flex:1 handles widths)
   },
   otpBox: {
     flex: 1, // Makes boxes responsive to screen width
-    maxWidth: 58, // Prevents boxes from getting too wide on tablets/large screens
-    height: 58,
-    borderRadius: 16, // More rounded corners matching the image
+    maxWidth: 52, // Prevents boxes from getting too wide on tablets/large screens
+    height: 56,
+    borderRadius: 14,
     fontSize: 22,
     fontWeight: '700',
     color: COLORS.text,
     textAlign: 'center',
-    textAlignVertical: 'center',  
-    lineHeight: 58,  
+    // No lineHeight: on a single-line TextInput, a lineHeight equal to the box
+    // height pushes the glyph below the box on iOS. Let the text center itself.
     paddingVertical: 0,
     paddingHorizontal: 0,
-    backgroundColor: '#e6f1fa',  
-    borderWidth: 1,
-    borderColor: 'transparent',  
+    backgroundColor: '#e6f1fa',
+    borderWidth: 1.5,
+    borderColor: 'transparent',
   },
   otpBoxFilled: {
     backgroundColor: '#d0e8f9', 
@@ -1102,7 +1128,7 @@ const styles = StyleSheet.create({
     width: 110,
     height: 110,
     borderRadius: 55,
-    backgroundColor: 'rgba(30,156,240,0.12)',
+    backgroundColor: 'rgba(74,153,233,0.12)',
     borderWidth: 1.5,
     borderColor: 'rgba(255,255,255,0.45)',
     alignItems: 'center',
@@ -1145,7 +1171,7 @@ const picker = StyleSheet.create({
     paddingVertical: 13,
     gap: 12,
   },
-  itemSelected: { backgroundColor: 'rgba(30,156,240,0.08)' },
+  itemSelected: { backgroundColor: 'rgba(74,153,233,0.08)' },
   flag: { fontSize: 24, width: 32, textAlign: 'center' },
   countryName: { flex: 1, fontSize: 15, color: COLORS.text },
   dialCode: { fontSize: 14, fontWeight: '600', color: COLORS.sub },

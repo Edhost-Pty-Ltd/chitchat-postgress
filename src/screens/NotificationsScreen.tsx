@@ -73,9 +73,9 @@ function NotifRow({ notif }: { notif: AppNotification }) {
         notif.read
           ? bevel
           : {
-              backgroundColor: 'rgba(30,156,240,0.08)',
+              backgroundColor: 'rgba(74,153,233,0.08)',
               borderWidth: 1,
-              borderColor: 'rgba(30,156,240,0.28)',
+              borderColor: 'rgba(74,153,233,0.28)',
             },
       ]}
       activeOpacity={0.75}
@@ -156,7 +156,7 @@ export default function NotificationsScreen() {
         ListEmptyComponent={
           <View style={styles.empty}>
             <View style={styles.emptyIconWrap}>
-              <LinearGradient colors={['rgba(30,156,240,0.12)', 'rgba(30,156,240,0.04)']} style={styles.emptyIconGrad}>
+              <LinearGradient colors={['rgba(74,153,233,0.12)', 'rgba(74,153,233,0.04)']} style={styles.emptyIconGrad}>
                 <AppIcon name="notifications-off-outline" size={40} color={COLORS.sub} />
               </LinearGradient>
             </View>

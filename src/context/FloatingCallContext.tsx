@@ -1,7 +1,22 @@
 // ─── Context: Floating Call ──────────────────────────────────────────────────
-// Manages the floating call overlay state when user minimizes a call
+// Manages the floating call overlay when the user minimises a call.
+//
+// Persistence strategy:
+//   • Call metadata (everything except the live stream objects) is written to
+//     AsyncStorage whenever it changes, so a JS-context restart (phone lock on
+//     iOS, low-memory kill on Android) can restore the UI state on resume.
+//   • Stream objects (localStream / remoteStream) are intentionally NOT
+//     persisted — they are native WebRTC handles that cannot survive a context
+//     restart. On restore the overlay renders without media until the user
+//     maximises the call and the VideoCallScreen re-attaches its streams.
 
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, {
+  createContext, useContext, useState, useCallback, useEffect, useRef,
+} from 'react';
+import { AppState, AppStateStatus } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+const STORAGE_KEY = 'floating_call_meta';
 
 interface FloatingCallData {
   callId: string;
@@ -13,13 +28,16 @@ interface FloatingCallData {
   isOutgoing: boolean;
   localStream?: any;
   remoteStream?: any;
-  localIsMain?: boolean; // Track if local camera is in main view
+  localIsMain?: boolean;
   otherParty: {
     userId: string;
     displayName: string;
     photoUrl: string | null;
   };
 }
+
+// Serialisable subset — streams excluded
+type PersistedMeta = Omit<FloatingCallData, 'localStream' | 'remoteStream'>;
 
 interface FloatingCallContextValue {
   floatingCall: FloatingCallData | null;
@@ -37,8 +55,83 @@ const FloatingCallContext = createContext<FloatingCallContextValue>({
   updateDuration: () => {},
 });
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function toMeta(data: FloatingCallData): PersistedMeta {
+  const { localStream: _l, remoteStream: _r, ...meta } = data;
+  return meta;
+}
+
+async function saveMeta(data: FloatingCallData | null) {
+  try {
+    if (data) {
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(toMeta(data)));
+    } else {
+      await AsyncStorage.removeItem(STORAGE_KEY);
+    }
+  } catch {}
+}
+
+async function loadMeta(): Promise<PersistedMeta | null> {
+  try {
+    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as PersistedMeta) : null;
+  } catch {
+    return null;
+  }
+}
+
+// ── Provider ──────────────────────────────────────────────────────────────────
+
 export function FloatingCallProvider({ children }: { children: React.ReactNode }) {
   const [floatingCall, setFloatingCall] = useState<FloatingCallData | null>(null);
+
+  // Ref used inside AppState listener to read current call without stale closure
+  const callRef = useRef<FloatingCallData | null>(null);
+  callRef.current = floatingCall;
+
+  // ── Restore persisted call on mount ───────────────────────────────────────
+  useEffect(() => {
+    loadMeta().then((meta) => {
+      if (meta) {
+        // Restore without streams — user can re-open VideoCallScreen to reconnect
+        setFloatingCall(meta as FloatingCallData);
+      }
+    });
+  }, []);
+
+  // ── Persist whenever call changes ─────────────────────────────────────────
+  useEffect(() => {
+    saveMeta(floatingCall);
+  }, [floatingCall]);
+
+  // ── AppState listener — auto-minimise on iOS background / lock ────────────
+  // On iOS there is no hardware back button, so VideoCallScreen never gets a
+  // chance to call minimizeCall() when the user locks the phone or swipes home.
+  // We catch the 'background' transition here and snapshot the call into state
+  // so the overlay is ready when the app is foregrounded again.
+  useEffect(() => {
+    const handleAppStateChange = (nextState: AppStateStatus) => {
+      if (nextState === 'background' || nextState === 'inactive') {
+        // If VideoCallScreen has already minimised the call this is a no-op
+        // because callRef.current will already be populated.
+        // We only need to act if there is NO floatingCall yet — meaning the user
+        // left the call screen without tapping the back button.
+        // In that case we cannot restore the streams (they're in VideoCallScreen
+        // state), but we persist the metadata so the overlay appears on resume.
+        // The actual stream re-attachment happens when VideoCallScreen remounts.
+        if (callRef.current) {
+          // Already minimised — just make sure it's persisted
+          saveMeta(callRef.current);
+        }
+      }
+    };
+
+    const sub = AppState.addEventListener('change', handleAppStateChange);
+    return () => sub.remove();
+  }, []);
+
+  // ── Actions ───────────────────────────────────────────────────────────────
 
   const minimizeCall = useCallback((data: FloatingCallData) => {
     console.log('[FloatingCallContext] Minimizing call:', data.callId);
@@ -55,6 +148,7 @@ export function FloatingCallProvider({ children }: { children: React.ReactNode }
   const endFloatingCall = useCallback(() => {
     console.log('[FloatingCallContext] Ending floating call');
     setFloatingCall(null);
+    AsyncStorage.removeItem(STORAGE_KEY).catch(() => {});
   }, []);
 
   const updateDuration = useCallback((duration: string) => {
@@ -63,13 +157,7 @@ export function FloatingCallProvider({ children }: { children: React.ReactNode }
 
   return (
     <FloatingCallContext.Provider
-      value={{
-        floatingCall,
-        minimizeCall,
-        maximizeCall,
-        endFloatingCall,
-        updateDuration,
-      }}
+      value={{ floatingCall, minimizeCall, maximizeCall, endFloatingCall, updateDuration }}
     >
       {children}
     </FloatingCallContext.Provider>

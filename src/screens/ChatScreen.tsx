@@ -3,7 +3,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
   View, FlatList, TouchableOpacity, ScrollView,
   StyleSheet, TextInput, KeyboardAvoidingView, Platform,
-  ActivityIndicator, PanResponder, Linking, Modal, Alert,
+  ActivityIndicator, PanResponder, Linking, Modal, Alert, Share,
   GestureResponderEvent, PanResponderGestureState, Image, Dimensions,
   Animated,
 } from 'react-native';
@@ -683,7 +683,9 @@ export default function ChatScreen() {
     return () => { cancelled = true; };
   }, [isGroup, otherUserId]);
 
-  // ── Check blocked status ─────────────────────────────────────────
+  // ── Block status: real-time listener ───────────────────────────
+  // Replaces the one-shot check + useFocusEffect approach so the UI updates
+  // immediately if the block state changes while the chat is open.
   useEffect(() => {
     if (!userId || !otherUserId || isGroup) {
       setCheckingBlockedStatus(false);
@@ -691,63 +693,56 @@ export default function ChatScreen() {
       return;
     }
 
-    const checkBlockedStatus = async () => {
-      try {
-        console.log('[ChatScreen] Checking if contact is blocked:', otherUserId);
+    setCheckingBlockedStatus(true);
 
-        // Check if the current user has blocked the other user
-        const fsDbBlock = db as ReturnType<typeof firestore>;
-        const blockedByMeSnap = await fsDbBlock
-          .collection('users').doc(userId!).collection('blockedUsers').doc(otherUserId!).get();
-        const blockedMeSnap = await fsDbBlock
-          .collection('users').doc(otherUserId!).collection('blockedUsers').doc(userId!).get();
+    const fsDbBlock = db as ReturnType<typeof firestore>;
 
-        const iBlockedThem = blockedByMeSnap.exists;
-        const theyBlockedMe = blockedMeSnap.exists;
+    // Use refs to avoid stale-closure bugs in the onSnapshot callbacks.
+    // Each listener can only see its own doc — it sets its own state and
+    // derives isBlocked from the latest values of both sides.
+    const blockedByMeRef   = { current: false };
+    const blockedByThemRef = { current: false };
 
-        setBlockedByMe(iBlockedThem);
-        setBlockedByThem(theyBlockedMe);
-        setIsBlocked(iBlockedThem || theyBlockedMe);
+    const unsubMe = fsDbBlock
+      .collection('users').doc(userId).collection('blockedUsers').doc(otherUserId)
+      .onSnapshot(
+        (snap) => {
+          const exists = snap.exists();
+          blockedByMeRef.current = exists;
+          setBlockedByMe(exists);
+          setIsBlocked(exists || blockedByThemRef.current);
+        },
+        () => {},
+      );
 
-        console.log('[ChatScreen] Blocked status - by me:', iBlockedThem, ', by them:', theyBlockedMe);
-      } catch (error) {
-        console.error('[ChatScreen] Error checking blocked status:', error);
-        setIsBlocked(false);
-        setBlockedByMe(false);
-        setBlockedByThem(false);
-      } finally {
-        setCheckingBlockedStatus(false);
-      }
-    };
+    const unsubThem = fsDbBlock
+      .collection('users').doc(otherUserId).collection('blockedUsers').doc(userId)
+      .onSnapshot(
+        (snap) => {
+          const exists = snap.exists();
+          blockedByThemRef.current = exists;
+          setBlockedByThem(exists);
+          setIsBlocked(blockedByMeRef.current || exists);
+        },
+        () => {},
+      );
 
-    checkBlockedStatus();
+    // After both listeners attach, derive combined state once
+    Promise.all([
+      fsDbBlock.collection('users').doc(userId).collection('blockedUsers').doc(otherUserId).get(),
+      fsDbBlock.collection('users').doc(otherUserId).collection('blockedUsers').doc(userId).get(),
+    ]).then(([byMe, byThem]) => {
+      const meExists   = byMe.exists();
+      const themExists = byThem.exists();
+      blockedByMeRef.current   = meExists;
+      blockedByThemRef.current = themExists;
+      setBlockedByMe(meExists);
+      setBlockedByThem(themExists);
+      setIsBlocked(meExists || themExists);
+    }).catch(() => {}).finally(() => setCheckingBlockedStatus(false));
+
+    return () => { unsubMe(); unsubThem(); };
   }, [userId, otherUserId, isGroup]);
-
-  // ── Re-check blocked status when screen comes into focus ────────
-  useFocusEffect(
-    React.useCallback(() => {
-      if (!isGroup && userId && otherUserId) {
-        (async () => {
-          try {
-            const fsDbFocus = db as ReturnType<typeof firestore>;
-            const blockedByMeSnapF = await fsDbFocus
-              .collection('users').doc(userId).collection('blockedUsers').doc(otherUserId).get();
-            const blockedMeSnapF = await fsDbFocus
-              .collection('users').doc(otherUserId).collection('blockedUsers').doc(userId).get();
-
-            const iBlockedThem = blockedByMeSnapF.exists;
-            const theyBlockedMe = blockedMeSnapF.exists;
-
-            setBlockedByMe(iBlockedThem);
-            setBlockedByThem(theyBlockedMe);
-            setIsBlocked(iBlockedThem || theyBlockedMe);
-          } catch (error) {
-            console.error('[ChatScreen] Error re-checking blocked status:', error);
-          }
-        })();
-      }
-    }, [userId, otherUserId, isGroup])
-  );
 
   // ── Stop playback on unmount / navigation away ──────────────────
   useEffect(() => {
@@ -941,9 +936,10 @@ export default function ChatScreen() {
 
       if (isNetworkError && retryCount < MAX_UPLOAD_RETRIES - 1) {
         setUploadError('Upload failed. Tap to retry.');
+        // Keep pendingRecordingRef so retry works
       } else {
-        setUploadError('Upload could not be completed.');
-        pendingRecordingRef.current = null;
+        setUploadError('Upload could not be completed. Tap to retry.');
+        // Keep pendingRecordingRef so the user can still retry from the banner
       }
     }
   }, [userId, chatId, retryCount, checkAndTriggerAutoResponder]);
@@ -960,7 +956,9 @@ export default function ChatScreen() {
 
   // ── Send handler ────────────────────────────────────────────────
   const handleSend = async (text?: string) => {
-    if (isSendingRef.current) return; // prevent duplicate sends from rapid taps
+    if (isSendingRef.current) return;
+    // Hard stop: if they blocked us, we cannot send anything
+    if (blockedByThem) return;
     const trimmed = (text ?? input).trim();
     if (!trimmed) return;
 
@@ -1234,12 +1232,15 @@ export default function ChatScreen() {
       Alert.alert('Cannot make call', 'User information not available.');
       return;
     }
-
     if (isGroup) {
       Alert.alert('Not Supported', 'Group calls are not available.');
       return;
     }
-
+    // Cannot call someone who has blocked us
+    if (blockedByThem) {
+      Alert.alert("Can't call", `You cannot call ${displayName} right now.`);
+      return;
+    }
     try {
       // Check the other user's privacyCalls setting before starting
       const calleePrivacy = await fetchUserPrivacySettings(otherUserId);
@@ -1280,7 +1281,7 @@ export default function ChatScreen() {
       console.error('[ChatScreen] Error initiating call:', error);
       Alert.alert('Error', 'Failed to start call');
     }
-  }, [userId, otherUserId, isGroup, displayName, user, outgoingCall, navigation, otherUserPhoto]);
+  }, [userId, otherUserId, isGroup, blockedByThem, displayName, user, outgoingCall, navigation, otherUserPhoto]);
 
   const handleVoiceCall = useCallback(() => startCall(), [startCall]);
 
@@ -1291,6 +1292,8 @@ export default function ChatScreen() {
 
     onPanResponderGrant: (_evt: GestureResponderEvent, _gestureState: PanResponderGestureState) => {
       isCancelledRef.current = false;
+      // Dismiss any previous voice upload error so the banner doesn't persist
+      setUploadError(null);
       recorder.startRecording();
     },
 
@@ -1640,6 +1643,11 @@ export default function ChatScreen() {
       }
 
       await Promise.all(batches.map(batch => batch.commit()));
+
+      // Reset the chat's lastMessage so the Chats list no longer shows stale preview text
+      await fsDbClear.collection('chats').doc(chatId).update({
+        lastMessage: null,
+      });
 
       // Wipe the local cache so the user sees an empty chat immediately.
       await clearLocalMessages(chatId);
@@ -2015,7 +2023,7 @@ export default function ChatScreen() {
             <View style={[styles.bubble, styles.bubbleOut]}>
               {item.replyTo && (
                 <TouchableOpacity
-                  style={[styles.replyBubble, { backgroundColor: 'rgba(30,156,240,0.08)' }]}
+                  style={[styles.replyBubble, { backgroundColor: 'rgba(74,153,233,0.08)' }]}
                   onPress={() => {
                     const originalMsg = messages.find(m => m.messageId === item.replyTo!.messageId);
                     if (originalMsg) {
@@ -2445,7 +2453,11 @@ export default function ChatScreen() {
               <ScrollView horizontal={false} showsVerticalScrollIndicator={false}>
                 <View style={styles.emojiGrid}>
                   {EMOJI_LIST.map((e) => (
-                    <TouchableOpacity key={e} style={styles.emojiItem} onPress={() => handleSend(e)}>
+                    <TouchableOpacity
+                      key={e}
+                      style={styles.emojiItem}
+                      onPress={() => setInput((prev) => prev + e)}
+                    >
                       <AppText fixedColor style={styles.emojiChar}>{e}</AppText>
                     </TouchableOpacity>
                   ))}
@@ -2556,8 +2568,8 @@ export default function ChatScreen() {
                     {/* Text field + emoji */}
                     <View style={styles.inputFieldWrap}>
                       <TextInput
-                        style={[styles.inputField, { color: FG.primary }]}
-                        placeholder="Message"
+                        style={[styles.inputField, { color: FG.primary, opacity: blockedByThem ? 0.45 : 1 }]}
+                        placeholder={blockedByThem ? 'You cannot reply' : 'Message'}
                         placeholderTextColor={FG.faint}
                         value={input}
                         onChangeText={(text) => {
@@ -2566,6 +2578,7 @@ export default function ChatScreen() {
                         }}
                         multiline
                         maxLength={500}
+                        editable={!blockedByThem}
                         onFocus={() => { setShowEmoji(false); setShowAttach(false); }}
                       />
                       <TouchableOpacity style={styles.emojiBtn} onPress={() => { setShowAttach(false); setShowEmoji((e) => !e); }}>
@@ -2582,7 +2595,7 @@ export default function ChatScreen() {
 
                 {/* Mic / Send button */}
                 {input.trim() ? (
-                  <TouchableOpacity onPress={() => handleSend()} activeOpacity={0.85} style={[styles.sendBtn, isSending && { opacity: 0.5 }]} disabled={isSending}>
+                  <TouchableOpacity onPress={() => handleSend()} activeOpacity={0.85} style={[styles.sendBtn, (isSending || blockedByThem) && { opacity: 0.5 }]} disabled={isSending || blockedByThem}>
                     <LinearGradient colors={GRADIENTS.primary} style={styles.sendBtnInner}>
                       {isSending
                         ? <ActivityIndicator size="small" color="#fff" />
@@ -2622,8 +2635,8 @@ export default function ChatScreen() {
                 {/* Text field + emoji */}
                 <View style={styles.inputFieldWrap}>
                   <TextInput
-                    style={[styles.inputField, { color: FG.primary }]}
-                    placeholder="Message"
+                    style={[styles.inputField, { color: FG.primary, opacity: blockedByThem ? 0.45 : 1 }]}
+                    placeholder={blockedByThem ? 'You cannot reply' : 'Message'}
                     placeholderTextColor={FG.faint}
                     value={input}
                     onChangeText={(text) => {
@@ -2632,6 +2645,7 @@ export default function ChatScreen() {
                     }}
                     multiline
                     maxLength={500}
+                    editable={!blockedByThem}
                     onFocus={() => { setShowEmoji(false); setShowAttach(false); }}
                   />
                   <TouchableOpacity style={styles.emojiBtn} onPress={() => { setShowAttach(false); setShowEmoji((e) => !e); }}>
@@ -2648,7 +2662,7 @@ export default function ChatScreen() {
 
             {/* Mic / Send button */}
             {input.trim() ? (
-              <TouchableOpacity onPress={() => handleSend()} activeOpacity={0.85} style={[styles.sendBtn, isSending && { opacity: 0.5 }]} disabled={isSending}>
+              <TouchableOpacity onPress={() => handleSend()} activeOpacity={0.85} style={[styles.sendBtn, (isSending || blockedByThem) && { opacity: 0.5 }]} disabled={isSending || blockedByThem}>
                 <LinearGradient colors={GRADIENTS.primary} style={styles.sendBtnInner}>
                   {isSending
                     ? <ActivityIndicator size="small" color="#fff" />
@@ -2668,10 +2682,19 @@ export default function ChatScreen() {
           </View>
           )}
 
-          {/* ── Upload progress indicator ── */}
-          {(isUploading || uploadingImage) && (
+          {/* ── Upload indicator — visible toast while image is uploading ── */}
+          {uploadingImage && (
+            <View style={styles.uploadToast} pointerEvents="none">
+              <ActivityIndicator size="small" color="#fff" />
+              <AppText fixedColor style={styles.uploadToastText}>
+                {imageUploadProgress > 0 ? `Sending… ${imageUploadProgress}%` : 'Preparing…'}
+              </AppText>
+            </View>
+          )}
+          {/* ── Voice upload progress bar ── */}
+          {isUploading && (
             <View style={styles.uploadProgressBar}>
-              <View style={[styles.uploadProgressFill, { width: `${isUploading ? uploadProgress : imageUploadProgress}%` }]} />
+              <View style={[styles.uploadProgressFill, { width: `${uploadProgress}%` }]} />
             </View>
           )}
         </KeyboardAvoidingView>
@@ -2825,17 +2848,19 @@ export default function ChatScreen() {
       {cameraOpen && Platform.OS !== 'web' && (
         <Modal visible animationType="slide" onRequestClose={() => setCameraOpen(false)}>
           <View style={{ flex: 1, backgroundColor: '#000' }}>
-            <CameraView ref={cameraRef} style={{ flex: 1 }} facing="back">
-              <View style={styles.cameraControls}>
-                <TouchableOpacity onPress={() => setCameraOpen(false)} style={styles.cameraCloseBtn}>
-                  <AppIcon name="close" size={28} color="#fff" fixedColor />
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.cameraShutterBtn} onPress={takePicture}>
-                  <View style={styles.cameraShutter} />
-                </TouchableOpacity>
-                <View style={{ width: 52 }} />
-              </View>
-            </CameraView>
+            <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
+            {/* Controls rendered as a sibling over the camera — not inside CameraView.
+                Placing them inside CameraView on some expo-camera versions causes the
+                native layer to swallow touches, hiding the shutter button. */}
+            <View style={styles.cameraControls} pointerEvents="box-none">
+              <TouchableOpacity onPress={() => setCameraOpen(false)} style={styles.cameraCloseBtn}>
+                <AppIcon name="close" size={28} color="#fff" fixedColor />
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.cameraShutterBtn} onPress={takePicture}>
+                <View style={styles.cameraShutter} />
+              </TouchableOpacity>
+              <View style={{ width: 52 }} />
+            </View>
           </View>
         </Modal>
       )}
@@ -2984,7 +3009,12 @@ export default function ChatScreen() {
                   {[
                     { icon: 'call-outline' as const,        label: 'Call',    onPress: () => { setProfileModalOpen(false); handleVoiceCall(); } },
                     { icon: 'storefront-outline' as const,  label: 'Catalog', onPress: openCatalogSheet },
-                    { icon: 'share-social-outline' as const, label: 'Share',  onPress: () => {} },
+                    { icon: 'share-social-outline' as const, label: 'Share',  onPress: () => {
+                      Share.share({
+                        message: `Chat with ${displayName} on ChitChat Business`,
+                        title: displayName,
+                      }).catch(() => {});
+                    }},
                   ].map(a => (
                     <TouchableOpacity
                       key={a.label}
@@ -3585,7 +3615,7 @@ const csStyles = StyleSheet.create({
     borderRadius: RADIUS.full,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.20)',
+    borderColor: 'rgba(74,153,233,0.20)',
   },
   chipActive: { borderColor: 'transparent' },
   chipGrad: { paddingHorizontal: 16, paddingVertical: 7, borderRadius: RADIUS.full },
@@ -3627,11 +3657,11 @@ const csStyles = StyleSheet.create({
     backgroundColor: '#fff',
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.10)',
+    borderColor: 'rgba(74,153,233,0.10)',
     ...SHADOW.card,
   },
   hCardImg:            { width: H_CARD_W, height: 110 },
-  hCardImgPlaceholder: { width: H_CARD_W, height: 100, backgroundColor: 'rgba(30,156,240,0.06)', alignItems: 'center', justifyContent: 'center' },
+  hCardImgPlaceholder: { width: H_CARD_W, height: 100, backgroundColor: 'rgba(74,153,233,0.06)', alignItems: 'center', justifyContent: 'center' },
   hCardInfo: { paddingHorizontal: 8, paddingTop: 8, paddingBottom: 4, gap: 2 },
   hCardName:  { fontSize: 12, fontWeight: '700', lineHeight: 16 },
   hCardPrice: { fontSize: 13, fontWeight: '800', color: COLORS.blue },
@@ -3640,9 +3670,9 @@ const csStyles = StyleSheet.create({
   hCardStepper: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     gap: 8, marginHorizontal: 8, marginBottom: 8,
-    backgroundColor: 'rgba(30,156,240,0.08)', borderRadius: RADIUS.full, paddingVertical: 6,
+    backgroundColor: 'rgba(74,153,233,0.08)', borderRadius: RADIUS.full, paddingVertical: 6,
   },
-  hCardStepBtn: { width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(30,156,240,0.15)', alignItems: 'center', justifyContent: 'center' },
+  hCardStepBtn: { width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(74,153,233,0.15)', alignItems: 'center', justifyContent: 'center' },
   hCardStepQty: { fontSize: 13, fontWeight: '800', color: COLORS.text, minWidth: 16, textAlign: 'center' },
 
   // Bottom cart bar
@@ -3703,9 +3733,9 @@ const profileHeroStyles = StyleSheet.create({
   actionBtn: { alignItems: 'center', gap: 6 },
   actionIconWrap: {
     width: 52, height: 52, borderRadius: 26,
-    backgroundColor: 'rgba(30,156,240,0.10)',
+    backgroundColor: 'rgba(74,153,233,0.10)',
     alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: 'rgba(30,156,240,0.18)',
+    borderWidth: 1, borderColor: 'rgba(74,153,233,0.18)',
   },
   actionLabel: { fontSize: 12, fontWeight: '600' },
 
@@ -3808,12 +3838,12 @@ const pcStyles = StyleSheet.create({
     overflow: 'hidden',
     ...SHADOW.card,
     borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.10)',
+    borderColor: 'rgba(74,153,233,0.10)',
   },
   img: { width: CARD_W, height: CARD_W * 0.75, },
   imgPlaceholder: {
     width: CARD_W, height: CARD_W * 0.65,
-    backgroundColor: 'rgba(30,156,240,0.06)',
+    backgroundColor: 'rgba(74,153,233,0.06)',
     alignItems: 'center', justifyContent: 'center',
   },
   info: {
@@ -3824,7 +3854,7 @@ const pcStyles = StyleSheet.create({
   desc:  { fontSize: 11, color: COLORS.sub, lineHeight: 15, marginTop: 1 },
   footer: {
     paddingHorizontal: 10, paddingBottom: 10, paddingTop: 6,
-    borderTopWidth: 1, borderTopColor: 'rgba(30,156,240,0.07)',
+    borderTopWidth: 1, borderTopColor: 'rgba(74,153,233,0.07)',
   },
   addBtn: { borderRadius: RADIUS.full, overflow: 'hidden' },
   addBtnGrad: {
@@ -3834,12 +3864,12 @@ const pcStyles = StyleSheet.create({
   addBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
   stepper: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 10, backgroundColor: 'rgba(30,156,240,0.08)',
+    gap: 10, backgroundColor: 'rgba(74,153,233,0.08)',
     borderRadius: RADIUS.full, paddingVertical: 6,
   },
   stepBtn: {
     width: 26, height: 26, borderRadius: 13,
-    backgroundColor: 'rgba(30,156,240,0.14)',
+    backgroundColor: 'rgba(74,153,233,0.14)',
     alignItems: 'center', justifyContent: 'center',
   },
   stepQty: { fontSize: 13, fontWeight: '800', color: COLORS.text, minWidth: 18, textAlign: 'center' },
@@ -3987,7 +4017,7 @@ const cartStyles = StyleSheet.create({
   thumb: { width: 44, height: 44, borderRadius: 10 },
   thumbPlaceholder: {
     width: 44, height: 44, borderRadius: 10,
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    backgroundColor: 'rgba(74,153,233,0.08)',
     alignItems: 'center', justifyContent: 'center',
   },
   rowInfo:  { flex: 1 },
@@ -3996,12 +4026,12 @@ const cartStyles = StyleSheet.create({
 
   stepper: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    backgroundColor: 'rgba(74,153,233,0.08)',
     borderRadius: RADIUS.full, paddingHorizontal: 6, paddingVertical: 4,
   },
   stepBtn: {
     width: 26, height: 26, borderRadius: 13,
-    backgroundColor: 'rgba(30,156,240,0.12)',
+    backgroundColor: 'rgba(74,153,233,0.12)',
     alignItems: 'center', justifyContent: 'center',
   },
   stepQty: { fontSize: 14, fontWeight: '700', color: COLORS.text, minWidth: 18, textAlign: 'center' },
@@ -4109,7 +4139,7 @@ const styles = StyleSheet.create({
   bubbleOut: {
     backgroundColor: 'rgba(180,225,245,0.22)',
     borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.18)',
+    borderColor: 'rgba(74,153,233,0.18)',
     borderBottomRightRadius: 4,
     position: 'relative',
     ...SHADOW.card
@@ -4170,10 +4200,10 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(30,156,240,0.06)',
+    backgroundColor: 'rgba(74,153,233,0.06)',
     borderRadius: RADIUS.xl,
     borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.18)',
+    borderColor: 'rgba(74,153,233,0.18)',
     paddingHorizontal: 14,
     height: 42
   },
@@ -4188,7 +4218,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     paddingVertical: 8,
     backgroundColor: 'rgba(180,225,245,0.18)',
-    borderTopColor: 'rgba(30,156,240,0.18)',
+    borderTopColor: 'rgba(74,153,233,0.18)',
   },
   emojiGrid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 12, gap: 2 },
   emojiItem: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
@@ -4202,20 +4232,25 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20, paddingTop: 12,
     ...SHADOW.glow,
   },
-  attachHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(30,156,240,0.40)', alignSelf: 'center', marginBottom: 14 },
+  attachHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(74,153,233,0.40)', alignSelf: 'center', marginBottom: 14 },
   attachTitle: { fontSize: 16, fontWeight: '700', color: COLORS.text, marginBottom: 16 },
   attachGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   attachItem: {
     width: 90, paddingVertical: 14, alignItems: 'center', gap: 8,
     borderRadius: RADIUS.lg,
   },
-  attachIconWrap: { width: 48, height: 48, borderRadius: 14, backgroundColor: 'rgba(30,156,240,0.10)', alignItems: 'center', justifyContent: 'center' },
+  attachIconWrap: { width: 48, height: 48, borderRadius: 14, backgroundColor: 'rgba(74,153,233,0.10)', alignItems: 'center', justifyContent: 'center' },
   attachLabel: { fontSize: 11, fontWeight: '600', color: COLORS.sub, textAlign: 'center' },
 
   // Camera UI
   cameraControls: {
-    position: 'absolute', bottom: 40, left: 0, right: 0,
-    flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center',
+    ...StyleSheet.absoluteFill,
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'flex-end',
+    paddingBottom: 56,
+    zIndex: 10,        // sit above the native CameraView layer
+    elevation: 10,     // Android equivalent
   },
   cameraCloseBtn: { width: 52, height: 52, borderRadius: 26, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
   cameraShutterBtn: { alignItems: 'center', justifyContent: 'center' },
@@ -4230,9 +4265,9 @@ const styles = StyleSheet.create({
   permissionBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    backgroundColor: 'rgba(74,153,233,0.08)',
     borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.18)',
+    borderColor: 'rgba(74,153,233,0.18)',
     paddingHorizontal: 14,
     paddingVertical: 10,
     gap: 8,
@@ -4266,7 +4301,7 @@ const styles = StyleSheet.create({
   uploadErrorBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    backgroundColor: 'rgba(74,153,233,0.08)',
     borderWidth: 1,
     borderColor: 'rgba(239,68,68,0.25)',
     paddingHorizontal: 14,
@@ -4291,6 +4326,24 @@ const styles = StyleSheet.create({
   },
 
   // ── Upload progress ───────────────────────────────────────────────────────
+  uploadToast: {
+    position: 'absolute',
+    bottom: 80,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: RADIUS.full,
+    zIndex: 20,
+  },
+  uploadToastText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
   uploadProgressBar: {
     position: 'absolute',
     bottom: 0,
@@ -4348,7 +4401,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 4,
     borderRadius: 2,
-    backgroundColor: 'rgba(30,156,240,0.30)',
+    backgroundColor: 'rgba(74,153,233,0.30)',
     marginTop: 10,
     marginBottom: 4,
   },
@@ -4604,7 +4657,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   searchHighlightOverlay: {
-    backgroundColor: 'rgba(30,156,240,0.18)',
+    backgroundColor: 'rgba(74,153,233,0.18)',
     borderRadius: RADIUS.md,
     zIndex: 10,
   },
@@ -4621,10 +4674,10 @@ const styles = StyleSheet.create({
     fontSize: 15,
     paddingVertical: 6,
     paddingHorizontal: 8,
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    backgroundColor: 'rgba(74,153,233,0.08)',
     borderRadius: RADIUS.md,
     borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.20)',
+    borderColor: 'rgba(74,153,233,0.20)',
     color: COLORS.text,
   },
   searchMatchCount: {
@@ -4737,7 +4790,7 @@ const styles = StyleSheet.create({
 
   // ── Message Action Toolbar ────────────────────────────────────────────────
   selectedMessage: {
-    backgroundColor: 'rgba(30,156,240,0.12)',
+    backgroundColor: 'rgba(74,153,233,0.12)',
     borderRadius: RADIUS.md,
   },
   actionToolbar: {
@@ -4837,7 +4890,7 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderRadius: 26,
-    backgroundColor: 'rgba(30,156,240,0.12)',
+    backgroundColor: 'rgba(74,153,233,0.12)',
     alignItems: 'center',
     justifyContent: 'center',
   },

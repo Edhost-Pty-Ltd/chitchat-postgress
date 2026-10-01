@@ -181,7 +181,7 @@ export function ParticipantPickerSheet({
 const styles = StyleSheet.create({
   overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.45)' },
   sheet: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '82%', borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden', ...SHADOW.glow },
-  handle: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(30,156,240,0.30)', marginTop: 10, marginBottom: 4 },
+  handle: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(74,153,233,0.30)', marginTop: 10, marginBottom: 4 },
   sheetSubHeader: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, gap: 10 },
   iconPad: { padding: 4 },
   sheetTitle: { flex: 1, fontSize: 17, fontWeight: '700' },
@@ -193,7 +193,7 @@ const styles = StyleSheet.create({
   contactName: { fontSize: 14, fontWeight: '600' },
   contactPhone: { fontSize: 12, marginTop: 1 },
   chipsRow: { paddingHorizontal: 14, paddingBottom: 10, gap: 8, flexDirection: 'row' },
-  chip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(30,156,240,0.12)', borderRadius: RADIUS.full, paddingHorizontal: 8, paddingVertical: 4 },
+  chip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(74,153,233,0.12)', borderRadius: RADIUS.full, paddingHorizontal: 8, paddingVertical: 4 },
   chipText: { fontSize: 12, fontWeight: '600', maxWidth: 70 },
   centerPad: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 8 },
   emptyText: { fontSize: 15, color: COLORS.sub },

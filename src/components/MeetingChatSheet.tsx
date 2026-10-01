@@ -280,8 +280,8 @@ const styles = StyleSheet.create({
   systemRow: { alignSelf: 'stretch', marginVertical: 8, paddingHorizontal: 4 },
   systemCard: {
     borderRadius: 12, borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.30)',
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    borderColor: 'rgba(74,153,233,0.30)',
+    backgroundColor: 'rgba(74,153,233,0.08)',
     paddingHorizontal: 12, paddingVertical: 10,
   },
   systemHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },

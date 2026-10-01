@@ -281,18 +281,18 @@ const styles = StyleSheet.create({
     gap: 12,
     marginHorizontal: 16,
     marginVertical: 12,
-    backgroundColor: 'rgba(30,156,240,0.06)',
+    backgroundColor: 'rgba(74,153,233,0.06)',
     borderRadius: RADIUS.md,
     padding: 10,
     borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.12)',
+    borderColor: 'rgba(74,153,233,0.12)',
   },
   previewImg: {
     width: 44, height: 44, borderRadius: RADIUS.sm,
   },
   previewImgPlaceholder: {
     width: 44, height: 44, borderRadius: RADIUS.sm,
-    backgroundColor: 'rgba(30,156,240,0.10)',
+    backgroundColor: 'rgba(74,153,233,0.10)',
     alignItems: 'center', justifyContent: 'center',
   },
   previewName:  { fontSize: 13, fontWeight: '700', color: COLORS.text },
@@ -328,7 +328,7 @@ const styles = StyleSheet.create({
   },
   avatar: {
     width: 44, height: 44, borderRadius: 22,
-    backgroundColor: 'rgba(30,156,240,0.15)',
+    backgroundColor: 'rgba(74,153,233,0.15)',
     alignItems: 'center', justifyContent: 'center',
   },
   avatarText: { fontSize: 15, fontWeight: '700', color: COLORS.blue },
@@ -337,7 +337,7 @@ const styles = StyleSheet.create({
   rowSub:  { fontSize: 12, color: COLORS.sub, marginTop: 2 },
   sendBtn: {
     width: 34, height: 34, borderRadius: 17,
-    backgroundColor: 'rgba(30,156,240,0.10)',
+    backgroundColor: 'rgba(74,153,233,0.10)',
     alignItems: 'center', justifyContent: 'center',
   },
 

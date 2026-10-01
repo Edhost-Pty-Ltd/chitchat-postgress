@@ -92,7 +92,7 @@ export function FileMessageBubble({
   // Color tokens based on direction
   const iconColor = isOutgoing ? COLORS.blue : '#ffffff';
   const iconBgColor = isOutgoing 
-    ? 'rgba(30,156,240,0.15)' 
+    ? 'rgba(74,153,233,0.15)' 
     : 'rgba(255,255,255,0.25)';
   const fileNameColor = isOutgoing ? COLORS.text : '#ffffff';
   const metaColor = isOutgoing ? COLORS.sub : 'rgba(255,255,255,0.80)';
