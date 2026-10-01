@@ -1,5 +1,33 @@
 // ─── App-wide TypeScript Types ───────────────────────────────────────────────
 
+export type AgentStatus = 'available' | 'busy' | 'away';
+
+/** Which role a user has in the whole app (was implicit before). */
+export type UserRole = 'customer' | 'agent' | 'admin';
+
+/** The business account the doc's design centres on. */
+export interface Business {
+  businessId: string;
+  name:       string;
+  ownerId:    string;
+  agents:     string[];
+  plan:       'free' | 'pro' | 'enterprise';
+  createdAt:  Date;
+  settings: {
+    autoAssign:      boolean;
+    routingStrategy: 'round-robin' | 'least-active' | 'manual';
+  };
+}
+
+/** A note visible only to agents on a business chat. */
+export interface InternalNote {
+  noteId:     string;
+  authorId:   string;
+  authorName: string;
+  text:       string;
+  createdAt:  Date;
+}
+
 // ─── Catalog ──────────────────────────────────────────────────────────────────
 export interface CatalogCollection {
   id:        string;
@@ -184,3 +212,58 @@ export type RootStackParamList = {
     };
   };
 };
+
+// ─── Multi-Agent Team Inbox ────────────────────────────────────────────────────
+
+export type AgentRole = 'admin' | 'agent';
+
+export interface TeamAgent {
+  uid:          string;        // Firebase Auth UID of the agent
+  displayName:  string;
+  photoURL:     string | null;
+  phone:        string;
+  role:         AgentRole;
+  addedAt:      Date;
+  addedBy:      string;        // UID of admin who added them
+  isActive:     boolean;
+}
+
+export type ConversationStatus = 'open' | 'assigned' | 'resolved';
+
+/** Fields added to chats/{chatId} when the team inbox feature is active */
+export interface ConversationAssignment {
+  status:        ConversationStatus;
+  assignedTo:    string | null;   // UID of assigned agent, null = unassigned
+  assignedToName: string | null;
+  assignedAt:    Date | null;
+  resolvedAt:    Date | null;
+  resolvedBy:    string | null;
+}
+
+/** An entry in chats/{chatId}/assignmentHistory sub-collection */
+export interface AssignmentHistoryEntry {
+  id:          string;
+  action:      'assigned' | 'transferred' | 'resolved' | 'reopened' | 'taken';
+  byUid:       string;
+  byName:      string;
+  toUid:       string | null;    // null for resolved/reopened
+  toName:      string | null;
+  timestamp:   Date;
+  note?:       string;
+}
+
+/** Chat preview enriched with assignment info for inbox views */
+export interface InboxConversation {
+  chatId:       string;
+  type:         'direct' | 'group';
+  members:      string[];
+  groupName:    string | null;
+  lastMessage:  string;
+  lastSenderId: string;
+  timestamp:    Date | null;
+  unreadCount:  number;
+  // assignment fields
+  status:       ConversationStatus;
+  assignedTo:   string | null;
+  assignedToName: string | null;
+}

@@ -2,32 +2,49 @@
 //
 // Design:
 //   • Full glass-effect screen — no hero gradient bar, no orb bubble
-//   • App logo (icon.png) centred at the top, no text taglines
+//   • App logo (chitchat-logo.png) centred at the top, no text taglines
 //   • Country-code picker + local number input → 6-digit OTP
+//   • Companion-device linking: shows a 256-bit QR the signed-in device scans
 //
-// Stub behaviour (swap sendOtp / verifyOtp for your real backend):
-//   • Any phone number is accepted
-//   • Code "123456" always passes
+// QR rendering uses react-native-qrcode-svg (native SVG, no DOM, works in RN).
+// The company logo is embedded in the centre of the QR code with ECC level H
+// so the code still decodes reliably even with the logo overlay.
 //
-import { useState, useRef, useMemo } from 'react';
+// COMPANION NOTE
+//   The companion keeps its anonymous Firebase Auth session ALIVE after
+//   linking. That session is what gives the companion a Firebase Auth uid,
+//   which the rules use (via companionLinks/{anonUid}) to authorise reads
+//   and writes on the owner's behalf. Do NOT sign it out.
+//
+import React, { useState, useRef, useMemo } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, Image,
   StyleSheet, ScrollView, KeyboardAvoidingView,
-  Platform, ActivityIndicator, Modal, FlatList,
+  Platform, ActivityIndicator, Modal, FlatList, Dimensions,
+  Pressable, // Added Pressable
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
+import QRCode from 'react-native-qrcode-svg';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { useAuth as useAuthContext } from '../context/AuthContext';
 import { useAuth } from '../hooks/useAuth';
 import { COUNTRIES, DEFAULT_COUNTRY, Country, formatPhoneNumber } from '../data/countryCodes';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppBg, AppText, AppIcon, useGlass } from '../context/ThemeContext';
+import {
+  createLinkRequest,
+  pollForApproval,
+  LinkRequest,
+} from '../hooks/useLinkedDevices';
 
-// ─── Stub API helpers ─────────────────────────────────────────────────────────
-// Removed - now using Firebase Phone Authentication via useAuth hook
+// ─── QR helpers ───────────────────────────────────────────────────────────────
+const QR_SIZE = Math.min(Dimensions.get('window').width - 80, 240);
+// Logo covers ~20% of QR area. ECC level H tolerates ~30% data loss, so this
+// keeps a comfortable safety margin. Do not exceed 0.25 without bumping ECC.
+const QR_LOGO_SIZE = Math.round(QR_SIZE * 0.20);
 
 // ─── Country Picker Modal ─────────────────────────────────────────────────────
 
@@ -123,9 +140,10 @@ function CountryPicker({ visible, selected, onSelect, onClose }: CountryPickerPr
 type Step = 'phone' | 'otp';
 
 export default function SignInScreen() {
-  const { signIn: signInToContext } = useAuthContext();
+  const { signIn: signInToContext, signInAsCompanion } = useAuthContext();
   const { sendOTP, verifyOTP, error: authError } = useAuth();
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList, 'SignIn'>>();
+  const insets = useSafeAreaInsets();
 
   const { bevel } = useGlass();
 
@@ -137,6 +155,14 @@ export default function SignInScreen() {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [resendTimer, setResendTimer] = useState(0);
+
+  // ── Companion device state ────────────────────────────────────────────────
+  const [companionMode,      setCompanionMode]      = useState<'qr' | null>(null);
+  const [companionRequest,   setCompanionRequest]   = useState<LinkRequest | null>(null);
+  const [companionLinking,   setCompanionLinking]   = useState(false);
+  const [companionError,     setCompanionError]     = useState<string | null>(null);
+  const [companionApproved,  setCompanionApproved]  = useState(false);
+  const companionPollCleanup = useRef<(() => void) | null>(null);
 
   const otpInputRef = useRef<TextInput>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -191,36 +217,22 @@ export default function SignInScreen() {
     setErrorMsg('');
     setLoading(true);
     try {
-      console.log('[SignInScreen] Verifying OTP code...');
       const success = await verifyOTP(code);
-      console.log('[SignInScreen] verifyOTP result:', success);
-      
       if (success) {
-        console.log('[SignInScreen] OTP verified, signing in to context...');
-        // Update the context with phone number for session management
         try {
           await signInToContext(fullNumber);
-          console.log('[SignInScreen] Sign-in to context successful');
-
-          // No manual navigation here: AppNavigator switches to the
-          // authenticated stack reactively once isSignedIn + profileExists are
-          // resolved. Manually resetting to 'Chats' fails here because that
-          // route isn't registered while the unauthenticated stack is active.
           setLoading(false);
         } catch (contextError: any) {
-          console.error('[SignInScreen] Error signing in to context:', contextError);
           setErrorMsg(contextError.message || 'Failed to complete sign-in. Please try again.');
           setLoading(false);
         }
       } else {
-        console.log('[SignInScreen] OTP verification failed:', authError);
         setErrorMsg(authError || 'Incorrect code. Please try again.');
         setOtp('');
         otpInputRef.current?.focus();
         setLoading(false);
       }
     } catch (err: any) {
-      console.error('[SignInScreen] Exception during verification:', err);
       setErrorMsg(err.message || 'Verification failed. Please try again.');
       setLoading(false);
     }
@@ -251,6 +263,64 @@ export default function SignInScreen() {
       setLoading(false);
     }
   };
+
+  // ── Companion device handlers ─────────────────────────────────────────────
+  const openCompanionQr = async () => {
+    companionPollCleanup.current?.();
+
+    setCompanionError(null);
+    setCompanionApproved(false);
+    setCompanionLinking(false);
+    setCompanionRequest(null);
+    setCompanionMode('qr');
+
+    const req = await createLinkRequest();
+    if (!req) {
+      setCompanionError('Could not start the link request. Please check your connection and try again.');
+      return;
+    }
+    setCompanionRequest(req);
+
+        companionPollCleanup.current = pollForApproval(
+      req.requestId,
+      async ({ ownerUid, customToken }) => {
+        setCompanionLinking(true);
+        try {
+          // Sign in with the custom token the primary minted for us.
+          // After this, auth.uid IS the owner's uid — no more anon session.
+          await signInAsCompanion(ownerUid, customToken);
+          setCompanionApproved(true);
+          setTimeout(() => setCompanionMode(null), 1500);
+        } catch {
+          setCompanionError('Device was linked, but sign-in failed. Please try again.');
+          setCompanionLinking(false);
+        }
+      },
+      () => {
+        setCompanionError('QR code expired. Tap "Show QR Code" to generate a new one.');
+      },
+    );
+  };
+
+  const closeCompanionModal = () => {
+    try {
+      if (companionPollCleanup.current) {
+        companionPollCleanup.current();
+      }
+    } catch (e) {
+      console.warn('Error during poll cleanup:', e);
+    }
+    companionPollCleanup.current = null;
+    setCompanionMode(null);
+    setCompanionRequest(null);
+    setCompanionError(null);
+    setCompanionApproved(false);
+    setCompanionLinking(false);
+  };
+
+  React.useEffect(() => {
+    return () => { companionPollCleanup.current?.(); };
+  }, []);
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -418,8 +488,191 @@ export default function SignInScreen() {
             </View>
           )}
 
+          {/* ── Link as companion device ── */}
+          {step === 'phone' && (
+            <View style={styles.companionSection}>
+              <View style={styles.companionDivider}>
+                <View style={styles.companionDividerLine} />
+                <AppText style={styles.companionDividerText}>or</AppText>
+                <View style={styles.companionDividerLine} />
+              </View>
+
+              <AppText style={styles.companionTitle}>Link as Companion Device</AppText>
+              <AppText style={styles.companionSubtitle}>
+                Already signed in on another device? Show a QR code and scan it from the device that's already signed in.
+              </AppText>
+
+              {companionError && (
+                <View style={styles.companionError}>
+                  <AppIcon name="alert-circle" size={15} color={COLORS.missed} fixedColor />
+                  <AppText style={styles.companionErrorText} fixedColor>{companionError}</AppText>
+                </View>
+              )}
+
+              <View style={styles.companionButtons}>
+                {/* Show QR — new device generates and displays it */}
+                <TouchableOpacity
+                  style={[styles.companionBtn, bevel]}
+                  activeOpacity={0.8}
+                  disabled={companionLinking}
+                  onPress={openCompanionQr}
+                >
+                  <LinearGradient colors={GRADIENTS.primary} style={styles.companionBtnIcon}>
+                    <AppIcon name="qr-code-outline" size={20} color="#fff" fixedColor />
+                  </LinearGradient>
+                  <View style={{ flex: 1 }}>
+                    <AppText style={styles.companionBtnTitle}>Show QR Code</AppText>
+                    <AppText style={styles.companionBtnSub}>Scan from your signed-in device</AppText>
+                  </View>
+                  <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
         </SafeAreaView>
       </View>
+
+      {/* ── QR display modal ── */}
+      {companionMode === 'qr' && (
+        <Modal visible animationType="slide" onRequestClose={closeCompanionModal} statusBarTranslucent={true}>
+          <View style={{ flex: 1 }}>
+            <LinearGradient colors={GRADIENTS.bg} style={StyleSheet.absoluteFill} />
+            
+            {/* Using insets.top ensures the header is ALWAYS below the notch/status bar */}
+            <View style={{ flex: 1, paddingTop: insets.top }}>
+              
+              {/* Header - Fixed touch issues */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 16 }}>
+                <Pressable
+                  onPress={closeCompanionModal}
+                  hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
+                  style={({ pressed }) => [
+                    styles.modalBackBtn,
+                    pressed && { opacity: 0.7 }
+                  ]}
+                >
+                  {/* pointerEvents="none" prevents the icon from swallowing the press */}
+                  <View pointerEvents="none">
+                    <AppIcon name="chevron-back" size={24} color={COLORS.blue} fixedColor />
+                  </View>
+                </Pressable>
+                <AppText style={{ flex: 1, textAlign: 'center', fontSize: 18, fontWeight: '700', color: COLORS.text }}>
+                  Link This Device
+                </AppText>
+                <View style={{ width: 44 }} />
+              </View>
+
+              <ScrollView contentContainerStyle={{ alignItems: 'center', paddingHorizontal: 24, paddingBottom: insets.bottom + 24, paddingTop: 8 }}>
+
+                {companionApproved ? (
+                  /* ── Success state ── */
+                  <View style={{ alignItems: 'center', gap: 16, paddingTop: 60 }}>
+                    <View style={{ width: 80, height: 80, borderRadius: 40, backgroundColor: 'rgba(34,197,94,0.15)', alignItems: 'center', justifyContent: 'center' }}>
+                      <AppIcon name="checkmark-circle" size={52} color={COLORS.green} fixedColor />
+                    </View>
+                    <AppText style={{ fontSize: 22, fontWeight: '800', color: COLORS.text, textAlign: 'center' }}>
+                      Device Linked!
+                    </AppText>
+                    <AppText style={{ fontSize: 15, color: COLORS.sub, textAlign: 'center', lineHeight: 22 }}>
+                      Opening your inbox…
+                    </AppText>
+                    <ActivityIndicator size="small" color={COLORS.blue} style={{ marginTop: 8 }} />
+                  </View>
+                ) : companionLinking ? (
+                  /* ── Linking in progress ── */
+                  <View style={{ alignItems: 'center', gap: 16, paddingTop: 60 }}>
+                    <ActivityIndicator size="large" color={COLORS.blue} />
+                    <AppText style={{ fontSize: 17, fontWeight: '600', color: COLORS.text }}>Linking device…</AppText>
+                    <AppText style={{ fontSize: 13, color: COLORS.sub }}>Just a moment</AppText>
+                  </View>
+                ) : (
+                  /* ── Waiting for scan ── */
+                  <>
+                    {/* Step instructions - Improved padding, contrast, and alignment */}
+                    <View style={[bevel, { borderRadius: 16, paddingHorizontal: 20, paddingVertical: 16, marginBottom: 24, width: '100%', backgroundColor: 'rgba(255, 255, 255, 0.85)' }]}>
+                      <AppText style={{ fontSize: 14, fontWeight: '700', color: COLORS.text, marginBottom: 12 }}>
+                        On your signed-in device:
+                      </AppText>
+                      {[
+                        'Settings  →  Linked Devices & Team',
+                        'Tap the  +  button',
+                        'Choose  Scan QR Code  or  Enter Code',
+                        'Scan this QR or type the code below',
+                      ].map((step, i) => (
+                        <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+                          <View style={{ width: 22, height: 22, borderRadius: 11, backgroundColor: COLORS.blue, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                            <AppText style={{ fontSize: 12, fontWeight: '800', color: '#fff' }} fixedColor>{i+1}</AppText>
+                          </View>
+                          <AppText style={{ flex: 1, fontSize: 14, color: COLORS.text, lineHeight: 20 }}>{step}</AppText>
+                        </View>
+                      ))}
+                    </View>
+
+                    {/* QR code */}
+                    {companionRequest && (
+                      <>
+                        {/* Increased padding around QR code */}
+                        <View style={[styles.qrFrame, { marginBottom: 24 }]}>
+                          {/* NOTE: To fix the black square behind the logo, you MUST replace 
+                              chitchat-logo.png with a transparent PNG version. */}
+                          <QRCode
+                            value={`chitchat://link/${companionRequest.requestId}`}
+                            size={QR_SIZE}
+                            ecl="H"
+                            color="#000000"
+                            backgroundColor="#FFFFFF"
+                            quietZone={8}
+                            logo={require('../../assets/chitchat-logo.png')}
+                            logoSize={QR_LOGO_SIZE}
+                            logoBackgroundColor="#FFFFFF"
+                            logoBorderRadius={16} // Increased for smoother corners
+                            logoMargin={8} // Increased to give the logo more breathing room
+                          />
+                        </View>
+
+                        {/* 10-char human-typable code */}
+                        <AppText style={{ fontSize: 12, fontWeight: '700', color: COLORS.sub, letterSpacing: 1.5, marginBottom: 12 }}>
+                          OR USE THIS CODE INSTEAD
+                        </AppText>
+                        <View style={[styles.qrCodeDisplay, { marginBottom: 32 }]}>
+                          <AppText style={styles.qrCodeDisplayText}>
+                            {companionRequest.displayCode.slice(0, 5)}-{companionRequest.displayCode.slice(5, 10)}
+                          </AppText>
+                        </View>
+                      </>
+                    )}
+
+                    {/* Waiting indicator */}
+                    {companionError ? (
+                      <View style={styles.companionError}>
+                        <AppIcon name="alert-circle" size={15} color={COLORS.missed} fixedColor />
+                        <AppText style={styles.companionErrorText} fixedColor>{companionError}</AppText>
+                        <Pressable
+                          onPress={openCompanionQr}
+                          hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
+                        >
+                          <AppText pointerEvents="none" style={{ color: COLORS.blue, fontWeight: '700', fontSize: 13 }}>Refresh</AppText>
+                        </Pressable>
+                      </View>
+                    ) : (
+                      <View style={{ alignItems: 'center', gap: 8, marginTop: 8 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          <ActivityIndicator size="small" color={COLORS.blue} />
+                          <AppText style={{ color: COLORS.sub, fontSize: 14 }}>Waiting for your other device…</AppText>
+                        </View>
+                        <AppText style={{ color: COLORS.sub, fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+                          Code expires in 10 minutes
+                        </AppText>
+                      </View>
+                    )}
+                  </>
+                )}
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+      )}
 
       <CountryPicker
         visible={pickerOpen}
@@ -619,6 +872,113 @@ const styles = StyleSheet.create({
   },
   createAccountText: { fontSize: 14, color: COLORS.sub },
   createAccountLink: { fontSize: 14, color: COLORS.blue, fontWeight: '700' },
+
+  // ── Companion device section ──────────────────────────────────────────────
+  companionSection: {
+    paddingHorizontal: 20,
+    paddingBottom: 32,
+    paddingTop: 4,
+  },
+  companionDivider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 20,
+    marginTop: 4,
+  },
+  companionDividerLine: { flex: 1, height: 1, backgroundColor: COLORS.border },
+  companionDividerText: { fontSize: 12, color: COLORS.sub, fontWeight: '600' },
+  companionTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: COLORS.text,
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  companionSubtitle: {
+    fontSize: 13,
+    color: COLORS.sub,
+    textAlign: 'center',
+    lineHeight: 18,
+    marginBottom: 16,
+  },
+  companionError: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(232,67,67,0.10)',
+    borderRadius: RADIUS.sm,
+    padding: 10,
+    marginBottom: 12,
+  },
+  companionErrorText: { flex: 1, fontSize: 13, color: COLORS.missed },
+  companionButtons: { gap: 10 },
+  companionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderRadius: RADIUS.lg,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  companionBtnIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...SHADOW.button,
+  },
+  companionBtnTitle: { fontSize: 15, fontWeight: '700', color: COLORS.text },
+  companionBtnSub:   { fontSize: 12, color: COLORS.sub, marginTop: 1 },
+
+  // ── QR display modal ──────────────────────────────────────────────────────
+  modalBackBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.8)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.9)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+    zIndex: 10, // Ensure it's on top of any overlapping views
+  },
+  qrFrame: {
+    borderRadius: 20, // Slightly larger radius for a softer look
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    padding: 16, // Increased padding to give the QR code breathing room
+    ...SHADOW.card,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 4,
+  },
+  qrCodeDisplay: {
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+    borderRadius: RADIUS.md,
+    backgroundColor: 'rgba(30,156,240,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(30,156,240,0.20)',
+    // marginBottom removed here as it's added inline for specific spacing
+  },
+  qrCodeDisplayText: {
+    fontSize: 24, // Slightly larger
+    fontWeight: '800',
+    letterSpacing: 5, // More breathing room between characters
+    color: COLORS.text,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+  },
 });
 
 // ─── Picker Styles ────────────────────────────────────────────────────────────

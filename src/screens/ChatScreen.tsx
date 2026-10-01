@@ -48,6 +48,7 @@ import { ForwardModal } from '../components/ForwardModal';
 import { MessageInfoModal } from '../components/MessageInfoModal';
 import { CatalogBubble } from '../components/CatalogBubble';
 import { useAuth } from '../hooks/useAuth';
+import { useAuth as useAuthContext } from '../context/AuthContext';
 import { useMessages, FireMessage } from '../hooks/useMessages';
 import { useVoicePlayer } from '../hooks/useVoicePlayer';
 import { useVoiceRecorder, RecordingResult } from '../hooks/useVoiceRecorder';
@@ -63,6 +64,10 @@ import { useContacts, AppContact } from '../hooks/useContacts';
 import { uploadVoiceNote, UploadProgress } from '../utils/voiceNoteStorage';
 import { sendVoiceMessage, sendImageMessage, sendFileMessage } from '../hooks/useChatActions';
 import { parseSystemMessage } from '../utils/systemMessageParser';
+import { useConversationAssignment } from '../hooks/useTeamInbox';
+import { useTeamInbox } from '../context/TeamInboxContext';
+import { AssignmentSheet } from '../components/AssignmentSheet';
+import { ConversationStatusBadge } from '../components/ConversationStatusBadge';
 import { getDateLabel, groupMessagesByDate } from '../utils/dateUtils';
 import { useTypingIndicator } from '../hooks/useTypingIndicator';
 import { TypingIndicator } from '../components/TypingIndicator';
@@ -225,6 +230,7 @@ export default function ChatScreen() {
 
   // ── Auth — get current user ID ──────────────────────────────────
   const { user } = useAuth();
+  const { displayName: myDisplayName } = useAuthContext();
   const userId = user?.uid ?? null;
 
   // ── Cart ────────────────────────────────────────────────────────
@@ -416,6 +422,17 @@ export default function ChatScreen() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
   const pendingRecordingRef = useRef<RecordingResult | null>(null);
+
+  // ── Assignment / team inbox state ───────────────────────────────
+  const { ownerUid, isAdmin, agents, role: teamRole } = useTeamInbox();
+  const isTeamMember = !!ownerUid;          // any agent or owner
+  const {
+    status:          convStatus,
+    assignedTo:      convAssignedTo,
+    assignedToName:  convAssignedToName,
+    loading:         convAssignmentLoading,
+  } = useConversationAssignment(isTeamMember ? chatId : null);
+  const [assignmentSheetVisible, setAssignmentSheetVisible] = useState(false);
 
   // ── Image upload state ──────────────────────────────────────────
   const [uploadingImage, setUploadingImage] = useState(false);
@@ -2301,6 +2318,23 @@ export default function ChatScreen() {
                 <AppText style={[styles.menuItemText, { color: textColor }]}>Share Contact</AppText>
               </TouchableOpacity>
 
+              {/* ── Assignment action (team inbox members only) ── */}
+              {isTeamMember && (
+                <TouchableOpacity
+                  style={styles.menuItem}
+                  onPress={() => {
+                    setMenuOpen(false);
+                    setAssignmentSheetVisible(true);
+                  }}
+                  activeOpacity={0.75}
+                >
+                  <AppIcon name="people-outline" size={20} color={COLORS.blue} fixedColor />
+                  <AppText style={[styles.menuItemText, { color: textColor }]}>
+                    {convStatus === 'resolved' ? 'Reopen / History' : 'Assign / Resolve'}
+                  </AppText>
+                </TouchableOpacity>
+              )}
+
               <TouchableOpacity
                 style={[styles.menuItem, styles.menuItemDanger]}
                 onPress={() => {
@@ -2322,6 +2356,33 @@ export default function ChatScreen() {
             </View>
           </Modal>
 
+          {/* ── Assignment banner (team inbox) ── */}
+          {isTeamMember && !convAssignmentLoading && (
+            <TouchableOpacity
+              style={[
+                styles.assignmentBanner,
+                convStatus === 'resolved'  && styles.assignmentBannerResolved,
+                convStatus === 'assigned'  && styles.assignmentBannerAssigned,
+                convStatus === 'open'      && styles.assignmentBannerOpen,
+              ]}
+              activeOpacity={0.8}
+              onPress={() => setAssignmentSheetVisible(true)}
+            >
+              <ConversationStatusBadge
+                status={convStatus}
+                assignedToName={convAssignedToName}
+              />
+              <AppText style={styles.assignmentBannerTap} fixedColor>
+                {convStatus === 'open'
+                  ? 'Tap to assign'
+                  : convStatus === 'assigned'
+                  ? convAssignedTo === userId ? 'Your conversation' : 'Tap to transfer'
+                  : 'Tap to reopen'}
+              </AppText>
+              <AppIcon name="chevron-forward" size={14} color={COLORS.sub} />
+            </TouchableOpacity>
+          )}
+
           {/* ── Messages list ── */}
           {loading ? renderLoading() : messagesWithDates.length === 0 ? renderEmpty() : (
             <FlatList
@@ -2337,6 +2398,22 @@ export default function ChatScreen() {
                   : null
               }
               onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
+            />
+          )}
+
+          {/* ── Assignment sheet (team inbox) ── */}
+          {isTeamMember && (
+            <AssignmentSheet
+              visible={assignmentSheetVisible}
+              onClose={() => setAssignmentSheetVisible(false)}
+              chatId={chatId}
+              currentStatus={convStatus}
+              assignedTo={convAssignedTo}
+              assignedToName={convAssignedToName}
+              agents={agents}
+              actorUid={userId ?? ''}
+              actorName={myDisplayName || 'Agent'}
+              isAdmin={isAdmin}
             />
           )}
 
@@ -4950,5 +5027,22 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
     color: COLORS.blue,
+  },
+
+  // ── Assignment banner (team inbox) ──────────────────────────────────────────
+  assignmentBanner: {
+    flexDirection:     'row',
+    alignItems:        'center',
+    gap:               8,
+    paddingHorizontal: 14,
+    paddingVertical:   7,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  assignmentBannerOpen:     { backgroundColor: 'rgba(245,158,11,0.07)' },
+  assignmentBannerAssigned: { backgroundColor: 'rgba(30,156,240,0.07)' },
+  assignmentBannerResolved: { backgroundColor: 'rgba(34,197,94,0.07)'  },
+  assignmentBannerTap: {
+    flex: 1, fontSize: 12, color: COLORS.sub, fontWeight: '500',
   },
 });

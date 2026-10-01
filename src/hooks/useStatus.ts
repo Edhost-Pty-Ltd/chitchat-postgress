@@ -1,5 +1,11 @@
 // ─── Hook: useStatus ──────────────────────────────────────────────────────────
 // Manages status updates with 24-hour expiry, view tracking, and real-time sync.
+//
+// COMPANION NOTE
+//   `ownerUid` is the account that owns these statuses. A companion posts and
+//   marks-as-viewed as the owner. Deletion is intentionally blocked at the
+//   rules layer for companions — the hook still calls delete and the rules
+//   reject it, which surfaces as an error the caller can surface to the UI.
 
 import { useState, useEffect, useCallback } from 'react';
 import firestore from '@react-native-firebase/firestore';
@@ -33,14 +39,14 @@ function isExpired(expiresAt: Date): boolean {
   return new Date() > expiresAt;
 }
 
-export function useStatus(currentUserId: string | null) {
+export function useStatus(ownerUid: string | null) {
   const [myStatuses,      setMyStatuses]      = useState<FireStatus[]>([]);
   const [contactStatuses, setContactStatuses] = useState<StatusGroup[]>([]);
   const [loading,         setLoading]         = useState(true);
   const [error,           setError]           = useState<string | null>(null);
 
   useEffect(() => {
-    if (!currentUserId) { setLoading(false); return; }
+    if (!ownerUid) { setLoading(false); return; }
 
     const fsDb = db as ReturnType<typeof firestore>;
 
@@ -77,8 +83,8 @@ export function useStatus(currentUserId: string | null) {
               if (!isExpired(status.expiresAt)) allStatuses.push(status);
             });
 
-            const mine   = allStatuses.filter((s) => s.userId && s.userId === currentUserId);
-            const others = allStatuses.filter((s) => s.userId && s.userId !== currentUserId);
+            const mine   = allStatuses.filter((s) => s.userId && s.userId === ownerUid);
+            const others = allStatuses.filter((s) => s.userId && s.userId !== ownerUid);
 
             setMyStatuses(mine);
 
@@ -93,7 +99,7 @@ export function useStatus(currentUserId: string | null) {
               }
               const group = grouped.get(status.userId)!;
               group.statuses.push(status);
-              if (!status.viewedBy.includes(currentUserId)) group.hasUnviewed = true;
+              if (!status.viewedBy.includes(ownerUid)) group.hasUnviewed = true;
               if (status.createdAt > group.latestTimestamp) group.latestTimestamp = status.createdAt;
             }
 
@@ -116,7 +122,7 @@ export function useStatus(currentUserId: string | null) {
       );
 
     return () => unsubscribe();
-  }, [currentUserId]);
+  }, [ownerUid]);
 
   const createStatus = useCallback(
     async (
@@ -125,14 +131,14 @@ export function useStatus(currentUserId: string | null) {
       caption: string | null, backgroundColor: string | null, textColor: string | null,
       userPhone: string | null = null, durationMs?: number,
     ): Promise<string> => {
-      if (!currentUserId) throw new Error('User not authenticated');
+      if (!ownerUid) throw new Error('User not authenticated');
 
       let mediaUrl: string | null = null;
 
       if (mediaUri && mediaType !== 'text') {
         const ext      = getFileExtension(mediaUri) || (mediaType === 'video' ? 'mp4' : 'jpg');
-        const fileName = `status_${currentUserId}_${Date.now()}.${ext}`;
-        mediaUrl = await uploadFile(mediaUri, 'status', { userId: currentUserId, fileName });
+        const fileName = `status_${ownerUid}_${Date.now()}.${ext}`;
+        mediaUrl = await uploadFile(mediaUri, 'status', { userId: ownerUid, fileName });
       }
 
       let finalDuration = durationMs;
@@ -147,7 +153,7 @@ export function useStatus(currentUserId: string | null) {
       const fsDb = db as ReturnType<typeof firestore>;
 
       const statusRef = await fsDb.collection('statuses').add({
-        userId: currentUserId, displayName, userPhone, photoURL,
+        userId: ownerUid, displayName, userPhone, photoURL,
         mediaUrl, mediaType, thumbnailUrl: null, durationMs: finalDuration,
         caption, backgroundColor, textColor,
         createdAt: firestore.Timestamp.fromDate(now),
@@ -157,22 +163,22 @@ export function useStatus(currentUserId: string | null) {
 
       return statusRef.id;
     },
-    [currentUserId],
+    [ownerUid],
   );
 
   const markAsViewed = useCallback(
     async (statusId: string) => {
-      if (!currentUserId) return;
+      if (!ownerUid) return;
       try {
         const fsDb = db as ReturnType<typeof firestore>;
         await fsDb.collection('statuses').doc(statusId).update({
-          viewedBy: firestore.FieldValue.arrayUnion(currentUserId),
+          viewedBy: firestore.FieldValue.arrayUnion(ownerUid),
         });
       } catch (err) {
         console.error('[useStatus] Mark viewed error:', err);
       }
     },
-    [currentUserId],
+    [ownerUid],
   );
 
   const deleteStatus = useCallback(async (statusId: string, mediaUrl: string | null) => {

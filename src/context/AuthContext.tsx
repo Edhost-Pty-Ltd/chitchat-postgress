@@ -1,20 +1,36 @@
 // ─── Auth Context ─────────────────────────────────────────────────────────────
 //
-// Mobile  — session persisted indefinitely via AsyncStorage.
-// Web     — session expires after WEB_SESSION_TIMEOUT_MS ms of inactivity.
+// Two session kinds:
+//   • Primary   — signed in with phone OTP. auth.uid == ownerUid. No companion claim.
+//   • Companion — signed in with a custom token (ownerUid + { companion: true }).
+//                 auth.uid == ownerUid. Custom claim marks this as a companion.
+//
+// Because the companion's auth.uid IS the owner's uid, every Firestore rule
+// that checks `request.auth.uid` works on both devices. The companion claim
+// is what blocks Account-tab writes and delete actions.
 //
 import React, {
   createContext, useContext, useEffect, useState, useCallback, useRef, useMemo,
 } from 'react';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getAuth, onAuthStateChanged, signOut as fbSignOut } from '@react-native-firebase/auth';
+import {
+  getAuth, onAuthStateChanged, signOut as fbSignOut,
+  signInWithCustomToken,
+} from '@react-native-firebase/auth';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { startStatusCleanupService, stopStatusCleanupService } from '../services/statusCleanupService';
 import { writePresence } from '../hooks/usePresence';
-import { FirebaseAuthTypes } from '@react-native-firebase/auth'; // Add this import at the top
-const WEB_SESSION_TIMEOUT_MS = 4 * 60 * 60 * 1000; // 4 hours
+import { FirebaseAuthTypes } from '@react-native-firebase/auth';
+import {
+  DEVICE_OWNER_KEY,
+  registerCurrentDevice,
+  verifyCompanionStillLinked,
+  useCompanionLinkGuard,
+} from '../hooks/useLinkedDevices';
+
+const WEB_SESSION_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 
 const KEYS = {
   phone:       'auth_phone',
@@ -23,7 +39,7 @@ const KEYS = {
   displayName: 'auth_display_name',
   avatarUri:   'auth_avatar_uri',
 } as const;
- 
+
 interface AuthContextValue {
   isSignedIn:   boolean;
   phone:        string;
@@ -35,9 +51,12 @@ interface AuthContextValue {
   signOut:      () => Promise<void>;
   refreshActivity: () => void;
   loading:      boolean;
-   
-  user:         FirebaseAuthTypes.User | null; 
-  userId:       string | null;
+  user:         FirebaseAuthTypes.User | null;
+  authUid:      string | null;
+  ownerUid:     string | null;
+  userId:       string | null;   // alias of ownerUid for existing screens
+  isCompanion:  boolean;
+  signInAsCompanion: (ownerUid: string, customToken: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue>({
@@ -51,8 +70,12 @@ const AuthContext = createContext<AuthContextValue>({
   signOut: async () => {},
   refreshActivity: () => {},
   loading: true,
-  user:null,
-  userId:'' 
+  user: null,
+  authUid: null,
+  ownerUid: null,
+  userId: null,
+  isCompanion: false,
+  signInAsCompanion: async () => {},
 });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -62,12 +85,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [avatarUri,     setAvatarUriState]    = useState<string | null>(null);
   const [loading,       setLoading]           = useState(true);
   const [user,          setUser]              = useState<FirebaseAuthTypes.User | null>(null);
+  const [isCompanion,   setIsCompanion]       = useState(false);
+  const [companionOwnerUid, setCompanionOwnerUidState] = useState<string | null>(null);
   const webTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ─── COMPANION AUTO-LOGOUT GUARD ─────────────────────────────────────────
+  // Watches Firestore in the background and instantly signs out the
+  // companion device if the primary phone removes it from linked devices.
+  useCompanionLinkGuard(isCompanion, companionOwnerUid);
+  // ─────────────────────────────────────────────────────────────────────────
 
   const clearWebTimer = () => {
     if (webTimerRef.current) clearTimeout(webTimerRef.current);
   };
-
 
   const scheduleWebExpiry = useCallback((remainingMs: number) => {
     if (Platform.OS !== 'web') return;
@@ -75,7 +105,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     webTimerRef.current = setTimeout(async () => { await doSignOut(); }, remainingMs);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const isSigningOutRef = useRef(false); 
+  const isSigningOutRef = useRef(false);
 
   const doSignOut = async () => {
     if (isSigningOutRef.current) return;
@@ -83,22 +113,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     clearWebTimer();
 
-    // Clear persisted session first — prevents the onAuthStateChanged listener
-    // from triggering a recursive doSignOut call when fbSignOut fires.
     await AsyncStorage.multiRemove([
       KEYS.phone, KEYS.signedIn, KEYS.lastActive, KEYS.displayName, KEYS.avatarUri,
+      DEVICE_OWNER_KEY,
     ]);
 
-    // Update React state before fbSignOut so unmounting components see a clean slate
     setPhone('');
     setDisplayNameState('');
     setAvatarUriState(null);
     setIsSignedIn(false);
     setUser(null);
+    setIsCompanion(false);
+    setCompanionOwnerUidState(null);
 
     try {
       const currentUser = getAuth().currentUser;
-      if (currentUser) await writePresence(currentUser.uid, false);
+      if (currentUser && currentUser.uid) {
+        await writePresence(currentUser.uid, false);
+      }
     } catch {}
 
     stopStatusCleanupService();
@@ -116,18 +148,49 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     (async () => {
       try {
-        const [signedIn, storedPhone, lastActiveStr, storedName, storedAvatar] = await Promise.all([
-          AsyncStorage.getItem(KEYS.signedIn),
-          AsyncStorage.getItem(KEYS.phone),
-          AsyncStorage.getItem(KEYS.lastActive),
-          AsyncStorage.getItem(KEYS.displayName),
-          AsyncStorage.getItem(KEYS.avatarUri),
-        ]);
+        const [signedIn, storedPhone, lastActiveStr, storedName, storedAvatar, companionOwnerUid] =
+          await Promise.all([
+            AsyncStorage.getItem(KEYS.signedIn),
+            AsyncStorage.getItem(KEYS.phone),
+            AsyncStorage.getItem(KEYS.lastActive),
+            AsyncStorage.getItem(KEYS.displayName),
+            AsyncStorage.getItem(KEYS.avatarUri),
+            AsyncStorage.getItem(DEVICE_OWNER_KEY),
+          ]);
 
         if (storedName)   setDisplayNameState(storedName);
         if (storedAvatar) setAvatarUriState(storedAvatar);
 
-        if (signedIn === 'true' && storedPhone) {
+        if (companionOwnerUid) {
+          // ── Companion device: auth.uid should already be the ownerUid (we
+          // signed in with a custom token last time). Verify the link is
+          // still valid — if the primary removed this device, sign out.
+          const stillLinked = await verifyCompanionStillLinked(companionOwnerUid);
+          if (!stillLinked) {
+            console.warn('[AuthContext] Companion was revoked — signing out.');
+            await doSignOut();
+          } else {
+            let resolvedPhone = storedPhone || '';
+            try {
+              const fsDb = db as ReturnType<typeof firestore>;
+              const snap = await fsDb.collection('users').doc(companionOwnerUid).get();
+              if (snap.exists()) {
+                const data = snap.data()!;
+                const name  = data.displayName || '';
+                const photo = data.photoURL    || null;
+                const realP = data.phone       || '';
+                if (name)  setDisplayNameState(name);
+                if (photo) setAvatarUriState(photo);
+                if (realP) resolvedPhone = realP;
+              }
+            } catch {}
+            setPhone(resolvedPhone);
+            setCompanionOwnerUidState(companionOwnerUid);
+            setIsSignedIn(true);
+            setIsCompanion(true);
+          }
+        } else if (signedIn === 'true' && storedPhone) {
+          // Primary path
           if (Platform.OS === 'web') {
             const lastActive = lastActiveStr ? parseInt(lastActiveStr, 10) : 0;
             const elapsed    = Date.now() - lastActive;
@@ -137,10 +200,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               setPhone(storedPhone);
               setIsSignedIn(true);
               scheduleWebExpiry(WEB_SESSION_TIMEOUT_MS - elapsed);
+              const cu = getAuth().currentUser;
+              if (cu) registerCurrentDevice(cu.uid).catch(() => {});
             }
           } else {
             setPhone(storedPhone);
             setIsSignedIn(true);
+            const cu = getAuth().currentUser;
+            if (cu) registerCurrentDevice(cu.uid).catch(() => {});
           }
         }
       } finally {
@@ -152,21 +219,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(firebaseUser);
       try {
         if (!firebaseUser) {
-          const signedIn = await AsyncStorage.getItem(KEYS.signedIn);
-          if (signedIn === 'true') await doSignOut();
+          const [signedIn, companionOwner] = await Promise.all([
+            AsyncStorage.getItem(KEYS.signedIn),
+            AsyncStorage.getItem(DEVICE_OWNER_KEY),
+          ]);
+          if (signedIn === 'true' && !companionOwner) await doSignOut();
         }
-        // Signed-in case is handled by the explicit signIn() call
       } catch {}
     });
 
     if (Platform.OS === 'web') {
       const handleVisibilityChange = async () => {
         if (document.visibilityState !== 'visible') return;
-        const [signedIn, lastActiveStr] = await Promise.all([
+        const [signedIn, lastActiveStr, companionOwner] = await Promise.all([
           AsyncStorage.getItem(KEYS.signedIn),
           AsyncStorage.getItem(KEYS.lastActive),
+          AsyncStorage.getItem(DEVICE_OWNER_KEY),
         ]);
-        if (signedIn === 'true' && lastActiveStr) {
+        if (signedIn === 'true' && lastActiveStr && !companionOwner) {
           const elapsed = Date.now() - parseInt(lastActiveStr, 10);
           if (elapsed >= WEB_SESSION_TIMEOUT_MS) await doSignOut();
           else scheduleWebExpiry(WEB_SESSION_TIMEOUT_MS - elapsed);
@@ -186,17 +256,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signIn = useCallback(async (phoneNumber: string) => {
     const now = Date.now().toString();
 
-    // Persist session immediately — navigator can respond right away
     await AsyncStorage.multiSet([
       [KEYS.phone,      phoneNumber],
       [KEYS.signedIn,   'true'],
       [KEYS.lastActive, now],
     ]);
 
+    await AsyncStorage.removeItem(DEVICE_OWNER_KEY);
+
     setPhone(phoneNumber);
     setIsSignedIn(true);
+    setIsCompanion(false);
+    setCompanionOwnerUidState(null);
 
-    // Fire-and-forget: fetch displayName/avatar in background — does NOT block navigation
     const currentUser = getAuth().currentUser;
     if (currentUser) {
       const fsDb = db as ReturnType<typeof firestore>;
@@ -209,9 +281,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (photo) { setAvatarUriState(photo);   AsyncStorage.setItem(KEYS.avatarUri, photo); }
       }).catch(() => {});
 
-      // Mark online and start cleanup — non-blocking
       writePresence(currentUser.uid, true).catch(() => {});
       startStatusCleanupService();
+      registerCurrentDevice(currentUser.uid).catch(() => {});
     }
 
     if (Platform.OS === 'web') scheduleWebExpiry(WEB_SESSION_TIMEOUT_MS);
@@ -227,22 +299,78 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await AsyncStorage.setItem(KEYS.avatarUri, uri);
   }, []);
 
+  // ── signInAsCompanion ─────────────────────────────────────────────────────
+  // Signs this device in with a Firebase Custom Token that carries the
+  // owner's uid and the { companion: true } claim. After this, auth.uid is
+  // the owner's uid and rules that check request.auth.uid pass automatically.
+  const signInAsCompanion = useCallback(async (ownerUid: string, customToken: string) => {
+    // 1. Sign in with the custom token
+    try {
+      await signInWithCustomToken(getAuth(), customToken);
+    } catch (err: any) {
+      console.error('[AuthContext] signInWithCustomToken failed:', err);
+      throw err;
+    }
+
+    // 2. Fetch the owner's profile for display
+    let resolvedPhone = '';
+    try {
+      const fsDb = db as ReturnType<typeof firestore>;
+      const snap = await fsDb.collection('users').doc(ownerUid).get();
+      if (snap.exists()) {
+        const data = snap.data()!;
+        const name  = data.displayName || '';
+        const photo = data.photoURL    || null;
+        const realP = data.phone       || '';
+        if (name)  { setDisplayNameState(name);  await AsyncStorage.setItem(KEYS.displayName, name); }
+        if (photo) { setAvatarUriState(photo);   await AsyncStorage.setItem(KEYS.avatarUri, photo); }
+        if (realP) resolvedPhone = realP;
+      }
+    } catch {}
+
+    // 3. Persist companion marker
+    await AsyncStorage.multiSet([
+      [KEYS.phone,       resolvedPhone],
+      [KEYS.signedIn,    'true'],
+      [KEYS.lastActive,  Date.now().toString()],
+      [DEVICE_OWNER_KEY, ownerUid],
+    ]);
+
+    setPhone(resolvedPhone);
+    setCompanionOwnerUidState(ownerUid);
+    setIsSignedIn(true);
+    setIsCompanion(true);
+
+    if (Platform.OS === 'web') scheduleWebExpiry(WEB_SESSION_TIMEOUT_MS);
+  }, [scheduleWebExpiry]);
+
   const signOut = useCallback(async () => { await doSignOut(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const refreshActivity = useCallback(() => {
-    if (Platform.OS !== 'web' || !isSignedIn) return;
+    if (Platform.OS !== 'web' || !isSignedIn || isCompanion) return;
     AsyncStorage.setItem(KEYS.lastActive, Date.now().toString());
     scheduleWebExpiry(WEB_SESSION_TIMEOUT_MS);
-  }, [isSignedIn, scheduleWebExpiry]);
+  }, [isSignedIn, isCompanion, scheduleWebExpiry]);
 
-  // ── Memoized context value — only re-creates when a meaningful value changes
+  // On both primary and companion, auth.uid === ownerUid now.
+  const authUid  = user?.uid ?? null;
+  const ownerUid = isCompanion ? companionOwnerUid : (user?.uid ?? null);
+
   const value = useMemo<AuthContextValue>(() => ({
     isSignedIn, phone, displayName, setDisplayName,
     avatarUri, setAvatarUri,
     signIn, signOut, refreshActivity, loading,
     user,
-    userId: user?.uid ?? null,
-  }), [isSignedIn, phone, displayName, avatarUri, loading, signIn, signOut, setDisplayName, setAvatarUri, refreshActivity, user]);
+    authUid,
+    ownerUid,
+    userId: ownerUid,
+    isCompanion,
+    signInAsCompanion,
+  }), [
+    isSignedIn, phone, displayName, avatarUri, loading,
+    signIn, signOut, setDisplayName, setAvatarUri, refreshActivity,
+    user, authUid, ownerUid, isCompanion, signInAsCompanion,
+  ]);
 
   return (
     <AuthContext.Provider value={value}>
@@ -252,6 +380,5 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 }
 
 export function useAuth() {
-
   return useContext(AuthContext);
 }

@@ -1,4 +1,15 @@
 // ─── Screen: Profile ─────────────────────────────────────────────────────────
+//
+// COMPANION NOTE
+//   This screen reads and writes users/{ownerUid}. On the primary, ownerUid
+//   is the caller's own uid. On a companion it is the OWNER's real uid, so
+//   the same document loads and displays on both devices.
+//
+//   Every write is guarded: on a companion, edit gestures are ignored and
+//   the UI shows a "Read-only on this device" banner instead. This matches
+//   the rules layer, which requires request.auth.uid == userId for
+//   users/{uid} updates — companions cannot satisfy that.
+//
 import React, { useRef, useState, useEffect } from 'react';
 import {
   View, TouchableOpacity, StyleSheet, ScrollView,
@@ -10,11 +21,10 @@ import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import firestore from '@react-native-firebase/firestore';
-import { getAuth } from '@react-native-firebase/auth';
 import { db } from '../config/firebase';
 import { uploadFile, generateFileName } from '../config/storage';
 import { useAuth } from '../context/AuthContext';
-import { AppBg, AppText, AppIcon, useForeground, useTypography } from '../context/ThemeContext';
+import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { CatalogItem, CatalogCollection } from '../types';
@@ -22,9 +32,22 @@ import { CatalogShareSheet } from '../components/CatalogShareSheet';
 
 export default function ProfileScreen() {
   const navigation = useNavigation();
-  const { phone, displayName, setDisplayName, avatarUri, setAvatarUri } = useAuth();
+
+  // ownerUid === the account whose profile we're viewing.
+  // isCompanion gates every write.
+  const {
+    phone,
+    displayName,
+    setDisplayName,
+    avatarUri,
+    setAvatarUri,
+    ownerUid,
+    isCompanion,
+  } = useAuth();
+
   const { FG }  = useForeground();
   const { fontFamily, textColor } = useTypography();
+  const { bevel } = useGlass();
   const insets = useSafeAreaInsets();
 
   const [editingName, setEditingName] = useState(false);
@@ -47,22 +70,20 @@ export default function ProfileScreen() {
 
   interface DaySchedule { open: string; close: string; }
 
-  // Default to completely closed until the user sets their own schedule
   const defaultSchedule: Record<string, DaySchedule> = {
-    Monday: { open: 'Closed', close: 'Closed' },
-    Tuesday: { open: 'Closed', close: 'Closed' },
+    Monday:    { open: 'Closed', close: 'Closed' },
+    Tuesday:   { open: 'Closed', close: 'Closed' },
     Wednesday: { open: 'Closed', close: 'Closed' },
-    Thursday: { open: 'Closed', close: 'Closed' },
-    Friday: { open: 'Closed', close: 'Closed' },
-    Saturday: { open: 'Closed', close: 'Closed' },
-    Sunday: { open: 'Closed', close: 'Closed' },
+    Thursday:  { open: 'Closed', close: 'Closed' },
+    Friday:    { open: 'Closed', close: 'Closed' },
+    Saturday:  { open: 'Closed', close: 'Closed' },
+    Sunday:    { open: 'Closed', close: 'Closed' },
   };
 
   const [workSchedule, setWorkSchedule] = useState<Record<string, DaySchedule>>(defaultSchedule);
   const [hoursModalOpen, setHoursModalOpen] = useState(false);
   const [pickerTarget, setPickerTarget] = useState<{ day: string; field: 'open' | 'close' } | null>(null);
   const [pickerVisible, setPickerVisible] = useState(false);
-  // Single Date object drives the native drum-roll picker
   const [pickerDate, setPickerDate] = useState<Date>(() => {
     const d = new Date();
     d.setHours(9, 0, 0, 0);
@@ -78,37 +99,41 @@ export default function ProfileScreen() {
   const [newItemImage, setNewItemImage] = useState<string | null>(null);
   const [uploadingCatalogImage, setUploadingCatalogImage] = useState(false);
   const [newItemCollectionId, setNewItemCollectionId] = useState<string | null>(null);
-  // Share sheet state — which item is pending share
   const [shareItem, setShareItem] = useState<CatalogItem | null>(null);
 
   // Collections
   const [collections, setCollections] = useState<CatalogCollection[]>([]);
-  // Multi-step collection creator:
-  //   null        → closed
-  //   'pick'      → step 1: select products
-  //   'name'      → step 2: name the collection
   const [collectionStep, setCollectionStep] = useState<null | 'pick' | 'name'>(null);
   const [newColName, setNewColName] = useState('');
   const [newColEmoji, setNewColEmoji] = useState('');
-  const [newColItems, setNewColItems] = useState<string[]>([]); // selected item ids
+  const [newColItems, setNewColItems] = useState<string[]>([]);
   const [savingCollection, setSavingCollection] = useState(false);
-  // which collection is expanded in the catalog list (null = all visible)
   const [expandedCollection, setExpandedCollection] = useState<string | null>(null);
-  // collection picker inside add-item modal
   const [colPickerOpen, setColPickerOpen] = useState(false);
 
   const shownName = displayName || 'Demo Business';
 
+  // ── Guard helper — every mutation goes through this on companion ─────────
+  const guardEdit = (): boolean => {
+    if (isCompanion) {
+      Alert.alert(
+        'Managed on your primary device',
+        'Business profile changes are not available on companion devices. Open ChitChat on the phone you signed in with to make changes.',
+      );
+      return false;
+    }
+    return true;
+  };
+
   // ── Load business fields from Firestore ─────────────────────────────────────
+  // Reads users/{ownerUid} — on primary this is the caller's own uid; on
+  // companion this is the owner's real uid, so the same doc loads.
   useEffect(() => {
+    if (!ownerUid) return;
     const loadProfile = async () => {
       try {
-        const authInstance = getAuth();
-        const currentUser = authInstance.currentUser;
-        if (!currentUser) return;
-
         const fsDb = db as ReturnType<typeof firestore>;
-        const userSnap = await fsDb.collection('users').doc(currentUser.uid).get();
+        const userSnap = await fsDb.collection('users').doc(ownerUid).get();
         if (userSnap.exists()) {
           const data = userSnap.data()!;
           setEmail(data.email || '');
@@ -124,55 +149,52 @@ export default function ProfileScreen() {
       }
     };
     loadProfile();
-  }, []);
+  }, [ownerUid]);
 
   // ── Save name ─────────────────────────────────────────────────────────────
   const saveName = async () => {
+    if (!guardEdit()) { setEditingName(false); return; }
     const trimmed = draftName.trim();
     if (!trimmed) {
       setEditingName(false);
       return;
     }
+    if (!ownerUid) return;
 
     try {
       await setDisplayName(trimmed);
 
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ displayName: trimmed });
-      }
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('users').doc(ownerUid).update({ displayName: trimmed });
     } catch (error) {
       console.error('[ProfileScreen] Error saving displayName:', error);
     }
-
     setEditingName(false);
   };
 
   // ── Save a business field ──────────────────────────────────────────────────
   const saveField = async (field: string, value: string) => {
+    if (!guardEdit()) { setEditingField(null); return; }
+    if (!ownerUid) return;
     try {
       if (field === 'email') setEmail(value);
       else if (field === 'website') setWebsite(value);
       else if (field === 'auto_responder_message') setauto_responder_message(value);
 
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ [field]: value });
-      }
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('users').doc(ownerUid).update({ [field]: value });
     } catch (error) {
       console.warn('[ProfileScreen] Error saving field:', error);
     }
     setEditingField(null);
   };
 
-  // ── Auto Responder toggle (only starts a pending edit when turning ON) ─────
+  // ── Auto Responder toggle ─────────────────────────────────────────────────
   const handleAutoResponderToggle = async (val: boolean) => {
+    if (!guardEdit()) return;
+    if (!ownerUid) return;
+
     if (val) {
-      // Begin pending edit. Do NOT persist yet — user must save with a message.
       setDraftAutoMessage(
         auto_responder_message ||
         'Thanks for your message! We are currently closed. We will get back to you as soon as we open.'
@@ -181,23 +203,16 @@ export default function ProfileScreen() {
       return;
     }
 
-    // Turning OFF
     if (autoResponderPending) {
-      // Cancel pending edit — nothing to persist.
       setAutoResponderPending(false);
       setDraftAutoMessage('');
       return;
     }
 
-    // Was actually enabled → persist OFF.
     setAutoResponderEnabled(false);
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ autoResponderEnabled: false });
-      }
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('users').doc(ownerUid).update({ autoResponderEnabled: false });
     } catch (error) {
       console.warn('[ProfileScreen] Error saving autoResponderEnabled:', error);
     }
@@ -205,6 +220,8 @@ export default function ProfileScreen() {
 
   // ── Save Auto Responder (message + enabled flag together) ─────────────────
   const saveAutoResponder = async () => {
+    if (!guardEdit()) return;
+    if (!ownerUid) return;
     const msg = draftAutoMessage.trim();
     if (!msg) {
       Alert.alert(
@@ -214,21 +231,16 @@ export default function ProfileScreen() {
       return;
     }
 
-    // Optimistic local state
     setauto_responder_message(msg);
     setAutoResponderEnabled(true);
     setAutoResponderPending(false);
 
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({
-          autoResponderEnabled: true,
-          auto_responder_message: msg,
-        });
-      }
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('users').doc(ownerUid).update({
+        autoResponderEnabled: true,
+        auto_responder_message: msg,
+      });
     } catch (error) {
       console.warn('[ProfileScreen] Error saving auto responder:', error);
     }
@@ -242,19 +254,16 @@ export default function ProfileScreen() {
   // ── Save work schedule ─────────────────────────────────────────────────────
   const saveWorkSchedule = async (updated: Record<string, DaySchedule>) => {
     setWorkSchedule(updated);
+    if (!guardEdit()) return;
+    if (!ownerUid) return;
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ workSchedule: updated });
-      }
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('users').doc(ownerUid).update({ workSchedule: updated });
     } catch (err) {
       console.warn('[ProfileScreen] Error saving work schedule:', err);
     }
   };
 
-  // Convert a Date to a readable "H:MM AM/PM" string
   const formatPickerDate = (date: Date): string => {
     const h = date.getHours();
     const m = date.getMinutes();
@@ -278,9 +287,9 @@ export default function ProfileScreen() {
   };
 
   const openTimePicker = (day: string, field: 'open' | 'close') => {
+    if (!guardEdit()) return;
     setPickerTarget({ day, field });
 
-    // Pre-seed the picker with the currently saved time for this slot
     const current = workSchedule[day]?.[field];
     const seed = new Date();
     if (current && current !== 'Closed') {
@@ -301,7 +310,6 @@ export default function ProfileScreen() {
     setPickerVisible(true);
   };
 
-  // Format schedule summary for display
   const getScheduleSummary = (): string => {
     const openDays = DAYS.filter(d => workSchedule[d] && workSchedule[d].open !== 'Closed');
     if (openDays.length === 0) return 'Not set (All days closed)';
@@ -312,6 +320,7 @@ export default function ProfileScreen() {
   };
 
   const startEditField = (field: string, currentValue: string) => {
+    if (!guardEdit()) return;
     setEditingField(field);
     setDraftValue(currentValue);
     setTimeout(() => fieldInputRef.current?.focus(), 50);
@@ -319,6 +328,7 @@ export default function ProfileScreen() {
 
   // ── Catalog management ─────────────────────────────────────────────────────
   const pickItemImage = async () => {
+    if (!guardEdit()) return;
     if (Platform.OS !== 'web') {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
@@ -338,28 +348,26 @@ export default function ProfileScreen() {
   };
 
   const addCatalogItem = async () => {
+    if (!guardEdit()) return;
+    if (!ownerUid) return;
     if (!newItemName.trim()) {
       Alert.alert('Required', 'Please enter a product/service name.');
       return;
     }
 
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-
       // ── Upload image to Firebase Storage if one was picked ──────────────
       let finalImageUri: string | null = newItemImage;
-      if (newItemImage && currentUser) {
+      if (newItemImage) {
         setUploadingCatalogImage(true);
         try {
           const fileName = generateFileName('jpg');
           finalImageUri = await uploadFile(newItemImage, 'avatar', {
-            userId: currentUser.uid,
+            userId: ownerUid,
             fileName: `catalog_${fileName}`,
           });
         } catch (uploadErr) {
           console.warn('[ProfileScreen] Catalog image upload failed, saving local URI:', uploadErr);
-          // Fall back to local URI so the item is still saved
           finalImageUri = newItemImage;
         } finally {
           setUploadingCatalogImage(false);
@@ -384,11 +392,8 @@ export default function ProfileScreen() {
       setNewItemImage(null);
       setNewItemCollectionId(null);
 
-      // Save to Firestore
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ catalog: updated });
-      }
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('users').doc(ownerUid).update({ catalog: updated });
     } catch (err) {
       console.warn('[ProfileScreen] Error saving catalog item:', err);
       setUploadingCatalogImage(false);
@@ -396,52 +401,33 @@ export default function ProfileScreen() {
   };
 
   const removeCatalogItem = async (id: string) => {
+    if (!guardEdit()) return;
+    if (!ownerUid) return;
     const updated = catalog.filter(item => item.id !== id);
     setCatalog(updated);
 
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ catalog: updated });
-      }
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('users').doc(ownerUid).update({ catalog: updated });
     } catch (err) {
       console.warn('[ProfileScreen] Error removing catalog item:', err);
     }
   };
 
   // ── Collection management ──────────────────────────────────────────────────
-  const saveCollections = async (updated: CatalogCollection[]) => {
-    setCollections(updated);
-    try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ collections: updated });
-      }
-    } catch (err) {
-      console.warn('[ProfileScreen] Error saving collections:', err);
-    }
-  };
-
   const addCollection = async () => {
+    if (!guardEdit()) return;
+    if (!ownerUid) return;
     if (!newColName.trim()) return;
     setSavingCollection(true);
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-
       const newCol: CatalogCollection = {
         id:        Date.now().toString(),
         name:      newColName.trim(),
-        emoji:     newColEmoji.trim() || null,   // null not undefined — Firestore rejects undefined
+        emoji:     newColEmoji.trim() || null,
         createdAt: Date.now(),
       };
 
-      // Stamp the selected items with the new collection id.
-      // strip() removes every undefined field before writing — Firestore rejects undefined.
       const strip = <T extends object>(obj: T): T =>
         Object.fromEntries(
           Object.entries(obj).filter(([, v]) => v !== undefined)
@@ -453,16 +439,13 @@ export default function ProfileScreen() {
           : strip({ ...item }),
       );
 
-      // Also strip undefined from the collection object itself
       const updatedCollections = [...collections, strip(newCol)];
 
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({
-          collections: updatedCollections,
-          catalog:     updatedCatalog,
-        });
-      }
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('users').doc(ownerUid).update({
+        collections: updatedCollections,
+        catalog:     updatedCatalog,
+      });
 
       setCatalog(updatedCatalog);
       setCollections(updatedCollections);
@@ -479,6 +462,8 @@ export default function ProfileScreen() {
   };
 
   const removeCollection = async (colId: string) => {
+    if (!guardEdit()) return;
+    if (!ownerUid) return;
     Alert.alert(
       'Delete Collection?',
       'The collection will be removed. Items inside will become uncategorised.',
@@ -488,22 +473,17 @@ export default function ProfileScreen() {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            // un-assign items belonging to this collection
             const updatedCatalog = catalog.map(i =>
               i.collectionId === colId ? { ...i, collectionId: null } : i,
             );
             setCatalog(updatedCatalog);
             const updatedCols = collections.filter(c => c.id !== colId);
             try {
-              const authInstance = getAuth();
-              const currentUser = authInstance.currentUser;
-              if (currentUser) {
-                const fsDb = db as ReturnType<typeof firestore>;
-                await fsDb.collection('users').doc(currentUser.uid).update({
-                  catalog: updatedCatalog,
-                  collections: updatedCols,
-                });
-              }
+              const fsDb = db as ReturnType<typeof firestore>;
+              await fsDb.collection('users').doc(ownerUid).update({
+                catalog: updatedCatalog,
+                collections: updatedCols,
+              });
             } catch (err) {
               console.warn('[ProfileScreen] Error removing collection:', err);
             }
@@ -516,6 +496,9 @@ export default function ProfileScreen() {
 
   // ── Pick photo ────────────────────────────────────────────────────────────
   const pickPhoto = async () => {
+    if (!guardEdit()) return;
+    if (!ownerUid) return;
+
     if (Platform.OS !== 'web') {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
@@ -534,29 +517,19 @@ export default function ProfileScreen() {
       const uri = result.assets[0].uri;
 
       try {
-        const authInstance = getAuth();
-        const currentUser = authInstance.currentUser;
-
-        if (!currentUser) {
-          await setAvatarUri(uri);
-          return;
-        }
-
         const fsDb = db as ReturnType<typeof firestore>;
         const fileName = generateFileName('jpg');
         const downloadURL = await uploadFile(uri, 'avatar', {
-          userId: currentUser.uid,
+          userId: ownerUid,
           fileName,
         }, (progress) => {
           console.log(`[ProfileScreen] Upload progress: ${progress}%`);
         });
 
         await setAvatarUri(uri);
-
-        await fsDb.collection('users').doc(currentUser.uid).update({ photoURL: downloadURL });
+        await fsDb.collection('users').doc(ownerUid).update({ photoURL: downloadURL });
       } catch (error: any) {
         console.error('[ProfileScreen] Error saving avatar:', error);
-        // Still save local URI for demo mode
         await setAvatarUri(uri);
       }
     }
@@ -565,20 +538,21 @@ export default function ProfileScreen() {
   const initials = shownName.split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
 
   // ── Editable field card component ──────────────────────────────────────────
-  const EditableField = ({ field, label, icon, value, placeholder, keyboardType ,isMultiline}: {
-    field: string; label: string; icon: string; value: string; placeholder: string; keyboardType?: any;isMultiline?:boolean
+  const EditableField = ({ field, label, icon, value, placeholder, keyboardType ,isMultiline, readOnly}: {
+    field: string; label: string; icon: string; value: string; placeholder: string; keyboardType?: any;isMultiline?:boolean; readOnly?: boolean;
   }) => (
     <TouchableOpacity
       style={styles.infoCard}
-      activeOpacity={0.8}
-      onPress={() => startEditField(field, value)}
+      activeOpacity={readOnly ? 1 : 0.8}
+      onPress={() => { if (!readOnly) startEditField(field, value); }}
+      disabled={readOnly}
     >
       <View style={styles.iconCircle}>
         <AppIcon name={icon as any} size={18} color={COLORS.blue} fixedColor />
       </View>
       <View style={styles.infoContent}>
         <AppText style={[styles.infoLabel, { fontFamily }]}>{label}</AppText>
-        {editingField === field ? (
+        {editingField === field && !readOnly ? (
           <TextInput
             ref={fieldInputRef}
             multiline={isMultiline}
@@ -600,12 +574,14 @@ export default function ProfileScreen() {
           </AppText>
         )}
       </View>
-      {editingField === field ? (
-        <TouchableOpacity onPress={() => saveField(field, draftValue)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <AppIcon name="checkmark-circle" size={22} fixedColor color={COLORS.blue} />
-        </TouchableOpacity>
-      ) : (
-        <AppIcon name="create-outline" size={16} color={COLORS.sub} />
+      {!readOnly && (
+        editingField === field ? (
+          <TouchableOpacity onPress={() => saveField(field, draftValue)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <AppIcon name="checkmark-circle" size={22} fixedColor color={COLORS.blue} />
+          </TouchableOpacity>
+        ) : (
+          <AppIcon name="create-outline" size={16} color={COLORS.sub} />
+        )
       )}
     </TouchableOpacity>
   );
@@ -631,9 +607,35 @@ export default function ProfileScreen() {
         keyboardShouldPersistTaps="handled"
       >
 
+        {/* ── Companion read-only notice ── */}
+        {isCompanion && (
+          <View style={[styles.noticeCard, bevel]}>
+            <LinearGradient
+              colors={['#6366f1', '#8b5cf6']}
+              style={styles.noticeIconWrap}
+            >
+              <AppIcon name="link-outline" size={18} color="#fff" fixedColor />
+            </LinearGradient>
+            <View style={{ flex: 1 }}>
+              <AppText style={[styles.noticeTitle, { color: textColor, fontFamily }]}>
+                Read-only on this device
+              </AppText>
+              <AppText style={[styles.noticeBody, { color: FG.secondary }]}>
+                You can view the business profile, but changes require the
+                primary device.
+              </AppText>
+            </View>
+          </View>
+        )}
+
         {/* ── Avatar ── */}
         <View style={styles.avatarSection}>
-          <TouchableOpacity onPress={pickPhoto} activeOpacity={0.85} style={styles.avatarWrap}>
+          <TouchableOpacity
+            onPress={pickPhoto}
+            activeOpacity={isCompanion ? 1 : 0.85}
+            style={styles.avatarWrap}
+            disabled={isCompanion}
+          >
             {avatarUri ? (
               <Image source={{ uri: avatarUri }} style={styles.avatarImg} />
             ) : (
@@ -641,12 +643,14 @@ export default function ProfileScreen() {
                 <AppText fixedColor style={styles.avatarInitials}>{initials}</AppText>
               </LinearGradient>
             )}
-            <View style={styles.cameraBadge}>
-              <AppIcon name="camera" size={14} fixedColor color="#fff" />
-            </View>
+            {!isCompanion && (
+              <View style={styles.cameraBadge}>
+                <AppIcon name="camera" size={14} fixedColor color="#fff" />
+              </View>
+            )}
           </TouchableOpacity>
           <AppText style={[styles.tapHint, { color: FG.secondary, fontFamily }]}>
-            Tap photo to change
+            {isCompanion ? 'Profile photo' : 'Tap photo to change'}
           </AppText>
         </View>
 
@@ -657,19 +661,21 @@ export default function ProfileScreen() {
           {/* Name */}
           <TouchableOpacity
             style={styles.infoCard}
-            activeOpacity={0.8}
+            activeOpacity={isCompanion ? 1 : 0.8}
             onPress={() => {
+              if (isCompanion) { guardEdit(); return; }
               setDraftName(shownName);
               setEditingName(true);
               setTimeout(() => nameInputRef.current?.focus(), 50);
             }}
+            disabled={isCompanion}
           >
             <View style={styles.iconCircle}>
               <AppIcon name="business-outline" size={18} color={COLORS.blue} fixedColor />
             </View>
             <View style={styles.infoContent}>
               <AppText style={[styles.infoLabel, { fontFamily }]}>Business Name</AppText>
-              {editingName ? (
+              {editingName && !isCompanion ? (
                 <TextInput
                   ref={nameInputRef}
                   style={[styles.infoInput, { color: textColor, fontFamily }]}
@@ -686,20 +692,26 @@ export default function ProfileScreen() {
                 </AppText>
               )}
             </View>
-            {editingName ? (
-              <TouchableOpacity onPress={saveName} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <AppIcon name="checkmark-circle" size={22} fixedColor color={COLORS.blue} />
-              </TouchableOpacity>
-            ) : (
-              <AppIcon name="create-outline" size={16} color={COLORS.sub} />
+            {!isCompanion && (
+              editingName ? (
+                <TouchableOpacity onPress={saveName} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <AppIcon name="checkmark-circle" size={22} fixedColor color={COLORS.blue} />
+                </TouchableOpacity>
+              ) : (
+                <AppIcon name="create-outline" size={16} color={COLORS.sub} />
+              )
             )}
           </TouchableOpacity>
 
           {/* Phone */}
           <TouchableOpacity
             style={styles.infoCard}
-            activeOpacity={0.8}
-            onPress={() => navigation.navigate('ChangeNumber' as never)}
+            activeOpacity={isCompanion ? 1 : 0.8}
+            onPress={() => {
+              if (isCompanion) { guardEdit(); return; }
+              navigation.navigate('ChangeNumber' as never);
+            }}
+            disabled={isCompanion}
           >
             <View style={styles.iconCircle}>
               <AppIcon name="call-outline" size={18} color={COLORS.blue} fixedColor />
@@ -710,7 +722,7 @@ export default function ProfileScreen() {
                 {phone || 'Not set'}
               </AppText>
             </View>
-            <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />
+            {!isCompanion && <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />}
           </TouchableOpacity>
 
           {/* Email */}
@@ -721,6 +733,7 @@ export default function ProfileScreen() {
             value={email}
             placeholder="Add email address"
             keyboardType="email-address"
+            readOnly={isCompanion}
           />
 
           {/* Website */}
@@ -731,13 +744,18 @@ export default function ProfileScreen() {
             value={website}
             placeholder="Add website URL"
             keyboardType="url"
+            readOnly={isCompanion}
           />
 
-          {/* Work Hours — opens schedule modal */}
+          {/* Work Hours */}
           <TouchableOpacity
             style={styles.infoCard}
-            activeOpacity={0.8}
-            onPress={() => setHoursModalOpen(true)}
+            activeOpacity={isCompanion ? 1 : 0.8}
+            onPress={() => {
+              if (isCompanion) { guardEdit(); return; }
+              setHoursModalOpen(true);
+            }}
+            disabled={isCompanion}
           >
             <View style={styles.iconCircle}>
               <AppIcon name="time-outline" size={18} color={COLORS.blue} fixedColor />
@@ -748,11 +766,11 @@ export default function ProfileScreen() {
                 {getScheduleSummary()}
               </AppText>
             </View>
-            <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />
+            {!isCompanion && <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />}
           </TouchableOpacity>
         </View>
 
-        {/* ── Auto Responder Settings ── */}
+        {/* ── Auto Responder ── */}
         <View style={styles.section}>
           <AppText style={[styles.sectionTitle, { color: COLORS.sub, fontFamily }]}>AUTO RESPONDER</AppText>
           <View style={styles.infoCard}>
@@ -772,6 +790,7 @@ export default function ProfileScreen() {
             <Switch
               value={autoResponderEnabled || autoResponderPending}
               onValueChange={handleAutoResponderToggle}
+              disabled={isCompanion}
               trackColor={{ false: 'rgba(0,0,0,0.1)', true: COLORS.blue }}
               thumbColor={'#fff'}
             />
@@ -783,13 +802,9 @@ export default function ProfileScreen() {
                 Auto Reply Message
               </AppText>
 
-              {autoResponderPending ? (
-                // Pending edit — free text, save required
+              {autoResponderPending && !isCompanion ? (
                 <TextInput
-                  style={[
-                    styles.autoEditorInput,
-                    { color: textColor, fontFamily },
-                  ]}
+                  style={[styles.autoEditorInput, { color: textColor, fontFamily }]}
                   value={draftAutoMessage}
                   onChangeText={setDraftAutoMessage}
                   placeholder="e.g. Thanks for your message! We are currently closed..."
@@ -800,7 +815,6 @@ export default function ProfileScreen() {
                   autoFocus
                 />
               ) : (
-                // Already saved — allow quick inline edit via existing EditableField
                 <EditableField
                   field="auto_responder_message"
                   label="Message"
@@ -809,10 +823,11 @@ export default function ProfileScreen() {
                   value={auto_responder_message}
                   placeholder="No message set"
                   keyboardType="default"
+                  readOnly={isCompanion}
                 />
               )}
 
-              {autoResponderPending && (
+              {autoResponderPending && !isCompanion && (
                 <View style={styles.autoActionsRow}>
                   <TouchableOpacity
                     onPress={cancelAutoResponder}
@@ -842,27 +857,29 @@ export default function ProfileScreen() {
 
         {/* ── Catalog ── */}
         <View style={styles.section}>
-          {/* Section header with two action buttons */}
           <View style={styles.sectionHeader}>
             <AppText style={[styles.sectionTitle, { color: COLORS.sub, fontFamily }]}>CATALOG</AppText>
-            <View style={{ flexDirection: 'row', gap: 8 }}>
-              <TouchableOpacity
-                onPress={() => { setNewColItems([]); setCollectionStep('pick'); }}
-                style={[styles.addBtn, { backgroundColor: 'rgba(30,156,240,0.08)' }]}
-                activeOpacity={0.8}
-              >
-                <AppIcon name="folder-open-outline" size={16} color={COLORS.blue} fixedColor />
-                <AppText style={[styles.addBtnText, { fontFamily }]}>Collection</AppText>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => setCatalogModalOpen(true)}
-                style={styles.addBtn}
-                activeOpacity={0.8}
-              >
-                <AppIcon name="add-circle" size={18} color={COLORS.blue} fixedColor />
-                <AppText style={[styles.addBtnText, { fontFamily }]}>Add Item</AppText>
-              </TouchableOpacity>
-            </View>
+            {/* Hide add buttons on companion */}
+            {!isCompanion && (
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <TouchableOpacity
+                  onPress={() => { setNewColItems([]); setCollectionStep('pick'); }}
+                  style={[styles.addBtn, { backgroundColor: 'rgba(30,156,240,0.08)' }]}
+                  activeOpacity={0.8}
+                >
+                  <AppIcon name="folder-open-outline" size={16} color={COLORS.blue} fixedColor />
+                  <AppText style={[styles.addBtnText, { fontFamily }]}>Collection</AppText>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setCatalogModalOpen(true)}
+                  style={styles.addBtn}
+                  activeOpacity={0.8}
+                >
+                  <AppIcon name="add-circle" size={18} color={COLORS.blue} fixedColor />
+                  <AppText style={[styles.addBtnText, { fontFamily }]}>Add Item</AppText>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
 
           {catalog.length === 0 && collections.length === 0 ? (
@@ -874,13 +891,11 @@ export default function ProfileScreen() {
             </View>
           ) : (
             <>
-              {/* ── Collections ── */}
               {collections.map((col) => {
                 const colItems = catalog.filter(i => i.collectionId === col.id);
                 const isOpen = expandedCollection === col.id;
                 return (
                   <View key={col.id} style={styles.collectionGroup}>
-                    {/* Collection header row */}
                     <TouchableOpacity
                       style={styles.collectionHeader}
                       activeOpacity={0.75}
@@ -900,13 +915,16 @@ export default function ProfileScreen() {
                         </View>
                       </View>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                        <TouchableOpacity
-                          onPress={() => removeCollection(col.id)}
-                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                          style={{ padding: 4 }}
-                        >
-                          <AppIcon name="trash-outline" size={16} color={COLORS.missed} fixedColor />
-                        </TouchableOpacity>
+                        {/* Delete only on primary */}
+                        {!isCompanion && (
+                          <TouchableOpacity
+                            onPress={() => removeCollection(col.id)}
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            style={{ padding: 4 }}
+                          >
+                            <AppIcon name="trash-outline" size={16} color={COLORS.missed} fixedColor />
+                          </TouchableOpacity>
+                        )}
                         <AppIcon
                           name={isOpen ? 'chevron-up' : 'chevron-down'}
                           size={18}
@@ -915,7 +933,6 @@ export default function ProfileScreen() {
                       </View>
                     </TouchableOpacity>
 
-                    {/* Items inside this collection */}
                     {isOpen && (
                       colItems.length === 0 ? (
                         <View style={styles.colEmptyHint}>
@@ -933,6 +950,7 @@ export default function ProfileScreen() {
                             fontFamily={fontFamily}
                             onShare={() => setShareItem(item)}
                             onRemove={() => removeCatalogItem(item.id)}
+                            hideRemove={isCompanion}
                           />
                         ))
                       )
@@ -941,7 +959,6 @@ export default function ProfileScreen() {
                 );
               })}
 
-              {/* ── Uncategorised items ── */}
               {(() => {
                 const uncategorised = catalog.filter(i => !i.collectionId);
                 if (uncategorised.length === 0 && collections.length > 0) return null;
@@ -985,6 +1002,7 @@ export default function ProfileScreen() {
                           fontFamily={fontFamily}
                           onShare={() => setShareItem(item)}
                           onRemove={() => removeCatalogItem(item.id)}
+                          hideRemove={isCompanion}
                         />
                       ))
                     }
@@ -1011,7 +1029,6 @@ export default function ProfileScreen() {
             <View style={styles.modalSheet}>
               <View style={styles.modalHandle} />
 
-              {/* Header row */}
               <View style={styles.modalHeaderRow}>
                 <AppText style={[styles.modalTitle, { color: textColor, fontFamily }]}>
                   New Item
@@ -1029,7 +1046,6 @@ export default function ProfileScreen() {
                 keyboardShouldPersistTaps="handled"
                 contentContainerStyle={{ paddingBottom: 16 }}
               >
-                {/* Item Image */}
                 <TouchableOpacity onPress={pickItemImage} style={styles.itemImagePicker} activeOpacity={0.8}>
                   {newItemImage ? (
                     <Image source={{ uri: newItemImage }} style={styles.itemImagePreview} />
@@ -1043,7 +1059,6 @@ export default function ProfileScreen() {
                   {newItemImage ? 'Tap to change' : 'Tap to add photo'}
                 </AppText>
 
-                {/* Item Name */}
                 <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Name</AppText>
                 <View style={styles.modalInput}>
                   <TextInput
@@ -1056,7 +1071,6 @@ export default function ProfileScreen() {
                   />
                 </View>
 
-                {/* Item Price */}
                 <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Price</AppText>
                 <View style={styles.modalInput}>
                   <TextInput
@@ -1069,7 +1083,6 @@ export default function ProfileScreen() {
                   />
                 </View>
 
-                {/* Item Description */}
                 <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Description</AppText>
                 <View style={[styles.modalInput, { minHeight: 80 }]}>
                   <TextInput
@@ -1083,7 +1096,6 @@ export default function ProfileScreen() {
                   />
                 </View>
 
-                {/* Collection assignment */}
                 {collections.length > 0 && (
                   <>
                     <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Collection</AppText>
@@ -1102,7 +1114,6 @@ export default function ProfileScreen() {
                   </>
                 )}
 
-                {/* Add Button */}
                 <TouchableOpacity onPress={addCatalogItem} activeOpacity={0.85} style={{ marginTop: 12 }} disabled={uploadingCatalogImage}>
                   <LinearGradient colors={GRADIENTS.primary} style={styles.modalPrimaryBtn}>
                     {uploadingCatalogImage ? (
@@ -1121,7 +1132,7 @@ export default function ProfileScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* ── Create Collection — 2-step playlist-style modal ── */}
+      {/* ── Create Collection Modal ── */}
       <Modal
         visible={collectionStep !== null}
         transparent
@@ -1137,7 +1148,6 @@ export default function ProfileScreen() {
             <View style={[styles.modalSheet, { maxHeight: '90%' }]}>
               <View style={styles.modalHandle} />
 
-              {/* ── Step indicator ── */}
               <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 4, marginBottom: 16 }}>
                 <View style={[colModalStyles.stepDot, { backgroundColor: COLORS.blue }]} />
                 <View style={[colModalStyles.stepLine, { backgroundColor: collectionStep === 'name' ? COLORS.blue : 'rgba(0,0,0,0.10)' }]} />
@@ -1145,7 +1155,6 @@ export default function ProfileScreen() {
               </View>
 
               {collectionStep === 'pick' ? (
-                /* ── STEP 1: Pick products ─────────────────────────────────── */
                 <>
                   <View style={styles.modalHeaderRow}>
                     <TouchableOpacity onPress={() => { setCollectionStep(null); setNewColItems([]); }} style={{ padding: 4 }}>
@@ -1193,7 +1202,6 @@ export default function ProfileScreen() {
                                 prev.includes(item.id) ? prev.filter(x => x !== item.id) : [...prev, item.id]
                               )}
                             >
-                              {/* Image or placeholder */}
                               {item.imageUri ? (
                                 <Image source={{ uri: item.imageUri }} style={colModalStyles.productTileImg} resizeMode="cover" />
                               ) : (
@@ -1201,7 +1209,6 @@ export default function ProfileScreen() {
                                   <AppIcon name="cube-outline" size={24} color={COLORS.blue} fixedColor />
                                 </View>
                               )}
-                              {/* Checkmark overlay when selected */}
                               {selected && (
                                 <View style={colModalStyles.checkOverlay} pointerEvents="none">
                                   <LinearGradient colors={['rgba(30,156,240,0.55)', 'rgba(10,114,196,0.55)']} style={colModalStyles.checkOverlayGrad}>
@@ -1209,7 +1216,6 @@ export default function ProfileScreen() {
                                   </LinearGradient>
                                 </View>
                               )}
-                              {/* Name + price */}
                               <View style={colModalStyles.productTileInfo}>
                                 <AppText style={[colModalStyles.productTileName, { color: textColor }]} numberOfLines={1}>
                                   {item.name}
@@ -1226,7 +1232,6 @@ export default function ProfileScreen() {
                   )}
                 </>
               ) : (
-                /* ── STEP 2: Name the collection ───────────────────────────── */
                 <>
                   <View style={styles.modalHeaderRow}>
                     <TouchableOpacity onPress={() => setCollectionStep('pick')} style={{ padding: 4 }}>
@@ -1238,7 +1243,6 @@ export default function ProfileScreen() {
                     <View style={{ width: 30 }} />
                   </View>
 
-                  {/* Selected items preview strip */}
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={colModalStyles.previewStrip}>
                     {catalog.filter(i => newColItems.includes(i.id)).map(item => (
                       <View key={item.id} style={colModalStyles.previewChip}>
@@ -1260,7 +1264,6 @@ export default function ProfileScreen() {
                     {newColItems.length} product{newColItems.length !== 1 ? 's' : ''} selected
                   </AppText>
 
-                  {/* Emoji */}
                   <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Emoji (optional)</AppText>
                   <View style={styles.modalInput}>
                     <TextInput
@@ -1274,7 +1277,6 @@ export default function ProfileScreen() {
                     />
                   </View>
 
-                  {/* Collection name */}
                   <AppText style={[styles.fieldLabel, { color: COLORS.sub, fontFamily }]}>Collection Name</AppText>
                   <View style={styles.modalInput}>
                     <TextInput
@@ -1314,7 +1316,7 @@ export default function ProfileScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* ── Collection Picker Modal (inside Add Item flow) ── */}
+      {/* ── Collection Picker ── */}
       <Modal
         visible={colPickerOpen}
         transparent
@@ -1331,7 +1333,6 @@ export default function ProfileScreen() {
               </TouchableOpacity>
             </View>
             <ScrollView showsVerticalScrollIndicator={false}>
-              {/* None option */}
               <TouchableOpacity
                 style={[styles.catalogCard, newItemCollectionId === null && { borderColor: COLORS.blue, borderWidth: 1.5 }]}
                 onPress={() => { setNewItemCollectionId(null); setColPickerOpen(false); }}
@@ -1369,7 +1370,7 @@ export default function ProfileScreen() {
         </View>
       </Modal>
 
-      {/* ── Work Hours Modal (contains inline time picker to avoid nested Modal on iOS) ── */}
+      {/* ── Work Hours Modal ── */}
       <Modal
         visible={hoursModalOpen}
         transparent
@@ -1388,7 +1389,6 @@ export default function ProfileScreen() {
             <View style={styles.modalHandle} />
 
             {pickerVisible ? (
-              /* ── Inline Time Picker view (replaces day list) ── */
               <>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                   <TouchableOpacity onPress={() => { setPickerVisible(false); setPickerTarget(null); }} style={{ padding: 4 }}>
@@ -1427,7 +1427,6 @@ export default function ProfileScreen() {
                 </View>
               </>
             ) : (
-              /* ── Day schedule list ── */
               <>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                   <AppText style={[styles.modalTitle, { marginBottom: 0, color: textColor, fontFamily }]}>Work Hours</AppText>
@@ -1447,6 +1446,7 @@ export default function ProfileScreen() {
                           <Switch
                             value={!isClosed}
                             onValueChange={(val) => {
+                              if (isCompanion) { guardEdit(); return; }
                               const updated = { ...workSchedule };
                               if (val) {
                                 updated[day] = { open: '8:00 AM', close: '5:00 PM' };
@@ -1456,6 +1456,7 @@ export default function ProfileScreen() {
                               setWorkSchedule(updated);
                               saveWorkSchedule(updated);
                             }}
+                            disabled={isCompanion}
                             trackColor={{ false: 'rgba(0,0,0,0.1)', true: COLORS.blue }}
                             thumbColor={'#fff'}
                             style={{ transform: [{ scale: 0.8 }] }}
@@ -1471,6 +1472,7 @@ export default function ProfileScreen() {
                               <TouchableOpacity
                                 style={styles.timePill}
                                 onPress={() => openTimePicker(day, 'open')}
+                                disabled={isCompanion}
                               >
                                 <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.open}</AppText>
                               </TouchableOpacity>
@@ -1478,6 +1480,7 @@ export default function ProfileScreen() {
                               <TouchableOpacity
                                 style={styles.timePill}
                                 onPress={() => openTimePicker(day, 'close')}
+                                disabled={isCompanion}
                               >
                                 <AppText style={[styles.timePillText, { color: textColor, fontFamily }]}>{schedule.close}</AppText>
                               </TouchableOpacity>
@@ -1508,7 +1511,7 @@ export default function ProfileScreen() {
 
 // ─── CatalogItemRow ───────────────────────────────────────────────────────────
 function CatalogItemRow({
-  item, textColor, fgSecondary, fontFamily, onShare, onRemove,
+  item, textColor, fgSecondary, fontFamily, onShare, onRemove, hideRemove,
 }: {
   item: import('../types').CatalogItem;
   textColor: string;
@@ -1516,6 +1519,7 @@ function CatalogItemRow({
   fontFamily: string;
   onShare: () => void;
   onRemove: () => void;
+  hideRemove?: boolean;
 }) {
   return (
     <View style={styles.catalogCard}>
@@ -1546,13 +1550,15 @@ function CatalogItemRow({
       >
         <AppIcon name="share-social-outline" size={20} color={COLORS.blue} fixedColor />
       </TouchableOpacity>
-      <TouchableOpacity
-        onPress={onRemove}
-        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        style={styles.deleteBtn}
-      >
-        <AppIcon name="close-circle" size={20} color={COLORS.missed} fixedColor />
-      </TouchableOpacity>
+      {!hideRemove && (
+        <TouchableOpacity
+          onPress={onRemove}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={styles.deleteBtn}
+        >
+          <AppIcon name="close-circle" size={20} color={COLORS.missed} fixedColor />
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -1561,11 +1567,9 @@ function CatalogItemRow({
 const TILE_SIZE = 150;
 
 const colModalStyles = StyleSheet.create({
-  // Step progress indicator
   stepDot:  { width: 8, height: 8, borderRadius: 4, flex: 0 },
   stepLine: { flex: 1, height: 2, marginHorizontal: 4 },
 
-  // Next button (step 1 header)
   nextBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: 14, paddingVertical: 8,
@@ -1575,7 +1579,6 @@ const colModalStyles = StyleSheet.create({
 
   stepHint: { fontSize: 12, marginBottom: 8, marginLeft: 2 },
 
-  // Product grid (step 1)
   productGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1624,7 +1627,6 @@ const colModalStyles = StyleSheet.create({
   productTileName:  { fontSize: 12, fontWeight: '700' },
   productTilePrice: { fontSize: 12, fontWeight: '800', color: COLORS.blue },
 
-  // Selected items preview strip (step 2)
   previewStrip: {
     paddingHorizontal: 2,
     paddingBottom: 12,
@@ -1671,6 +1673,21 @@ const styles = StyleSheet.create({
 
   scroll: { paddingHorizontal: 20, paddingTop: 24, paddingBottom: 48, gap: 28 },
 
+  // Companion notice
+  noticeCard: {
+    flexDirection: 'row', gap: 12,
+    borderRadius: RADIUS.lg,
+    paddingHorizontal: 14, paddingVertical: 14,
+  },
+  noticeIconWrap: {
+    width: 38, height: 38, borderRadius: 11,
+    alignItems: 'center', justifyContent: 'center',
+    flexShrink: 0,
+    ...SHADOW.button,
+  },
+  noticeTitle: { fontSize: 13, fontWeight: '800', marginBottom: 3 },
+  noticeBody:  { fontSize: 12, lineHeight: 17 },
+
   // Avatar
   avatarSection: { alignItems: 'center', gap: 10 },
   avatarWrap:    { width: 100, height: 100, borderRadius: 50 },
@@ -1693,12 +1710,10 @@ const styles = StyleSheet.create({
   },
   tapHint: { fontSize: 12, color: COLORS.sub },
 
-  // Sections
   section:       { gap: 8 },
   sectionTitle:  { fontSize: 12, fontWeight: '700', letterSpacing: 0.8, color: COLORS.sub, marginBottom: 4, marginLeft: 2 },
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
 
-  // Info cards — clean, no glass
   infoCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     borderRadius: 14,
@@ -1723,7 +1738,6 @@ const styles = StyleSheet.create({
     padding: 0, margin: 0,
   },
 
-  // Auto responder editor
   autoEditorCard: {
     borderRadius: 14,
     paddingHorizontal: 14, paddingVertical: 14,
@@ -1765,7 +1779,6 @@ const styles = StyleSheet.create({
   },
   autoSaveText: { color: '#fff', fontSize: 15, fontWeight: '700' },
 
-  // Add button
   addBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     paddingHorizontal: 10, paddingVertical: 6,
@@ -1773,7 +1786,6 @@ const styles = StyleSheet.create({
   },
   addBtnText: { fontSize: 13, fontWeight: '600', color: COLORS.blue },
 
-  // Empty catalog
   emptyCard: {
     alignItems: 'center', justifyContent: 'center',
     paddingVertical: 36, paddingHorizontal: 20,
@@ -1785,7 +1797,6 @@ const styles = StyleSheet.create({
   },
   emptyText: { fontSize: 13, textAlign: 'center', lineHeight: 19 },
 
-  // Catalog item card
   catalogCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     borderRadius: 14,
@@ -1808,7 +1819,6 @@ const styles = StyleSheet.create({
   catalogItemDesc:  { fontSize: 12, marginTop: 2, lineHeight: 16 },
   deleteBtn: { padding: 4 },
 
-  // Modal
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.45)',
@@ -1853,7 +1863,6 @@ const styles = StyleSheet.create({
   modalCancelText: { fontSize: 14, fontWeight: '600' },
   photoHint: { fontSize: 11, textAlign: 'center', marginBottom: 20, marginTop: 6 },
 
-  // Item image picker in modal
   itemImagePicker: {
     alignSelf: 'center',
     width: 72, height: 72, borderRadius: 36,
@@ -1870,7 +1879,6 @@ const styles = StyleSheet.create({
   },
   itemImageText: { fontSize: 10, fontWeight: '600' },
 
-  // Work hours modal
   dayRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingVertical: 10,
@@ -1900,7 +1908,6 @@ const styles = StyleSheet.create({
   },
   closedText: { fontSize: 13, fontWeight: '600', color: COLORS.sub },
 
-  // Time picker
   pickerSheet: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     borderTopLeftRadius: 20,
@@ -1923,7 +1930,6 @@ const styles = StyleSheet.create({
   },
   pickerItemText: { fontSize: 15 },
 
-  // Number picker actions
   pickerActions: {
     flexDirection: 'row',
     gap: 12,
@@ -1947,7 +1953,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 
-  // Legacy custom time input (no longer used but kept for compatibility)
   customTimeRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1975,7 +1980,6 @@ const styles = StyleSheet.create({
   },
   customTimeBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
 
-  // ── Collections ─────────────────────────────────────────────────────────────
   collectionGroup: {
     borderRadius: 14,
     overflow: 'hidden',
@@ -2006,4 +2010,4 @@ const styles = StyleSheet.create({
   collectionName:   { fontSize: 14, fontWeight: '700' as const },
   collectionCount:  { fontSize: 11, marginTop: 1 },
   colEmptyHint:     { paddingHorizontal: 14, paddingBottom: 12 },
-}); 
+});

@@ -11,7 +11,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { BottomNav } from '../components';
-import { useAuth } from '../hooks/useAuth';
+import { useAuth } from '../context/AuthContext';
 import { useChats, ChatPreview } from '../hooks/useChats';
 import { useContacts, AppContact } from '../hooks/useContacts';
 import { fetchUserPrivacySettings, isVisibleTo } from '../hooks/usePrivacySettings';
@@ -74,15 +74,15 @@ interface ChatAvatarProps {
 const ChatAvatar = memo(function ChatAvatar({ displayName, contactPhotoUri, firebasePhotoURL, isSavedContact, hasStatus = false }: ChatAvatarProps) {
   const color = stringToColor(displayName);
   const initials = getInitials(displayName);
-  
+
   // Priority: 1. Contact photo, 2. Firebase photo, 3. Initials
   const photoUri = contactPhotoUri || firebasePhotoURL;
-  
+
   const avatarContent = (
     <View style={[styles.avatarCircle, { backgroundColor: color }]}>
       {photoUri ? (
-        <Image 
-          source={{ uri: photoUri }} 
+        <Image
+          source={{ uri: photoUri }}
           style={styles.avatarImage}
           defaultSource={require('../../assets/icon.png')}
         />
@@ -108,8 +108,6 @@ const ChatAvatar = memo(function ChatAvatar({ displayName, contactPhotoUri, fire
 });
 
 // ─── ChatRow — memoized list row ──────────────────────────────────────────────
-// Receives all resolved data as props so React.memo can do a shallow compare
-// and skip re-rendering rows whose data hasn't changed.
 interface ChatRowProps {
   item:             ChatPreview;
   displayName:      string;
@@ -274,14 +272,12 @@ function NewGroupSheet({
   const [groupName,   setGroupName]   = useState('');
   const [nameError,   setNameError]   = useState('');
   const [creating,    setCreating]    = useState(false);
-  // Map of userId → privacyGroups setting, fetched once when the sheet opens
   const [privacyMap,  setPrivacyMap]  = useState<Map<string, string>>(new Map());
   const [privacyLoading, setPrivacyLoading] = useState(true);
   const { bevel } = useGlass();
   const { FG } = useForeground();
   const { textColor } = useTypography();
 
-  // Fetch each contact's privacyGroups setting once on mount
   useEffect(() => {
     if (!contacts.length) { setPrivacyLoading(false); return; }
     let cancelled = false;
@@ -303,18 +299,13 @@ function NewGroupSheet({
     return () => { cancelled = true; };
   }, [contacts]);
 
-  /** Returns true if the current user is allowed to add this contact to a group. */
   const canAdd = (userId: string): boolean => {
     const setting = privacyMap.get(userId) ?? 'Everyone';
-    // 'Everyone' → anyone can add
-    // 'Contacts' → only contacts can add — since all people in this list are
-    //              the creator's device contacts, we treat this as allowed.
-    // 'Nobody'   → nobody can add
     return setting !== 'Nobody';
   };
 
   const toggle = (userId: string) => {
-    if (!canAdd(userId)) return; // silently ignore taps on blocked contacts
+    if (!canAdd(userId)) return;
     setSelected((prev) =>
       prev.includes(userId) ? prev.filter((x) => x !== userId) : [...prev, userId]
     );
@@ -323,7 +314,7 @@ function NewGroupSheet({
   const handleCreate = async () => {
     if (!groupName.trim()) { setNameError('Please enter a group name.'); return; }
     if (selected.length < 1) { setNameError('Select at least one contact.'); return; }
-    
+
     setCreating(true);
     try {
       const { createGroupChat } = await import('../hooks/useChatActions');
@@ -354,8 +345,8 @@ function NewGroupSheet({
         </TouchableOpacity>
         <AppText style={styles.sheetTitle}>New Group</AppText>
         {selected.length > 0 && groupName.trim() && (
-          <TouchableOpacity 
-            onPress={handleCreate} 
+          <TouchableOpacity
+            onPress={handleCreate}
             activeOpacity={0.85}
             disabled={creating}
           >
@@ -373,7 +364,6 @@ function NewGroupSheet({
         )}
       </View>
 
-      {/* Group name — glass */}
       <View style={[styles.glassInput, bevel]}>
         <AppIcon name="people-outline" size={18} color={COLORS.sub} />
         <TextInput style={styles.inputField} placeholder="Group name"
@@ -384,7 +374,6 @@ function NewGroupSheet({
         <AppText style={styles.nameError}>{nameError}</AppText>
       ) : null}
 
-      {/* Selected avatars row */}
       {selected.length > 0 && (
         <View style={styles.selectedAvatarsRow}>
           {selected.map((userId) => {
@@ -393,7 +382,7 @@ function NewGroupSheet({
             const color = stringToColor(c.displayName);
             return (
               <TouchableOpacity key={userId} style={styles.selectedAvatarWrap} onPress={() => toggle(userId)}>
-                <ChatAvatar 
+                <ChatAvatar
                   displayName={c.displayName}
                   contactPhotoUri={c.photoUri}
                   firebasePhotoURL={c.firebasePhotoURL}
@@ -423,7 +412,7 @@ function NewGroupSheet({
               ]}
               activeOpacity={addable ? 0.75 : 1}
               onPress={() => toggle(c.userId)}>
-              <ChatAvatar 
+              <ChatAvatar
                 displayName={c.displayName}
                 contactPhotoUri={c.photoUri}
                 firebasePhotoURL={c.firebasePhotoURL}
@@ -512,10 +501,10 @@ function SelectContactSheet({
     return <NewContactSheet onBack={() => setMode('select')} onDone={onClose} />;
   }
   if (mode === 'newGroup') {
-    return <NewGroupSheet 
-      onBack={() => setMode('select')} 
-      onDone={onClose} 
-      contacts={contacts} 
+    return <NewGroupSheet
+      onBack={() => setMode('select')}
+      onDone={onClose}
+      contacts={contacts}
       currentUserId={currentUserId}
       onNavigateToGroup={onNavigateToGroup}
     />;
@@ -523,7 +512,6 @@ function SelectContactSheet({
 
   return (
     <>
-      {/* Header */}
       <View style={styles.sheetSubHeader}>
         <TouchableOpacity onPress={onClose} style={styles.iconPad}>
           <AppIcon name="close" size={22} color={COLORS.sub} />
@@ -577,7 +565,6 @@ function SelectContactSheet({
         </View>
       </View>
 
-      {/* 3-dot dropdown — shown inline below the header */}
       {menuOpen && (
         <View style={[styles.sheetDropdown, { backgroundColor: FG.glassBg, borderColor: FG.glassBorder }]}>
           <TouchableOpacity
@@ -591,7 +578,6 @@ function SelectContactSheet({
         </View>
       )}
 
-      {/* Action rows */}
       <View style={styles.actionBlock}>
         {[
           { icon: 'people'     as const, label: 'New group',   onPress: () => { setMenuOpen(false); setMode('newGroup');   } },
@@ -613,7 +599,6 @@ function SelectContactSheet({
         {searchQuery.trim() ? `${filtered.length} result${filtered.length !== 1 ? 's' : ''}` : 'Contacts'}
       </AppText>
 
-      {/* Contact list */}
       {contactsLoading ? (
         <View style={styles.emptyWrap}>
           <ActivityIndicator size="large" color={COLORS.blue} />
@@ -642,7 +627,7 @@ function SelectContactSheet({
           {filtered.map((c) => (
             <TouchableOpacity key={c.userId} style={[styles.contactRow, bevel]} activeOpacity={0.75}
               onPress={() => { setMenuOpen(false); onNavigate(c); }}>
-              <ChatAvatar 
+              <ChatAvatar
                 displayName={c.displayName}
                 contactPhotoUri={c.photoUri}
                 firebasePhotoURL={c.firebasePhotoURL}
@@ -663,11 +648,11 @@ function SelectContactSheet({
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 export default function ChatsScreen() {
   const navigation  = useNavigation<NavProp>();
-  const { user }    = useAuth();
-  const userId      = user?.uid ?? null;
+  // userId here is the OWNER uid (context aliases it). On a companion device
+  // it's the owner's uid, not the companion's Firebase Auth uid. Every query
+  // and write below correctly uses the owner's identity.
+  const { userId }  = useAuth();
 
-  // Three theme hooks — each subscribes to ThemeContext once.
-  // They are memoized in the provider so they won't cause unnecessary re-renders.
   const { FG }                         = useForeground();
   const { fontFamily, textColor }      = useTypography();
   const { bevel, iconButton }          = useGlass();
@@ -686,23 +671,17 @@ export default function ChatsScreen() {
     return map;
   }, [contactStatuses]);
 
-  // Log contacts state — removed for production performance
-
   const [tab,        setTab]        = useState<TabType>('Chats');
   const [query,      setQuery]      = useState('');
   const [sheetOpen,  setSheetOpen]  = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
 
-  // Extra member info fetched from Firestore for users not in device contacts
   const [memberInfo, setMemberInfo] = useState<Map<string, { displayName: string; phone: string; photoURL?: string }>>(new Map());
-  // Cache of privacy settings: userId → profilePhoto visibility ('Everyone'|'Contacts'|'Nobody')
   const [privacyPhotoMap, setPrivacyPhotoMap] = useState<Map<string, string>>(new Map());
 
-  // Animated width: 0 → 1 (multiplied by max width in style)
   const searchAnim = useRef(new Animated.Value(0)).current;
   const searchRef  = useRef<TextInput>(null);
 
-  // Build contacts map: phone → displayName (for resolveDisplayName)
   const contactsMap = useMemo(() => {
     const map = new Map<string, string>();
     for (const c of contacts) {
@@ -711,19 +690,16 @@ export default function ChatsScreen() {
     return map;
   }, [contacts]);
 
-  // Build firestoreUsers map: userId → { displayName, phone, photoURL }
   const firestoreUsersMap = useMemo(() => {
     const map = new Map<string, { displayName: string; phone: string; photoURL?: string; contactPhotoUri?: string }>();
-    // Add all contacts (displayName from useContacts already has correct priority)
     for (const c of contacts) {
-      map.set(c.userId, { 
-        displayName: c.displayName, 
+      map.set(c.userId, {
+        displayName: c.displayName,
         phone: c.phone,
         photoURL: c.firebasePhotoURL,
         contactPhotoUri: c.photoUri,
       });
     }
-    // Add users not in contacts (fetched separately from Firestore)
     for (const [uid, info] of memberInfo) {
       if (!map.has(uid)) {
         map.set(uid, info);
@@ -732,7 +708,6 @@ export default function ChatsScreen() {
     return map;
   }, [contacts, memberInfo]);
 
-  // Fetch Firestore user info for chat members not in contacts
   useEffect(() => {
     if (!chats.length || !userId) return;
 
@@ -774,7 +749,6 @@ export default function ChatsScreen() {
     })();
   }, [chats, userId, contacts]);
 
-  // Fetch privacyProfilePhoto for device contacts (they come from useContacts, not the effect above)
   useEffect(() => {
     if (!contacts.length) return;
     const alreadyCached = new Set(privacyPhotoMap.keys());
@@ -795,15 +769,12 @@ export default function ChatsScreen() {
         setPrivacyPhotoMap((prev) => new Map([...prev, ...updates]));
       }
     })();
-    // Only run when the contact list changes, not on every privacyPhotoMap update
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contacts]);
 
-  // Filter chats by tab
   const directChats = useMemo(() => chats.filter((c) => c.type === 'direct'), [chats]);
   const groupChats  = useMemo(() => chats.filter((c) => c.type === 'group'), [chats]);
 
-  // Memoize the filtered + searched list so FlatList only re-renders when it changes
   const data = useMemo(() => {
     const base = tab === 'Chats' ? directChats : groupChats;
     if (!query.trim()) return base;
@@ -830,15 +801,14 @@ export default function ChatsScreen() {
     }).start(() => setSearchOpen(false));
   };
 
-  // Called when a contact is tapped in the sheet
   const handleSelectContact = useCallback(async (contact: AppContact) => {
     if (!userId) return;
     setSheetOpen(false);
     try {
       const chatId = await getOrCreateDirectChat(userId, contact.userId);
-      navigation.navigate('Chat', { 
-        chatId, 
-        displayName: contact.displayName, 
+      navigation.navigate('Chat', {
+        chatId,
+        displayName: contact.displayName,
         isGroup: false,
         otherUserId: contact.userId,
         otherUserPhoto: contact.photoUri || contact.firebasePhotoURL || null,
@@ -846,13 +816,11 @@ export default function ChatsScreen() {
     } catch {}
   }, [userId, navigation]);
 
-  // Called when a group is created
   const handleNavigateToGroup = useCallback((chatId: string, groupName: string) => {
     if (!userId) return;
     navigation.navigate('Chat', { chatId, displayName: groupName, isGroup: true });
   }, [userId, navigation]);
 
-  // renderItem is stable — only re-runs when the resolved row data changes
   const renderChat = useCallback(({ item }: { item: ChatPreview }) => {
     const displayName     = userId ? resolveDisplayName(item, userId, contactsMap, firestoreUsersMap) : 'Unknown';
     const isGroup         = item.type === 'group';
@@ -895,7 +863,7 @@ export default function ChatsScreen() {
   return (
     <View style={styles.root}>
       <AppBg />
-      
+
       {/* ── Bottom sheet modal ── */}
       <Modal visible={sheetOpen} transparent animationType="slide"
         onRequestClose={() => setSheetOpen(false)} statusBarTranslucent>
@@ -1033,7 +1001,6 @@ export default function ChatsScreen() {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: COLORS.sky1 },
 
-  // ── Avatar ───────────────────────────────────────────────────────────────
   avatarCircle: {
     width: 50, height: 50, borderRadius: 25,
     alignItems: 'center', justifyContent: 'center',
@@ -1052,7 +1019,6 @@ const styles = StyleSheet.create({
   },
   avatarText: { color: '#fff', fontWeight: '700', fontSize: 18 },
 
-  // ── Header ───────────────────────────────────────────────────────────────
   header: {
     flexDirection: 'column',
     paddingHorizontal: 14,
@@ -1095,29 +1061,27 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.16,
     shadowRadius: 8,
     elevation: 3,
-    alignItems: 'center', 
+    alignItems: 'center',
     justifyContent: 'center',
   },
 
-  // ── Tabs ─────────────────────────────────────────────────────────────────
   tabBar:          { flexDirection: 'row', paddingHorizontal: 14, marginBottom: 10, gap: 6 },
   tabPillActive:   { paddingHorizontal: 22, paddingVertical: 9, borderRadius: RADIUS.full, ...SHADOW.button },
-  tabPillInactive: { 
-    paddingHorizontal: 22, 
-    paddingVertical: 9, 
-    borderRadius: RADIUS.full, 
+  tabPillInactive: {
+    paddingHorizontal: 22,
+    paddingVertical: 9,
+    borderRadius: RADIUS.full,
   },
   tabLabel:        { fontSize: 14, fontWeight: '600', color: COLORS.sub },
   tabLabelActive:  { fontSize: 14, fontWeight: '700', color: '#fff' },
 
-  // ── Chat cards ────────────────────────────────────────────────────────────
   listContent: { paddingHorizontal: 14, paddingBottom: 110 },
   chatCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     borderRadius: RADIUS.lg,
-    paddingHorizontal: 14, paddingVertical: 10, 
-  }, 
-  chatAvatarWrap: { position: 'relative', width: 52, height: 52 }, 
+    paddingHorizontal: 14, paddingVertical: 10,
+  },
+  chatAvatarWrap: { position: 'relative', width: 52, height: 52 },
   onlineDot: {
     position: 'absolute', bottom: 1, right: 1,
     width: 13, height: 13, borderRadius: 7,
@@ -1133,24 +1097,22 @@ const styles = StyleSheet.create({
   chatPreview:    { flex: 1, fontSize: 12, color: COLORS.sub, lineHeight: 17 },
   voiceNotePreview: { flex: 1, flexDirection: 'row', alignItems: 'center' },
   chatTime:       { fontSize: 11, color: COLORS.sub, flexShrink: 0 },
-  badge:          { 
-    minWidth: 22, 
-    height: 22, 
-    borderRadius: 11, 
-    backgroundColor: '#25D366', // WhatsApp green
-    alignItems: 'center', 
-    justifyContent: 'center', 
+  badge:          {
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#25D366',
+    alignItems: 'center',
+    justifyContent: 'center',
     flexShrink: 0,
     paddingHorizontal: 6,
   },
   badgeText:      { color: '#fff', fontSize: 11, fontWeight: '700' },
 
-  // ── FAB ──────────────────────────────────────────────────────────────────
   fab:      { position: 'absolute', right: 20, bottom: 130, width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
   fabWeb:   { right: 16, bottom: 120 },
   fabInner: { flex: 1, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
 
-  // ── Bottom sheet ──────────────────────────────────────────────────────────
   overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.45)' },
   sheet: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
@@ -1164,7 +1126,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(30,156,240,0.30)', marginTop: 10, marginBottom: 4,
   },
 
-  // ── Sheet shared ──────────────────────────────────────────────────────────
   sheetSubHeader: {
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 16, paddingVertical: 12, gap: 10,
@@ -1173,7 +1134,6 @@ const styles = StyleSheet.create({
   sheetTitle: { flex: 1, fontSize: 17, fontWeight: '700', color: COLORS.text },
   sheetSub:   { fontSize: 12, color: COLORS.sub, marginTop: 1 },
 
-  // Action rows
   actionBlock: { paddingHorizontal: 14, gap: 8, marginBottom: 4 },
   actionRow: {
     flexDirection: 'row', alignItems: 'center', gap: 14,
@@ -1193,7 +1153,6 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5, paddingHorizontal: 20, paddingVertical: 8,
   },
 
-  // Contact rows in sheet
   contactRow: {
     flexDirection: 'row', alignItems: 'center', gap: 14,
     marginHorizontal: 14, marginBottom: 8,
@@ -1204,17 +1163,14 @@ const styles = StyleSheet.create({
   contactName: { fontSize: 14, fontWeight: '600', color: COLORS.text },
   contactSub:  { fontSize: 12, color: COLORS.sub, marginTop: 2 },
 
-  // Group checkbox
   checkbox:   { width: 24, height: 24, borderRadius: 12, borderWidth: 1.5, borderColor: COLORS.sub, alignItems: 'center', justifyContent: 'center' },
   checkboxOn: { backgroundColor: COLORS.blue, borderColor: COLORS.blue },
 
-  // Error text for group name
   nameError: {
     fontSize: 12, color: COLORS.missed,
     marginHorizontal: 14, marginTop: -6, marginBottom: 8,
   },
 
-  // Retry button
   retryBtn: {
     marginTop: 16,
     borderRadius: RADIUS.full,
@@ -1234,7 +1190,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 
-  // Group chips
   chipsRow: { paddingHorizontal: 14, paddingBottom: 10, gap: 8 },
   chip: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
@@ -1248,7 +1203,6 @@ const styles = StyleSheet.create({
   chipInit: { fontSize: 9, color: '#fff', fontWeight: '700' },
   chipName: { fontSize: 12, fontWeight: '600', color: COLORS.text },
 
-  // Create group button
   nextBtnGrad: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     paddingHorizontal: 14, paddingVertical: 8, borderRadius: RADIUS.full,
@@ -1256,7 +1210,6 @@ const styles = StyleSheet.create({
   },
   nextBtnText: { fontSize: 13, fontWeight: '700', color: '#fff' },
 
-  // Glass text input
   glassInput: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     marginHorizontal: 14, marginBottom: 10,
@@ -1265,7 +1218,6 @@ const styles = StyleSheet.create({
   },
   inputField: { flex: 1, fontSize: 14, color: COLORS.text, padding: 0 },
 
-  // Keypad number display
   numberRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     marginHorizontal: 20, marginBottom: 12, minHeight: 52,
@@ -1275,7 +1227,6 @@ const styles = StyleSheet.create({
     fontSize: 34, fontWeight: '200', color: COLORS.text, letterSpacing: 5,
   },
 
-  // Keypad grid
   keyGrid: { marginHorizontal: 14, gap: 10, marginBottom: 16 },
   keyRow:  { flexDirection: 'row', gap: 10 },
   keyBtn:  {
@@ -1286,7 +1237,6 @@ const styles = StyleSheet.create({
   keyDigit: { fontSize: 26, fontWeight: '300', color: COLORS.text, lineHeight: 30 },
   keySub:   { fontSize: 9, fontWeight: '600', color: COLORS.sub, letterSpacing: 1 },
 
-  // Action buttons row
   rowActions:  { flexDirection: 'row', gap: 10, marginHorizontal: 14, marginBottom: 20 },
   cancelBtn:   {
     flex: 1,
@@ -1304,11 +1254,9 @@ const styles = StyleSheet.create({
   },
   confirmText: { fontSize: 14, fontWeight: '700', color: '#fff' },
 
-  // Empty state
   emptyWrap: { alignItems: 'center', paddingTop: 80, gap: 12 },
   emptyText: { fontSize: 15, color: COLORS.sub },
 
-  // Status ring (for future stories feature)
   ring: {
     width: 54, height: 54, borderRadius: 27,
     padding: 2, alignItems: 'center', justifyContent: 'center',
@@ -1318,7 +1266,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.95)', overflow: 'hidden',
   },
 
-  // Dropdown menu
   sheetDropdown: {
     marginHorizontal: 14, marginTop: 4, marginBottom: 10,
     borderRadius: RADIUS.lg, borderWidth: 1,
@@ -1330,7 +1277,6 @@ const styles = StyleSheet.create({
   },
   sheetDropdownTxt: { fontSize: 14, fontWeight: '600' },
 
-  // Sheet search bubble
   sheetSearchBubble: {
     flex: 1,
     flexDirection: 'row', alignItems: 'center', gap: 8,
@@ -1340,7 +1286,6 @@ const styles = StyleSheet.create({
   },
   sheetSearchInput: { flex: 1, fontSize: 14, color: COLORS.text, padding: 0 },
 
-  // Selected avatars row
   selectedAvatarsRow: {
     flexDirection: 'row', paddingHorizontal: 14,
     paddingBottom: 10, gap: 12, flexWrap: 'wrap',
@@ -1353,7 +1298,6 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
 
-  // Selected contact state
   contactRowSelected: {
     backgroundColor: 'rgba(30,156,240,0.12)',
     borderColor: 'rgba(30,156,240,0.30)',

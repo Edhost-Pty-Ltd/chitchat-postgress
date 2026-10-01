@@ -1,4 +1,15 @@
 // ─── Screen: Privacy Settings ────────────────────────────────────────────────
+//
+// COMPANION NOTE
+//   Privacy settings live on the owner's user doc. Companions can read them
+//   but cannot write — the rules require request.auth.uid == userId for
+//   users/{userId} updates, and a companion's auth.uid is anon, not the
+//   owner. So on a companion:
+//
+//     • Every control is disabled
+//     • A notice banner explains where to change them
+//     • ownerUid is used to load the correct privacy settings
+//
 import React from 'react';
 import {
   View, Switch, TouchableOpacity, StyleSheet,
@@ -6,10 +17,11 @@ import {
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { LinearGradient } from 'expo-linear-gradient';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
-import { COLORS, RADIUS } from '../types/theme';
+import { COLORS, RADIUS, SHADOW } from '../types/theme';
 import { RootStackParamList } from '../types';
-import { useAuth } from '../hooks/useAuth';
+import { useAuth } from '../context/AuthContext';
 import {
   usePrivacySettings,
   Visibility,
@@ -20,20 +32,22 @@ type NavProp = NativeStackNavigationProp<RootStackParamList, 'PrivacySettings'>;
 
 // ─── Shared row component ─────────────────────────────────────────────────────
 function Row({
-  icon, label, sub, value, onToggle, onPress, rightLabel,
+  icon, label, sub, value, onToggle, onPress, rightLabel, disabled,
 }: {
   icon: string; label: string; sub?: string;
   value?: boolean; onToggle?: (v: boolean) => void;
   onPress?: () => void; rightLabel?: string;
+  disabled?: boolean;
 }) {
   const { FG } = useForeground();
   const { fontFamily, textColor, iconColor } = useTypography();
   const { bevel } = useGlass();
   return (
     <TouchableOpacity
-      style={[styles.row, bevel]}
+      style={[styles.row, bevel, disabled && styles.disabled]}
       onPress={onPress}
-      activeOpacity={onPress ? 0.75 : 1}
+      activeOpacity={onPress && !disabled ? 0.75 : 1}
+      disabled={disabled}
     >
       <AppIcon glass tileSize={38} name={icon as any} size={18} color={iconColor} />
       <View style={styles.rowMeta}>
@@ -41,10 +55,10 @@ function Row({
         {sub ? <AppText style={[styles.rowSub, { color: FG.secondary }]}>{sub}</AppText> : null}
       </View>
       {onToggle != null
-        ? <Switch value={value} onValueChange={onToggle} trackColor={{ true: COLORS.blue }} />
+        ? <Switch value={value} onValueChange={onToggle} disabled={disabled} trackColor={{ true: COLORS.blue }} />
         : rightLabel != null
           ? <AppText style={[styles.rightLabel, { color: FG.secondary }]}>{rightLabel}</AppText>
-          : onPress
+          : onPress && !disabled
             ? <AppIcon name="chevron-forward" size={16} color={FG.secondary} />
             : null}
     </TouchableOpacity>
@@ -76,6 +90,7 @@ function VisibilityPicker({
             onPress={() => !disabled && onChange(o)}
             style={[styles.visBtn, value === o && styles.visBtnActive]}
             activeOpacity={disabled ? 1 : 0.75}
+            disabled={disabled}
           >
             <AppText
               style={[styles.visTxt, { color: value === o ? '#fff' : FG.secondary }]}
@@ -95,10 +110,27 @@ export default function PrivacySettingsScreen() {
   const navigation = useNavigation<NavProp>();
   const { FG } = useForeground();
   const { fontFamily, textColor } = useTypography();
-  const { user } = useAuth();
-  const uid = user?.uid ?? null;
+  const { bevel } = useGlass();
 
-  const { settings, loading, saving, updateSetting } = usePrivacySettings(uid);
+  // Use ownerUid so a companion loads the OWNER's privacy settings.
+  // `isCompanion` gates every write — see the note at the top of the file.
+  const { userId: ownerUid, isCompanion } = useAuth();
+
+  const { settings, loading, saving, updateSetting } = usePrivacySettings(ownerUid);
+
+  // When the user is a companion, every mutation goes through this wrapper
+  // which silently ignores the change and shows a notice instead. Centralised
+  // here so the picker/row components stay dumb.
+  const guardedUpdate = <K extends keyof typeof DEFAULT_PRIVACY>(key: K, value: (typeof DEFAULT_PRIVACY)[K]) => {
+    if (isCompanion) {
+      Alert.alert(
+        'Managed on your primary device',
+        'Privacy settings belong to the account owner. Open ChitChat on the phone you signed in with to change them.',
+      );
+      return;
+    }
+    updateSetting(key as any, value as any);
+  };
 
   if (loading) {
     return (
@@ -131,6 +163,27 @@ export default function PrivacySettingsScreen() {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.scroll}
       >
+        {/* Companion notice — settings are visible but read-only */}
+        {isCompanion && (
+          <View style={[styles.noticeCard, bevel]}>
+            <LinearGradient
+              colors={['#6366f1', '#8b5cf6']}
+              style={styles.noticeIconWrap}
+            >
+              <AppIcon name="link-outline" size={20} color="#fff" fixedColor />
+            </LinearGradient>
+            <View style={{ flex: 1 }}>
+              <AppText style={[styles.noticeTitle, { color: textColor, fontFamily }]}>
+                Read-only on this device
+              </AppText>
+              <AppText style={[styles.noticeBody, { color: FG.secondary }]}>
+                You can view these settings, but changing them requires the
+                primary device.
+              </AppText>
+            </View>
+          </View>
+        )}
+
         {/* ── Who can see ──────────────────────────────────────────── */}
         <AppText style={[styles.sectionLabel, { color: FG.secondary }]}>
           WHO CAN SEE
@@ -140,31 +193,36 @@ export default function PrivacySettingsScreen() {
           icon="time-outline"
           label="Last Seen"
           value={settings.lastSeen}
-          onChange={(v) => updateSetting('lastSeen', v)}
+          onChange={(v) => guardedUpdate('lastSeen', v)}
+          disabled={isCompanion}
         />
         <VisibilityPicker
           icon="person-circle-outline"
           label="Profile Photo"
           value={settings.profilePhoto}
-          onChange={(v) => updateSetting('profilePhoto', v)}
+          onChange={(v) => guardedUpdate('profilePhoto', v)}
+          disabled={isCompanion}
         />
         <VisibilityPicker
           icon="radio-button-on-outline"
           label="Status Updates"
           value={settings.statusVisibility}
-          onChange={(v) => updateSetting('statusVisibility', v)}
+          onChange={(v) => guardedUpdate('statusVisibility', v)}
+          disabled={isCompanion}
         />
         <VisibilityPicker
           icon="people-outline"
           label="Add Me to Groups"
           value={settings.groups}
-          onChange={(v) => updateSetting('groups', v)}
+          onChange={(v) => guardedUpdate('groups', v)}
+          disabled={isCompanion}
         />
         <VisibilityPicker
           icon="call-outline"
           label="Can Call Me"
           value={settings.calls}
-          onChange={(v) => updateSetting('calls', v)}
+          onChange={(v) => guardedUpdate('calls', v)}
+          disabled={isCompanion}
         />
 
         {/* ── Messages ──────────────────────────────────────────────── */}
@@ -181,7 +239,15 @@ export default function PrivacySettingsScreen() {
               : "Off \u2014 read ticks won't be sent or received"
           }
           value={settings.readReceipts}
+          disabled={isCompanion}
           onToggle={(v) => {
+            if (isCompanion) {
+              Alert.alert(
+                'Managed on your primary device',
+                'Read receipts belong to the account owner. Open ChitChat on the phone you signed in with to change them.',
+              );
+              return;
+            }
             if (!v) {
               Alert.alert(
                 'Turn off read receipts?',
@@ -206,7 +272,8 @@ export default function PrivacySettingsScreen() {
               : 'Off — messages are kept indefinitely'
           }
           value={settings.disappearingMessages}
-          onToggle={(v) => updateSetting('disappearingMessages', v)}
+          disabled={isCompanion}
+          onToggle={(v) => guardedUpdate('disappearingMessages', v)}
         />
 
         {/* ── Advanced ──────────────────────────────────────────────── */}
@@ -214,17 +281,22 @@ export default function PrivacySettingsScreen() {
           ADVANCED
         </AppText>
 
-        <Row
-          icon="ban-outline"
-          label="Blocked Contacts"
-          sub="Manage who can't contact you"
-          onPress={() => navigation.navigate('BlockedContacts')}
-        />
+        {/* Blocked Contacts is a write-oriented screen; on a companion the
+            item is hidden entirely so the user can't reach a dead-end. */}
+        {!isCompanion && (
+          <Row
+            icon="ban-outline"
+            label="Blocked Contacts"
+            sub="Manage who can't contact you"
+            onPress={() => navigation.navigate('BlockedContacts')}
+          />
+        )}
 
         <Row
           icon="phone-portrait-outline"
           label="Silence Unknown Callers"
           sub="Calls from unknown numbers are silenced automatically"
+          disabled={isCompanion}
           onPress={() =>
             Alert.alert(
               'Silence Unknown Callers',
@@ -283,4 +355,20 @@ const styles = StyleSheet.create({
   },
   visBtnActive: { backgroundColor: COLORS.blue },
   visTxt:       { fontSize: 11, fontWeight: '600' },
+
+  // Companion notice
+  noticeCard: {
+    flexDirection: 'row', gap: 14,
+    borderRadius: RADIUS.lg,
+    paddingHorizontal: 16, paddingVertical: 16,
+    marginBottom: 4,
+  },
+  noticeIconWrap: {
+    width: 42, height: 42, borderRadius: 12,
+    alignItems: 'center', justifyContent: 'center',
+    flexShrink: 0,
+    ...SHADOW.button,
+  },
+  noticeTitle: { fontSize: 14, fontWeight: '800', marginBottom: 4 },
+  noticeBody:  { fontSize: 12, lineHeight: 18 },
 });

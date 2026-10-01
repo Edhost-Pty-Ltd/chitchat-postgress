@@ -1,5 +1,18 @@
 // ─── useMessages Hook ─────────────────────────────────────────────────────────
 // Real-time listener for messages inside a single chat.
+//
+// COMPANION NOTE
+//   `ownerUid` is the account whose chats we're reading. On the primary device
+//   it equals the Firebase Auth uid; on a companion it's the owner's uid, and
+//   the companion's auth uid is different. Every write is attributed to
+//   `ownerUid`:
+//
+//     • senderId     = ownerUid
+//     • readBy       = ownerUid
+//     • deliveredTo  = ownerUid
+//
+//   That way a message sent from the companion looks identical to one sent
+//   from the owner's phone — same tick state, same read receipts.
 
 import { useState, useEffect } from 'react';
 import firestore from '@react-native-firebase/firestore';
@@ -48,7 +61,7 @@ function toDate(raw: any): Date | null {
   return new Date(raw);
 }
 
-export function useMessages(chatId: string | null, currentUserId: string | null) {
+export function useMessages(chatId: string | null, ownerUid: string | null) {
   const [messages, setMessages] = useState<FireMessage[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
@@ -107,9 +120,9 @@ export function useMessages(chatId: string | null, currentUserId: string | null)
             setLoading(false);
           });
 
-          if (currentUserId) {
-            fetchUserPrivacySettings(currentUserId).then((privacy) => {
-              markAsRead(chatId, currentUserId, privacy.readReceipts);
+          if (ownerUid) {
+            fetchUserPrivacySettings(ownerUid).then((privacy) => {
+              markAsRead(chatId, ownerUid, privacy.readReceipts);
             });
           }
         },
@@ -117,26 +130,26 @@ export function useMessages(chatId: string | null, currentUserId: string | null)
       );
 
     return () => unsub();
-  }, [chatId, currentUserId]);
+  }, [chatId, ownerUid]);
 
   async function sendMessage(text: string): Promise<boolean> {
-    if (!chatId || !currentUserId || !text.trim()) return false;
+    if (!chatId || !ownerUid || !text.trim()) return false;
     try {
       const trimmed = text.trim();
       const fsDb = db as ReturnType<typeof firestore>;
       await fsDb.collection('chats').doc(chatId).collection('messages').add({
-        senderId:    currentUserId,
+        senderId:    ownerUid,
         text:        trimmed,
         imageUrl:    null,
         voiceUrl:    null,
         type:        'text',
         timestamp:   firestore.FieldValue.serverTimestamp(),
-        readBy:      [currentUserId],
+        readBy:      [ownerUid],
         deliveredTo: [],
       });
       await fsDb.collection('chats').doc(chatId).update({
         'lastMessage.text':      trimmed,
-        'lastMessage.senderId':  currentUserId,
+        'lastMessage.senderId':  ownerUid,
         'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
       });
       return true;
@@ -149,11 +162,11 @@ export function useMessages(chatId: string | null, currentUserId: string | null)
   return { messages, loading, error, sendMessage };
 }
 
-async function markAsRead(chatId: string, userId: string, readReceipts = true) {
+async function markAsRead(chatId: string, ownerUid: string, readReceipts = true) {
   try {
     const fsDb = db as ReturnType<typeof firestore>;
     await fsDb.collection('chats').doc(chatId).update({
-      [`unreadCounts.${userId}`]: 0,
+      [`unreadCounts.${ownerUid}`]: 0,
     });
 
     if (!readReceipts) return;
@@ -168,16 +181,16 @@ async function markAsRead(chatId: string, userId: string, readReceipts = true) {
       const data = docSnap.data();
       const deliveredTo = data.deliveredTo || [];
       const readBy      = data.readBy      || [];
-      if (data.senderId === userId) return;
+      if (data.senderId === ownerUid) return;
 
-      if (!deliveredTo.includes(userId)) {
+      if (!deliveredTo.includes(ownerUid)) {
         batch.update(docSnap.ref, {
-          deliveredTo: firestore.FieldValue.arrayUnion(userId),
-          readBy:      firestore.FieldValue.arrayUnion(userId),
+          deliveredTo: firestore.FieldValue.arrayUnion(ownerUid),
+          readBy:      firestore.FieldValue.arrayUnion(ownerUid),
         });
-      } else if (!readBy.includes(userId)) {
+      } else if (!readBy.includes(ownerUid)) {
         batch.update(docSnap.ref, {
-          readBy: firestore.FieldValue.arrayUnion(userId),
+          readBy: firestore.FieldValue.arrayUnion(ownerUid),
         });
       }
     });

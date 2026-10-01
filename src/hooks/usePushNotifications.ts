@@ -1,10 +1,22 @@
 // ─── usePushNotifications Hook ────────────────────────────────────────────────
 // Handles expo-notifications setup, permissions, and push token registration.
+//
+// COMPANION NOTE
+//   The parameter is the OWNER uid (the account whose notifications we want to
+//   receive). On a companion device this is different from the Firebase Auth
+//   uid. Tokens are stored per-device in a subcollection so both the primary
+//   and its companions register independently:
+//
+//       users/{ownerUid}/pushTokens/{deviceId}   → { token, platform, updatedAt }
+//
+//   A server-side sender must fan out to all docs in that subcollection.
 
 import { useState, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
+import { DEVICE_ID_KEY } from './useLinkedDevices';
 
 let Notifications: any = null;
 try {
@@ -23,10 +35,6 @@ try {
 }
 
 // ── Safe unsubscribe helper ───────────────────────────────────────────────────
-// `Notifications.removeNotificationSubscription` was removed from expo-notifications.
-// The subscription objects returned by addNotification*Listener now expose a
-// `.remove()` method (EventSubscription). Older SDKs returned a plain function.
-// Handle both, and never call undefined().
 function removeSubscription(sub: any) {
   if (!sub) return;
   try {
@@ -42,19 +50,32 @@ function removeSubscription(sub: any) {
   }
 }
 
-export function usePushNotifications(userId: string | null) {
+function generateDeviceId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+async function getDeviceId(): Promise<string> {
+  let id = await AsyncStorage.getItem(DEVICE_ID_KEY);
+  if (!id) {
+    id = generateDeviceId();
+    await AsyncStorage.setItem(DEVICE_ID_KEY, id);
+  }
+  return id;
+}
+
+export function usePushNotifications(ownerUid: string | null) {
   const [expoPushToken, setExpoPushToken] = useState<string | null>(null);
   const [notification, setNotification] = useState<any | null>(null);
   const notificationListener = useRef<any>();
   const responseListener = useRef<any>();
 
   useEffect(() => {
-    if (!userId || !Notifications) return;
+    if (!ownerUid || !Notifications) return;
 
     registerForPushNotificationsAsync().then((token) => {
       if (token) {
         setExpoPushToken(token);
-        savePushToken(userId, token);
+        savePushToken(ownerUid, token);
       }
     });
 
@@ -72,7 +93,7 @@ export function usePushNotifications(userId: string | null) {
       if (notificationListener.current) removeSubscription(notificationListener.current);
       if (responseListener.current)     removeSubscription(responseListener.current);
     };
-  }, [userId]);
+  }, [ownerUid]);
 
   return { expoPushToken, notification };
 }
@@ -113,14 +134,24 @@ async function registerForPushNotificationsAsync(): Promise<string | null> {
   }
 }
 
-async function savePushToken(userId: string, token: string) {
+async function savePushToken(ownerUid: string, token: string) {
   try {
+    const deviceId = await getDeviceId();
     const fsDb = db as ReturnType<typeof firestore>;
-    await fsDb.collection('users').doc(userId).set(
-      { pushToken: token, pushTokenUpdatedAt: firestore.FieldValue.serverTimestamp(), platform: Platform.OS },
-      { merge: true },
-    );
-    console.log('[usePushNotifications] Push token saved');
+
+    await fsDb
+      .collection('users').doc(ownerUid)
+      .collection('pushTokens').doc(deviceId)
+      .set(
+        {
+          token,
+          platform: Platform.OS,
+          updatedAt: firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+
+    console.log('[usePushNotifications] Push token saved for ownerUid:', ownerUid, 'device:', deviceId);
   } catch (error) {
     console.error('[usePushNotifications] Error saving push token:', error);
   }

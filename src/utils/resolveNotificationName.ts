@@ -1,85 +1,71 @@
-// ─── Notification Name Resolution ────────────────────────────────────────────
-// Resolves display names for notifications using device contacts.
-// Priority:
-//   1. Contact name from device phone book (if phone number is saved)
-//   2. Raw phone number (if NOT in contacts)
-// 
-// Never uses the user's Firebase displayName (account registration username).
+// ─── Display Name Resolution ─────────────────────────────────────────────────
+// Resolves a human-readable display name for a chat.
+//
+// Priority chain (direct chats):
+//   1. Device phone book (via the other member's phone number)
+//   2. Firestore users/{uid}.displayName — if it's set and looks like a real
+//      name (i.e. not just the phone number)
+//   3. Firestore users/{uid}.phone (raw phone as last resort)
+//   4. Firestore users/{uid}.displayName even if it looks like a phone
+//   5. 'Unknown'
+//
+// Group chats always use groupName (or 'Group').
+//
+// COMPANION NOTE
+//   A companion device has a different (usually empty) phone book from the
+//   primary. Falling back to Firestore displayName ensures the companion
+//   still shows the same human names the primary sees.
 
-import { getContactsAsync, Fields } from 'expo-contacts/legacy';
-import { normalizePhone } from './phoneUtils';
-
-let cachedPhoneToName: Map<string, string> | null = null;
-let cachePromise: Promise<Map<string, string>> | null = null;
-
-/**
- * Loads device contacts and builds a phone → name map.
- * Results are cached so subsequent calls return immediately.
- */
-async function loadPhoneToNameMap(): Promise<Map<string, string>> {
-  // Return cached map if already loaded
-  if (cachedPhoneToName) {
-    return cachedPhoneToName;
-  }
-
-  // If already loading, return the existing promise
-  if (cachePromise) {
-    return cachePromise;
-  }
-
-  // Start loading
-  cachePromise = (async () => {
-    const phoneToName = new Map<string, string>();
-
-    try {
-      const { data } = await getContactsAsync({
-        fields: [Fields.Name, Fields.PhoneNumbers],
-      });
-
-      for (const contact of data) {
-        if (!contact.phoneNumbers) continue;
-        for (const pn of contact.phoneNumbers) {
-          if (!pn.number) continue;
-          const normalized = normalizePhone(pn.number);
-          const name = contact.name || pn.number;
-          phoneToName.set(normalized, name);
-        }
-      }
-
-      console.log('[resolveNotificationName] Loaded', phoneToName.size, 'contacts');
-    } catch (err) {
-      console.error('[resolveNotificationName] Error loading contacts:', err);
-      // Return empty map on error
-    }
-
-    cachedPhoneToName = phoneToName;
-    cachePromise = null;
-    return phoneToName;
-  })();
-
-  return cachePromise;
+export interface ChatInfo {
+  type: string;
+  members: string[];
+  groupName: string | null;
 }
 
-/**
- * Resolves a user's display name for notifications.
- * 
- * @param phoneNumber - User's phone number in E.164 format
- * @returns Contact name if saved in phone book, otherwise the phone number
- */
-export async function resolveNotificationName(phoneNumber: string): Promise<string> {
-  const phoneToName = await loadPhoneToNameMap();
-  
-  // Check if this phone number exists in contacts
-  const contactName = phoneToName.get(phoneNumber);
-  
-  // Return contact name if found, otherwise return the phone number
-  return contactName || phoneNumber;
+export interface FirestoreUserInfo {
+  displayName: string;
+  phone: string;
 }
 
-/**
- * Clears the contact cache. Call this if contacts change.
- */
-export function clearNotificationNameCache() {
-  cachedPhoneToName = null;
-  cachePromise = null;
+const PHONE_LIKE = /^\+?[\d\s\-()]{5,}$/;
+
+export function resolveDisplayName(
+  chat: ChatInfo,
+  currentUserId: string,
+  contactsMap: Map<string, string>,
+  firestoreUsers: Map<string, FirestoreUserInfo>,
+): string {
+  // 1. Group chats use groupName or fallback to "Group"
+  if (chat.type === 'group') {
+    return chat.groupName ?? 'Group';
+  }
+
+  // Direct chat — the other member
+  const otherMemberId = chat.members.find((id) => id !== currentUserId);
+  if (!otherMemberId) return 'Unknown';
+
+  const otherUser = firestoreUsers.get(otherMemberId);
+  if (!otherUser) return 'Unknown';
+
+  const fsName  = (otherUser.displayName || '').trim();
+  const phone   = (otherUser.phone || '').trim();
+
+  // 2. Device phone book (via phone)
+  if (phone) {
+    const contactName = contactsMap.get(phone);
+    if (contactName) return contactName;
+  }
+
+  // 3. Firestore displayName — if it's set and doesn't look like a phone
+  if (fsName && fsName !== phone && !PHONE_LIKE.test(fsName) && fsName !== 'Unknown') {
+    return fsName;
+  }
+
+  // 4. Raw phone number
+  if (phone) return phone;
+
+  // 5. Firestore displayName even if it looks like a phone
+  if (fsName && fsName !== 'Unknown') return fsName;
+
+  return 'Unknown';
 }

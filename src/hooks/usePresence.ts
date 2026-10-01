@@ -1,6 +1,17 @@
 // ─── usePresence Hook ─────────────────────────────────────────────────────────
 // 1. WRITE — keeps the current user's presence current.
 // 2. READ  — watches another user's presence in real time.
+//
+// COMPANION NOTE
+//   Presence is written only by the PRIMARY device. Companion devices must
+//   never call writePresence on the owner's uid — two writers fight each
+//   other and the status flickers. Callers should pass null on companion:
+//
+//       useWritePresence(isCompanion ? null : userId)
+//
+//   useWritePresence already no-ops on a null input. writePresence() itself
+//   now also refuses a falsy uid, so a stray call can never write to
+//   users/null.
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { AppState, AppStateStatus } from 'react-native';
@@ -24,6 +35,10 @@ export function formatLastSeen(date: Date): string {
 }
 
 export async function writePresence(userId: string, online: boolean): Promise<void> {
+  // Defensive: never write to users/null. Callers should pass a real uid,
+  // but a stray falsy value would create a garbage doc at users/null.
+  if (!userId) return;
+
   try {
     const fsDb = db as ReturnType<typeof firestore>;
     await fsDb.collection('users').doc(userId).set(
@@ -86,7 +101,7 @@ export function useOtherUserPresence(
 
       const fsDb = db as ReturnType<typeof firestore>;
       unsubFn = fsDb.collection('users').doc(otherUserId).onSnapshot((snap) => {
-        if (cancelled || !snap.exists) return;
+        if (cancelled || !snap.exists()) return;
         const data = snap.data()!;
         const online = !!data.online;
         const photoURL = photoVisible ? (data.photoURL || null) : null;

@@ -9,12 +9,12 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import './src/config/firebase';
 
 import { AuthProvider, useAuth } from './src/context/AuthContext';
-import { useAuth as useHooksAuth } from './src/hooks/useAuth';
 import { ThemeProvider } from './src/context/ThemeContext';
 import { CallProvider } from './src/context/CallContext';
 import { NotificationProvider } from './src/context/NotificationContext';
 import { FloatingCallProvider } from './src/context/FloatingCallContext';
 import { CartProvider } from './src/context/CartContext';
+import { TeamInboxProvider } from './src/context/TeamInboxContext';
 import AppNavigator from './src/navigation/AppNavigator';
 import ToastOverlay from './src/components/ToastNotification';
 import { FloatingCallManager } from './src/components/FloatingCallManager';
@@ -54,11 +54,16 @@ function ActivityWatcher() {
   return null;
 }
 
-// Push notification setup — uses the Firebase Auth user uid from hooks/useAuth
+// Push notification setup.
+//
+// The registration is keyed on the OWNER uid (from AuthContext), not the
+// Firebase Auth uid. On a companion device the two differ — the companion
+// has its own anonymous auth uid, but notifications belong to the owner's
+// account, so tokens are stored under users/{ownerUid}/pushTokens/{deviceId}
+// and every linked device registers its own token independently.
 function PushNotificationManager() {
-  // hooks/useAuth exposes the native Firebase user object with uid
-  const { user } = useHooksAuth();
-  usePushNotifications(user?.uid ?? null);
+  const { ownerUid } = useAuth();
+  usePushNotifications(ownerUid);
   return null;
 }
 
@@ -88,7 +93,7 @@ export default function App() {
       const ErrorUtils = (global as any).ErrorUtils;
       if (ErrorUtils) {
         const originalHandler = ErrorUtils.getGlobalHandler();
-        
+
         ErrorUtils.setGlobalHandler((error: any, isFatal?: boolean) => {
           // Suppress auth/no-current-user errors
           if (error?.code === 'auth/no-current-user' || error?.message?.includes('no-current-user')) {
@@ -100,7 +105,7 @@ export default function App() {
             originalHandler(error, isFatal);
           }
         });
-        
+
         return () => {
           if (originalHandler) {
             ErrorUtils.setGlobalHandler(originalHandler);
@@ -118,15 +123,17 @@ export default function App() {
             <NotificationProvider>
               <FloatingCallProvider>
                 <CartProvider>
-                  <ActivityWatcher />
-                  <PushNotificationManager />
-                  <NavigationContainer>
-                    <StatusBar style="auto" />
-                    <AppNavigator />
-                    <ToastOverlay />
-                    <FloatingCallManager />
-                    <BiometricGate />
-                  </NavigationContainer>
+                  <TeamInboxProvider>
+                    <ActivityWatcher />
+                    <PushNotificationManager />
+                    <NavigationContainer>
+                      <StatusBar style="auto" />
+                      <AppNavigator />
+                      <ToastOverlay />
+                      <FloatingCallManager />
+                      <BiometricGate />
+                    </NavigationContainer>
+                  </TeamInboxProvider>
                 </CartProvider>
               </FloatingCallProvider>
             </NotificationProvider>

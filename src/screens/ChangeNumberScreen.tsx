@@ -1,8 +1,15 @@
 // ─── Screen: Change Number ───────────────────────────────────────────────────
 // Two-step flow:
-//   Step 1 — enter new SA phone number (country picker + dial pad)
+//   Step 1 — enter new phone number (country picker + dial pad)
 //   Step 2 — verify OTP sent to the new number
-//   On success — updates the phone number in AuthContext
+//   On success — updates the phone number in AuthContext + Firestore
+//
+// COMPANION NOTE
+//   Changing the phone number is an update on users/{uid} and the rules
+//   require request.auth.uid == userId. Companions cannot satisfy that, so
+//   the entire flow is blocked on a companion device and replaced with a
+//   notice pointing at the primary phone.
+//
 import React, { useState, useRef, useMemo } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView,
@@ -80,7 +87,7 @@ function CountryPicker({ visible, selected, onSelect, onClose }: {
 
 export default function ChangeNumberScreen() {
   const navigation = useNavigation<NavProp>();
-  const { phone: currentPhone, displayName, signIn } = useAuth();
+  const { phone: currentPhone, displayName, signIn, isCompanion } = useAuth();
   const { sendOTP, verifyOTP } = useFirebaseAuth();
   const { FG } = useForeground();
   const { fontFamily, textColor } = useTypography();
@@ -135,10 +142,8 @@ export default function ChangeNumberScreen() {
     try {
       const ok = await verifyOTP(code);
       if (ok) {
-        // Update phone number in AuthContext
         await signIn(fullNumber);
-        
-        // Update phone number in Firestore user document
+
         const authInstance = getAuth();
         const currentUser = authInstance.currentUser;
         if (currentUser) {
@@ -146,17 +151,16 @@ export default function ChangeNumberScreen() {
           await fsDb.collection('users').doc(currentUser.uid).update({ phone: fullNumber });
           console.log('[ChangeNumberScreen] Updated phone number in Firestore');
         }
-        
-        // Send number change notification to all chats
+
         const { success, count } = await sendNumberChangeNotification(
           currentUser?.uid || '',
           currentPhone || 'unknown',
           fullNumber,
           displayName || 'User'
         );
-        
+
         console.log(`[ChangeNumberScreen] Sent ${count} number change notifications`);
-        
+
         Alert.alert(
           'Number updated ✓',
           `Your number has been changed to ${fullNumber}.\n\n${count > 0 ? `A notification has been sent to ${count} chat${count > 1 ? 's' : ''} letting your contacts know.` : 'Your contacts will see your new number.'}`,
@@ -177,22 +181,51 @@ export default function ChangeNumberScreen() {
     if (digits.length === 6) handleVerify();
   };
 
+  // ── Shared header component so both branches render the same bar ──
+  const Header = (
+    <View style={[styles.header, { backgroundColor: 'transparent', borderBottomColor: 'rgba(30,156,240,0.18)' }]}>
+      <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
+        <AppIcon name="chevron-back" size={26} color={COLORS.blue} fixedColor />
+      </TouchableOpacity>
+      <AppText style={[styles.headerTitle, { color: COLORS.text }]}>Change Number</AppText>
+      <View style={{ width: 36 }} />
+    </View>
+  );
+
   return (
     <>
       <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <LinearGradient colors={['#87CEEB', '#C5E8F7', '#E8F6FF']} style={StyleSheet.absoluteFill} />
 
-        {/* Header */}
-        <View style={[styles.header, { backgroundColor: 'transparent', borderBottomColor: 'rgba(30,156,240,0.18)' }]}>
-          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-            <AppIcon name="chevron-back" size={26} color={COLORS.blue} fixedColor />
-          </TouchableOpacity>
-          <AppText style={[styles.headerTitle, { color: COLORS.text }]}>Change Number</AppText>
-          <View style={{ width: 36 }} />
-        </View>
+        {Header}
 
-        {/* ── Web-only notice ── */}
-        {Platform.OS === 'web' ? (
+        {/* ── Companion: not available here ── */}
+        {isCompanion ? (
+          <ScrollView contentContainerStyle={styles.scroll}>
+            <View style={[styles.card, bevel, { alignItems: 'center', gap: 16 }]}>
+              <View style={styles.webNoticeIcon}>
+                <Ionicons name="link-outline" size={40} color={COLORS.blue} />
+              </View>
+              <AppText style={[styles.cardTitle, { color: COLORS.text, textAlign: 'center' }]}>
+                Managed on your primary device
+              </AppText>
+              <AppText style={[styles.cardSub, { color: COLORS.sub, textAlign: 'center', marginBottom: 0 }]}>
+                This is a companion device. Your phone number belongs to the
+                account owner and can only be changed from the phone you signed
+                in with.
+                {'\n\n'}Open{' '}
+                <AppText fixedColor style={{ fontWeight: '700', color: COLORS.text }}>ChitChat</AppText>{' '}
+                on your primary phone to update it.
+              </AppText>
+              <TouchableOpacity onPress={() => navigation.goBack()} activeOpacity={0.85}>
+                <LinearGradient colors={GRADIENTS.primary} style={[styles.primaryBtn, { paddingHorizontal: 32 }]}>
+                  <AppText fixedColor style={styles.primaryBtnText}>Go Back</AppText>
+                </LinearGradient>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+        ) : Platform.OS === 'web' ? (
+          /* ── Web-only notice ── */
           <ScrollView contentContainerStyle={styles.scroll}>
             <View style={[styles.card, bevel, { alignItems: 'center', gap: 16 }]}>
               <View style={styles.webNoticeIcon}>
@@ -214,6 +247,7 @@ export default function ChangeNumberScreen() {
             </View>
           </ScrollView>
         ) : (
+          /* ── Primary device: normal flow ── */
           <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           <View style={[styles.card, bevel]}>
 
@@ -264,7 +298,6 @@ export default function ChangeNumberScreen() {
                   <AppText fixedColor style={{ fontWeight: '700', color: COLORS.text }}>{fullNumber}</AppText>
                 </AppText>
 
-                {/* Single hidden input captures all 6 digits + autofill */}
                 <TextInput
                   ref={otpInputRef}
                   style={styles.otpHiddenInput}
@@ -330,10 +363,12 @@ export default function ChangeNumberScreen() {
             )}
           </View>
         </ScrollView>
-        )} {/* end Platform.OS === 'web' ? ... : ( */}
+        )}
       </KeyboardAvoidingView>
 
-      <CountryPicker visible={pickerOpen} selected={country} onSelect={setCountry} onClose={() => setPickerOpen(false)} />
+      {!isCompanion && (
+        <CountryPicker visible={pickerOpen} selected={country} onSelect={setCountry} onClose={() => setPickerOpen(false)} />
+      )}
     </>
   );
 }
@@ -375,7 +410,6 @@ const styles = StyleSheet.create({
   backRow:     { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
   backRowText: { fontSize: 13, color: COLORS.blue, fontWeight: '600', marginLeft: 2 },
 
-  otpRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 6, marginBottom: 16 },
   otpRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 6, marginBottom: 16 },
   otpBox: { width: 46, height: 54, borderRadius: RADIUS.md, alignItems: 'center', justifyContent: 'center', overflow: 'hidden', ...GLASS.input },
   otpBoxFilled: { borderColor: COLORS.blue, backgroundColor: 'rgba(30,156,240,0.10)' },

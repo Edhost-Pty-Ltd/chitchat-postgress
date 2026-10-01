@@ -77,7 +77,7 @@ const modalOptions = {
 } as const;
 
 export default function AppNavigator() {
-  const { isSignedIn, loading, phone, displayName } = useAuth();
+  const { isSignedIn, loading, phone, displayName, isCompanion } = useAuth();
 
   // profileExists: null = still checking, true/false = done
   const [profileExists, setProfileExists] = useState<boolean | null>(null);
@@ -90,6 +90,18 @@ export default function AppNavigator() {
   // displayName may not yet be cached in AsyncStorage.
   const checkProfileExists = useCallback(async (retry = 0) => {
     if (phone === '+0000000000') { setProfileExists(true); return; }
+
+    // Companion devices — linked via QR/code, no Firebase Auth user.
+    // Check AsyncStorage directly since isCompanion state might not be set yet
+    // when this callback first runs.
+    if (isCompanion) { setProfileExists(true); return; }
+
+    // Also check AsyncStorage for companion key as a safety net
+    try {
+      const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+      const companionOwner = await AsyncStorage.getItem('linked_device_owner_uid');
+      if (companionOwner) { setProfileExists(true); return; }
+    } catch {}
 
     const currentUser = getAuth().currentUser;
 
@@ -131,14 +143,14 @@ export default function AppNavigator() {
     }
   }, [isSignedIn, loading]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sign out users authenticated without a profile
+  // Sign out users authenticated without a profile (but never companions)
   useEffect(() => {
-    if (isSignedIn && profileExists === false && !profileCheckError && phone !== '+0000000000') {
+    if (isSignedIn && profileExists === false && !profileCheckError && phone !== '+0000000000' && !isCompanion) {
       (async () => {
         await firebaseSignOut(getAuth());
       })();
     }
-  }, [isSignedIn, profileExists, profileCheckError, phone]);
+  }, [isSignedIn, profileExists, profileCheckError, phone, isCompanion]);
 
   // ── Loading states ──────────────────────────────────────────────────────
 

@@ -1,5 +1,10 @@
 // ─── useNotificationSync Hook ─────────────────────────────────────────────────
 // Syncs real-time Firestore events to the notification system.
+//
+// COMPANION NOTE
+//   `ownerUid` is the real account uid. On a companion the Chats and Call
+//   History listeners may receive permission-denied while companionLinks
+//   propagates. Retry with backoff.
 
 import { useEffect, useRef } from 'react';
 import firestore from '@react-native-firebase/firestore';
@@ -10,7 +15,9 @@ import { resolveNotificationName } from '../utils/resolveNotificationName';
 interface LastMessageTimestamp { [chatId: string]: Date; }
 type PushNotificationFn = (n: Omit<AppNotification, 'id' | 'time' | 'read'>) => void;
 
-export function useNotificationSync(userId: string | null, pushNotification: PushNotificationFn) {
+const MAX_PERM_RETRIES = 8;
+
+export function useNotificationSync(ownerUid: string | null, pushNotification: PushNotificationFn) {
   const pushNotificationRef      = useRef(pushNotification);
   const lastMessageTimestamps    = useRef<LastMessageTimestamp>({});
   const unsubscribers            = useRef<(() => void)[]>([]);
@@ -19,9 +26,7 @@ export function useNotificationSync(userId: string | null, pushNotification: Pus
   useEffect(() => { pushNotificationRef.current = pushNotification; });
 
   useEffect(() => {
-    console.log('[useNotificationSync] Effect triggered, userId:', userId);
-
-    if (!userId) {
+    if (!ownerUid) {
       unsubscribers.current.forEach((u) => u());
       unsubscribers.current = [];
       lastMessageTimestamps.current = {};
@@ -29,81 +34,101 @@ export function useNotificationSync(userId: string | null, pushNotification: Pus
       return;
     }
 
-    console.log('[useNotificationSync] Setting up listeners for userId:', userId);
-
+    let cancelled = false;
     const fsDb = db as ReturnType<typeof firestore>;
 
-    // ── 1. New messages ───────────────────────────────────────────
-    const unsubChats = fsDb
-      .collection('chats')
-      .where('members', 'array-contains', userId)
-      .onSnapshot(
-        async (chatsSnap) => {
-          if (isInitialLoad.current) {
-            chatsSnap.docs.forEach((chatDoc) => {
-              const lm = chatDoc.data().lastMessage;
-              if (lm?.timestamp) {
-                lastMessageTimestamps.current[chatDoc.id] =
-                  typeof lm.timestamp.toDate === 'function'
-                    ? lm.timestamp.toDate()
-                    : new Date(lm.timestamp);
-              }
-            });
-            isInitialLoad.current = false;
-            return;
-          }
+    // ── 1. New messages (with permission-denied retry) ─────────────────────
+    let chatAttempt = 0;
+    let chatUnsub: (() => void) | null = null;
+    let chatRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
-          for (const change of chatsSnap.docChanges()) {
-            if (change.type !== 'modified' && change.type !== 'added') continue;
-            const chatId   = change.doc.id;
-            const chatData = change.doc.data();
-            const lastMsg  = chatData.lastMessage;
+    const attachChatsListener = () => {
+      if (cancelled) return;
+      chatUnsub = fsDb
+        .collection('chats')
+        .where('members', 'array-contains', ownerUid)
+        .onSnapshot(
+          async (chatsSnap) => {
+            if (isInitialLoad.current) {
+              chatsSnap.docs.forEach((chatDoc) => {
+                const lm = chatDoc.data().lastMessage;
+                if (lm?.timestamp) {
+                  lastMessageTimestamps.current[chatDoc.id] =
+                    typeof lm.timestamp.toDate === 'function'
+                      ? lm.timestamp.toDate()
+                      : new Date(lm.timestamp);
+                }
+              });
+              isInitialLoad.current = false;
+              return;
+            }
 
-            if (!lastMsg?.timestamp) continue;
+            for (const change of chatsSnap.docChanges()) {
+              if (change.type !== 'modified' && change.type !== 'added') continue;
+              const chatId   = change.doc.id;
+              const chatData = change.doc.data();
+              const lastMsg  = chatData.lastMessage;
 
-            const lastMsgTime  = typeof lastMsg.timestamp.toDate === 'function'
-              ? lastMsg.timestamp.toDate() : new Date(lastMsg.timestamp);
-            const lastKnownTime = lastMessageTimestamps.current[chatId];
+              if (!lastMsg?.timestamp) continue;
 
-            if (
-              lastMsg.senderId !== userId &&
-              (!lastKnownTime || lastMsgTime > lastKnownTime)
-            ) {
-              lastMessageTimestamps.current[chatId] = lastMsgTime;
-              try {
-                const senderSnap = await fsDb.collection('users').doc(lastMsg.senderId).get();
-                if (!senderSnap.exists) continue;
-                const senderPhone = senderSnap.data()!.phone;
-                const senderName  = await resolveNotificationName(senderPhone);
-                const chatName    = chatData.type === 'group' && chatData.groupName
-                  ? chatData.groupName : senderName;
+              const lastMsgTime  = typeof lastMsg.timestamp.toDate === 'function'
+                ? lastMsg.timestamp.toDate() : new Date(lastMsg.timestamp);
+              const lastKnownTime = lastMessageTimestamps.current[chatId];
 
-                await pushNotificationRef.current({
-                  type:  'message',
-                  title: chatName,
-                  body:  chatData.type === 'group'
-                    ? `${senderName}: ${lastMsg.text || 'Sent a media file'}`
-                    : (lastMsg.text || 'Sent a media file'),
-                  contactId: chatData.type === 'direct' ? lastMsg.senderId : undefined,
-                });
-              } catch (err) {
-                console.error('[useNotificationSync] Error fetching sender info:', err);
+              if (
+                lastMsg.senderId !== ownerUid &&
+                (!lastKnownTime || lastMsgTime > lastKnownTime)
+              ) {
+                lastMessageTimestamps.current[chatId] = lastMsgTime;
+                try {
+                  const senderSnap = await fsDb.collection('users').doc(lastMsg.senderId).get();
+                  if (!senderSnap.exists) continue;
+                  const senderPhone = senderSnap.data()!.phone;
+                  const senderName  = await resolveNotificationName(senderPhone);
+                  const chatName    = chatData.type === 'group' && chatData.groupName
+                    ? chatData.groupName : senderName;
+
+                  await pushNotificationRef.current({
+                    type:  'message',
+                    title: chatName,
+                    body:  chatData.type === 'group'
+                      ? `${senderName}: ${lastMsg.text || 'Sent a media file'}`
+                      : (lastMsg.text || 'Sent a media file'),
+                    contactId: chatData.type === 'direct' ? lastMsg.senderId : undefined,
+                  });
+                } catch (err) {
+                  console.warn('[useNotificationSync] Sender lookup failed (ignored):', err);
+                }
               }
             }
-          }
-        },
-        (error) => console.error('[useNotificationSync] Error in chats listener:', error),
-      );
+          },
+          (err) => {
+            if (cancelled) return;
+            const isPerm =
+              err?.message === 'firestore/permission-denied' ||
+              /permission-denied/i.test(err?.message || '');
+            if (isPerm && chatAttempt < MAX_PERM_RETRIES) {
+              const delay = Math.min(200 * (chatAttempt + 1), 2000);
+              chatAttempt += 1;
+              console.warn(
+                `[useNotificationSync] chats permission-denied — retry ${chatAttempt}/${MAX_PERM_RETRIES} in ${delay}ms`,
+              );
+              chatRetryTimer = setTimeout(attachChatsListener, delay);
+              return;
+            }
+            console.error('[useNotificationSync] Error in chats listener:', err);
+          },
+        );
+    };
 
-    unsubscribers.current.push(unsubChats);
+    attachChatsListener();
 
-    // ── 2. Missed / rejected calls ────────────────────────────────
+    // ── 2. Missed / rejected calls (permission-safe) ────────────────────────
+    const lastCallCheck = new Date();
+    let callsUnsub: (() => void) | null = null;
     try {
-      const lastCallCheck = new Date();
-      console.log('[useNotificationSync] Setting up call history listener, will notify for calls after:', lastCallCheck);
-
-      const unsubCalls = fsDb
-        .collection('users').doc(userId).collection('callHistory')
+      callsUnsub = fsDb
+        .collection('users').doc(ownerUid).collection('callHistory')
         .where('direction', '==', 'incoming')
         .where('status', 'in', ['missed', 'rejected'])
         .orderBy('timestamp', 'desc')
@@ -127,12 +152,12 @@ export function useNotificationSync(userId: string | null, pushNotification: Pus
               try {
                 if (callData.otherParty?.userId) {
                   const callerSnap = await fsDb.collection('users').doc(callData.otherParty.userId).get();
-                  if (callerSnap.exists) {
+                  if (callerSnap.exists()) {
                     callerName = await resolveNotificationName(callerSnap.data()!.phone);
                   }
                 }
               } catch (err) {
-                console.error('[useNotificationSync] Error resolving caller name:', err);
+                console.warn('[useNotificationSync] Caller lookup failed (ignored):', err);
               }
 
               pushNotificationRef.current({
@@ -143,20 +168,23 @@ export function useNotificationSync(userId: string | null, pushNotification: Pus
               });
             }
           },
-          (error) => console.error('[useNotificationSync] Error in call history listener:', error),
+          (err) => {
+            // Call history may be unavailable while the companion link is
+            // still propagating — log quietly instead of erroring.
+            console.warn('[useNotificationSync] callHistory listener:', (err as any)?.code || err);
+          },
         );
-
-      unsubscribers.current.push(unsubCalls);
-      console.log('[useNotificationSync] Call history listener set up successfully');
-    } catch (error) {
-      console.error('[useNotificationSync] Failed to set up call history listener:', error);
+    } catch (err) {
+      console.warn('[useNotificationSync] Failed to attach callHistory listener:', err);
     }
 
-    console.log('[useNotificationSync] All listeners set up successfully');
     return () => {
-      console.log('[useNotificationSync] Cleaning up listeners');
+      cancelled = true;
+      if (chatRetryTimer) clearTimeout(chatRetryTimer);
+      chatUnsub?.();
+      callsUnsub?.();
       unsubscribers.current.forEach((u) => u());
       unsubscribers.current = [];
     };
-  }, [userId]);
+  }, [ownerUid]);
 }

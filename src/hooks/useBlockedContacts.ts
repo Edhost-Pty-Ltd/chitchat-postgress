@@ -1,6 +1,16 @@
 // ─── useBlockedContacts Hook ──────────────────────────────────────────────────
+//
+// COMPANION NOTE
+//   The list is readable on a companion device (the owner's blocked list),
+//   but block/unblock writes target users/{currentUserId}/blockedUsers and
+//   require request.auth.uid == currentUserId per the rules. On a companion
+//   the auth uid is anon, not the owner uid, so writes are refused. Both
+//   write functions now fail fast with a clear error instead of leaking a
+//   raw permission-denied from Firestore.
+//
 import { useState, useEffect, useCallback } from 'react';
 import firestore from '@react-native-firebase/firestore';
+import { getAuth } from '@react-native-firebase/auth';
 import { db } from '../config/firebase';
 
 export interface BlockedContact {
@@ -18,6 +28,15 @@ function toDate(raw: any): Date {
   if (!raw) return new Date();
   if (typeof raw.toDate === 'function') return raw.toDate();
   return new Date(raw);
+}
+
+// True when the caller's Firebase Auth uid matches `uid` — i.e. this is the
+// primary (or an agent acting as themselves) and writes to users/{uid}/...
+// are permitted. False on companion devices and when signed out.
+function canWriteFor(uid: string | null): boolean {
+  if (!uid) return false;
+  const authUid = getAuth().currentUser?.uid;
+  return !!authUid && authUid === uid;
 }
 
 async function sendBlockNotifications(
@@ -156,6 +175,12 @@ export function useBlockedContacts(currentUserId: string | null) {
       photoURL?: string | null, phone?: string, blockerDisplayName?: string,
     ): Promise<{ success: boolean; error?: string }> => {
       if (!currentUserId) return { success: false, error: 'Not authenticated' };
+      if (!canWriteFor(currentUserId)) {
+        return {
+          success: false,
+          error: 'Blocking is only available on the primary device.',
+        };
+      }
       try {
         const currentUserSnap = await fsDb().collection('users').doc(currentUserId).get();
         const currentLastSeen = currentUserSnap.exists ? currentUserSnap.data()!.lastSeen : null;
@@ -182,6 +207,12 @@ export function useBlockedContacts(currentUserId: string | null) {
       userId: string, displayName?: string, unblockerDisplayName?: string,
     ): Promise<{ success: boolean; error?: string }> => {
       if (!currentUserId) return { success: false, error: 'Not authenticated' };
+      if (!canWriteFor(currentUserId)) {
+        return {
+          success: false,
+          error: 'Unblocking is only available on the primary device.',
+        };
+      }
       try {
         const blockedRef  = fsDb().collection('users').doc(currentUserId).collection('blockedUsers').doc(userId);
         const blockedSnap = await blockedRef.get();

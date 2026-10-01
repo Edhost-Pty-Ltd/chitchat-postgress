@@ -222,6 +222,7 @@ export default function CreateAccountScreen() {
   const [errorMsg, setErrorMsg] = useState('');
   const [nameError, setNameError] = useState('');
   const [resendTimer, setResendTimer] = useState(0);
+  const [focusedOtp, setFocusedOtp] = useState<number | null>(null);
 
   // Business-specific fields
   const [email, setEmail] = useState('');
@@ -411,7 +412,25 @@ export default function CreateAccountScreen() {
 
   // ── OTP helpers ───────────────────────────────────────────────────────────
   const handleOtpChange = (text: string, i: number) => {
-    const digit = text.replace(/\D/g, '').slice(-1);
+    const digits = text.replace(/\D/g, '');
+
+    // Autofill / paste of a full code into a single box
+    if (digits.length > 1) {
+      const next = [...otp];
+      digits
+        .slice(0, 6 - i)
+        .split('')
+        .forEach((d, idx) => {
+          next[i + idx] = d;
+        });
+      setOtp(next);
+      const lastIdx = Math.min(i + digits.length - 1, 5);
+      otpRefs.current[lastIdx]?.focus();
+      setErrorMsg('');
+      return;
+    }
+
+    const digit = digits.slice(-1);
     const next = [...otp];
     next[i] = digit;
     setOtp(next);
@@ -682,6 +701,7 @@ export default function CreateAccountScreen() {
                       setStep('details');
                       setErrorMsg('');
                       setOtp(['', '', '', '', '', '']);
+                      setFocusedOtp(null);
                     }}
                   >
                     <AppIcon
@@ -699,27 +719,40 @@ export default function CreateAccountScreen() {
                   </AppText>
 
                   <View style={styles.otpRow}>
-                    {otp.map((digit, i) => (
-                      <TextInput
-                        key={i}
-                        ref={(el) => {
-                          otpRefs.current[i] = el;
-                        }}
-                        style={[
-                          styles.otpBox,
-                          digit ? styles.otpBoxFilled : null,
-                        ]}
-                        value={digit}
-                        onChangeText={(t) => handleOtpChange(t, i)}
-                        onKeyPress={({ nativeEvent }) =>
-                          handleOtpKey(nativeEvent.key, i)
-                        }
-                        keyboardType="number-pad"
-                        maxLength={1}
-                        textAlign="center"
-                        selectTextOnFocus
-                      />
-                    ))}
+                    {otp.map((digit, i) => {
+                      const isFocused = focusedOtp === i;
+                      return (
+                        <TextInput
+                          key={i}
+                          ref={(el) => {
+                            otpRefs.current[i] = el;
+                          }}
+                          style={[
+                            styles.otpBox,
+                            digit ? styles.otpBoxFilled : null,
+                            isFocused ? styles.otpBoxFocused : null,
+                          ]}
+                          value={digit}
+                          onChangeText={(t) => handleOtpChange(t, i)}
+                          onKeyPress={({ nativeEvent }) =>
+                            handleOtpKey(nativeEvent.key, i)
+                          }
+                          onFocus={() => setFocusedOtp(i)}
+                          onBlur={() =>
+                            setFocusedOtp((cur) => (cur === i ? null : cur))
+                          }
+                          keyboardType="number-pad"
+                          maxLength={1}
+                          textAlign="center"
+                          selectTextOnFocus
+                          caretHidden
+                          placeholder="•"
+                          placeholderTextColor={COLORS.textFaint}
+                          textContentType="oneTimeCode"
+                          autoComplete="one-time-code"
+                        />
+                      );
+                    })}
                   </View>
 
                   {errorMsg ? (
@@ -1056,33 +1089,39 @@ const styles = StyleSheet.create({
   secondaryBtnText: { color: COLORS.blue, fontSize: 15, fontWeight: '700' },
   phoneHighlight: { fontWeight: '700', color: COLORS.text },
 
-    otpRow: {
+  // ─── OTP row ────────────────────────────────────────────────────────────
+  otpRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 20,
-    gap: 8, // Ensures consistent spacing between boxes
+    gap: 8,
   },
   otpBox: {
-    flex: 1, // Makes boxes responsive to screen width
-    maxWidth: 58, // Prevents boxes from getting too wide on tablets/large screens
-    height: 58,
-    borderRadius: 16, // More rounded corners matching the image
+    flex: 1,
+    height: 56,
+    maxWidth: 54,
+    borderRadius: 14,
     fontSize: 22,
     fontWeight: '700',
     color: COLORS.text,
     textAlign: 'center',
-    textAlignVertical: 'center',  
-    lineHeight: 58,  
+    textAlignVertical: 'center',
+    includeFontPadding: false,
     paddingVertical: 0,
     paddingHorizontal: 0,
-    backgroundColor: '#e6f1fa',  
-    borderWidth: 1,
-    borderColor: 'transparent',  
+    backgroundColor: 'rgba(127,127,127,0.10)',
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
   },
   otpBoxFilled: {
-    backgroundColor: '#d0e8f9', 
-    borderColor: COLORS.blue,  
+    backgroundColor: 'rgba(30,156,240,0.16)',
+    borderColor: 'rgba(30,156,240,0.45)',
+  },
+  otpBoxFocused: {
+    backgroundColor: 'rgba(30,156,240,0.10)',
+    borderColor: COLORS.blue,
+    ...SHADOW.glow,
   },
 
   resendRow: { flexDirection: 'row', justifyContent: 'center', marginTop: 16 },

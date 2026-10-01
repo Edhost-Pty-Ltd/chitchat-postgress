@@ -1,10 +1,16 @@
 // ─── useChats Hook ────────────────────────────────────────────────────────────
 // Real-time listener for the current user's chat list.
-// Each chat shows the last message, timestamp, and unread count.
+//
+// COMPANION NOTE
+//   `ownerUid` is the real account uid. On a companion device, the Firestore
+//   rule resolves `effectiveUid()` via companionLinks/{anonUid}. If that doc
+//   hasn't propagated yet, the listener gets permission-denied. We retry with
+//   backoff to cover that race, and only surface an error after several tries.
 
 import { useState, useEffect } from 'react';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
+import { getAuth } from '@react-native-firebase/auth'; 
 
 export interface ChatPreview {
   chatId:       string;
@@ -17,28 +23,32 @@ export interface ChatPreview {
   unreadCount:  number;
 }
 
-export function useChats(userId: string | null) {
+const MAX_PERM_RETRIES = 8;
+export function useChats(ownerUid: string | null) {
   const [chats,   setChats]   = useState<ChatPreview[]>([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
-    if (!userId) {
+    if (!ownerUid) { 
+// ...
+console.log('[useChats][diag] auth.uid =', getAuth().currentUser?.uid,
+            '  passed ownerUid =', ownerUid);
       setChats([]);
       setLoading(false);
       return;
     }
 
     setLoading(true);
-
-    console.log('[useChats] Subscribing for userId:', userId);
+    let cancelled = false;
 
     const unsub = (db as ReturnType<typeof firestore>)
       .collection('chats')
-      .where('members', 'array-contains', userId)
+      .where('members', 'array-contains', ownerUid)
       .onSnapshot(
         (snap) => {
-          console.log('[useChats] Snapshot received, docs:', snap.docs.length);
+          if (cancelled) return;
           const result: ChatPreview[] = snap.docs.map((doc) => {
             const d = doc.data();
             const lm = d.lastMessage;
@@ -52,29 +62,44 @@ export function useChats(userId: string | null) {
               timestamp:    lm?.timestamp
                 ? (lm.timestamp as firestore.Timestamp).toDate()
                 : null,
-              unreadCount: getUnreadCount(d.unreadCounts, userId),
+              unreadCount: getUnreadCount(d.unreadCounts, ownerUid),
             };
           });
           setChats(result);
+          setError(null);
           setLoading(false);
         },
         (err) => {
-          console.error('[useChats] Error:', err.code, err.message);
+          if (cancelled) return;
+          const isPerm =
+            err?.message === 'firestore/permission-denied' ||
+            /permission-denied/i.test(err?.message || '');
+
+          if (isPerm && attempt < MAX_PERM_RETRIES) {
+            const delay = Math.min(200 * (attempt + 1), 2000);
+            console.warn(
+              `[useChats] permission-denied — retry ${attempt + 1}/${MAX_PERM_RETRIES} in ${delay}ms`,
+            );
+            setTimeout(() => { if (!cancelled) setAttempt((a) => a + 1); }, delay);
+            return;
+          }
+
+          console.error('[useChats] Error:', err.message, err.message);
           setError(err.message);
           setLoading(false);
         },
       );
 
-    return () => unsub();
-  }, [userId]);
+    return () => { cancelled = true; unsub(); };
+  }, [ownerUid, attempt]);
 
   return { chats, loading, error };
 }
 
 function getUnreadCount(
   unreadCounts: Record<string, number> | undefined,
-  userId: string,
+  ownerUid: string,
 ): number {
   if (!unreadCounts) return 0;
-  return unreadCounts[userId] ?? 0;
+  return unreadCounts[ownerUid] ?? 0;
 }
