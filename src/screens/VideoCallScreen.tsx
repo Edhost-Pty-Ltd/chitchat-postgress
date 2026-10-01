@@ -29,6 +29,7 @@ import firestore from '@react-native-firebase/firestore';
 import storage from '@react-native-firebase/storage';
 import { db } from '../config/firebase';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
+import { SignalingService } from '../services/signalingService';
 import { useAudioRecorder, AudioModule, RecordingPresets, setAudioModeAsync } from 'expo-audio';
 import { documentDirectory, copyAsync, readAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 import * as Print from 'expo-print';
@@ -385,11 +386,11 @@ export default function VideoCallScreen() {
     const setupCall = async () => {
       try {
         if (Platform.OS !== 'web' && !permission?.granted) await requestPermission();
-        await initializePeerConnection(true);
 
         // Meeting joins don't use a calls/{callId} document — skip all calls
         // Firestore ops to avoid the permission-denied error.
         if (isMeeting) {
+          await initializePeerConnection(true);
           setCallStatus('connected');
           timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
 
@@ -414,6 +415,11 @@ export default function VideoCallScreen() {
           return;
         }
 
+        // ── 1:1 call ─────────────────────────────────────────────
+        // The WebRTC offer/answer negotiation is fully managed by useOutgoingCall
+        // (caller) and useIncomingCallAnswer (callee) — those hooks already called
+        // initializePeerConnection + createOffer/createAnswer before navigating here.
+        // This effect only reads persisted duration and listens for UI-level events.
         const fsDb = db as ReturnType<typeof firestore>;
         const callRef = fsDb.collection('calls').doc(callId);
         const callSnapshot = await callRef.get();
@@ -432,44 +438,14 @@ export default function VideoCallScreen() {
           ]);
         }
 
-        if (isOutgoing) {
-          const offer = await createOffer(true);
-          await callRef.update({ offer, status: 'ringing' });
-          unsubscribeCallRef.current = callRef.onSnapshot((snapshot) => {
-            const data = snapshot.data();
-            if (data?.answer && !remoteStreamRef.current) {
-              setRemoteAnswer(data.answer).catch(console.error);
-            }
-            if (data?.iceCandidates) {
-              data.iceCandidates.forEach((candidate: any) => {
-                if (candidate.from !== otherParty.userId) return;
-                addIceCandidate(candidate).catch(console.error);
-              });
-            }
-            if (data?.videoUpgradeRequest && data.videoUpgradeRequest.requestedBy !== user?.uid) {
-              setShowCameraToggle(true);
-            }
-            if (data?.status === 'ended') navigation.goBack();
-          });
-        } else {
-          unsubscribeCallRef.current = callRef.onSnapshot(async (snapshot) => {
-            const data = snapshot.data();
-            if (data?.offer && !remoteStreamRef.current) {
-              const answer = await createAnswer(data.offer);
-              await callRef.update({ answer, status: 'active' });
-            }
-            if (data?.iceCandidates) {
-              data.iceCandidates.forEach((candidate: any) => {
-                if (candidate.from !== otherParty.userId) return;
-                addIceCandidate(candidate).catch(console.error);
-              });
-            }
-            if (data?.videoUpgradeRequest && data.videoUpgradeRequest.requestedBy !== user?.uid) {
-              setShowCameraToggle(true);
-            }
-            if (data?.status === 'ended') navigation.goBack();
-          });
-        }
+        // Listen only for UI-level events — NOT for offer/answer (the hooks handle that)
+        unsubscribeCallRef.current = callRef.onSnapshot((snapshot) => {
+          const data = snapshot.data();
+          if (data?.videoUpgradeRequest && data.videoUpgradeRequest.requestedBy !== user?.uid) {
+            setShowCameraToggle(true);
+          }
+          if (data?.status === 'ended') navigation.goBack();
+        });
 
         timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
       } catch (error) {
@@ -950,9 +926,29 @@ export default function VideoCallScreen() {
     if (!isMeeting) {
       try {
         const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('calls').doc(callId).update({
-          status: 'ended', endedAt: new Date(),
+        const callRef = fsDb.collection('calls').doc(callId);
+
+        await callRef.update({
+          status: 'ended', endedAt: new Date(), duration,
         });
+
+        // Save call history for both parties
+        const callSnap = await callRef.get();
+        const callData = callSnap.data();
+        if (callData) {
+          const durationVal = duration > 0 ? duration : null;
+          const status = duration > 0 ? 'completed' : 'missed';
+          await SignalingService.saveToCallHistory(
+            callData.caller.userId, callId,
+            callData.callee, callData.type,
+            'outgoing', status, durationVal,
+          );
+          await SignalingService.saveToCallHistory(
+            callData.callee.userId, callId,
+            callData.caller, callData.type,
+            'incoming', status, durationVal,
+          );
+        }
       } catch (err) {
         console.warn('[VideoCall] end call update failed:', err);
       }
@@ -1022,7 +1018,7 @@ export default function VideoCallScreen() {
 
     cleanupWebRTC();
     navigation.goBack();
-  }, [callId, isMeeting, meetingId, isOrganizer, endMeeting, user?.uid, isRecording,
+  }, [callId, duration, isMeeting, meetingId, isOrganizer, endMeeting, user?.uid, isRecording,
       audioRecorder, recordingMs, addRecording, transcribeRecording, cleanupWebRTC, navigation]);
 
   const hangUp = useCallback(() => {

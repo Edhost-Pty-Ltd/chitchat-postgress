@@ -64,7 +64,8 @@ export function Avatar({ initials, color, size = 44, status: _status, style, ima
 }
 
 // ─── BottomNav ────────────────────────────────────────────────────────────────
-type TabKey = 'chats' | 'calendar' | 'calls' | 'status' | 'settings';
+type TabKey = 'chats' | 'calendar' | 'calls' | 'status' | 'dashboard' | 'settings';
+
 const TABS: {
   id: TabKey;
   icon: React.ComponentProps<typeof Ionicons>['name'];
@@ -72,14 +73,16 @@ const TABS: {
   label: string;
   screen: keyof RootStackParamList;
 }[] = [
-  { id: 'status',   icon: 'aperture-outline',    iconActive: 'aperture',    label: 'Updates', screen: 'Status'   },
-  { id: 'calls',    icon: 'call-outline',        iconActive: 'call',        label: 'Calls',   screen: 'Calls'    },
-  { id: 'calendar',    icon: 'calendar', iconActive: 'calendar', label: 'Calendar',   screen: 'Calendar'    },
-  { id: 'chats',    icon: 'chatbubbles-outline', iconActive: 'chatbubbles', label: 'Chats',   screen: 'Chats'    },
-  { id: 'settings', icon: 'person-outline',      iconActive: 'person',      label: 'You',     screen: 'Settings' },
-]; 
+  { id: 'status',    icon: 'aperture-outline',     iconActive: 'aperture',     label: 'Updates',   screen: 'Status'    },
+  { id: 'calls',     icon: 'call-outline',         iconActive: 'call',         label: 'Calls',     screen: 'Calls'     },
+  { id: 'chats',     icon: 'chatbubbles-outline',  iconActive: 'chatbubbles',  label: 'Chats',     screen: 'Chats'     },
+  { id: 'calendar',  icon: 'calendar-outline',     iconActive: 'calendar',     label: 'Calendar',  screen: 'Calendar'  },
+  { id: 'dashboard', icon: 'stats-chart-outline',  iconActive: 'stats-chart',  label: 'Dashboard', screen: 'Dashboard' },
+  { id: 'settings',  icon: 'person-outline',       iconActive: 'person',       label: 'You',       screen: 'Settings'  },
+];
 
 interface BottomNavProps { active: TabKey; }
+
 export function BottomNav({ active }: BottomNavProps) {
   const navigation = useNavigation<NavProp>();
   const { FG } = useForeground();
@@ -87,15 +90,11 @@ export function BottomNav({ active }: BottomNavProps) {
   const { bevel } = useGlass();
   const insets = useSafeAreaInsets();
   const { userId, avatarUri, displayName } = useAuth();
-  
-  // Use the hooks directly (now properly imported at the top)
+
   const { totalUnread } = useUnreadCount(userId);
   const { hasUnviewedStatus } = useUnviewedStatus(userId);
   const { missedCount } = useMissedCalls(userId);
 
-  // Sit the pill just above the device's system navigation bar / gesture area.
-  // insets.bottom adapts per device (0 on devices w/o a system bar, larger for
-  // gesture/3-button bars). Falls back to a sensible minimum.
   const bottomSpace = Math.max(insets.bottom, 10) + 8;
 
   return (
@@ -104,8 +103,8 @@ export function BottomNav({ active }: BottomNavProps) {
         const isActive = active === t.id;
         const showChatsBadge = t.id === 'chats' && totalUnread > 0;
         const showCallsBadge = t.id === 'calls' && missedCount > 0;
-        const showStatusDot = t.id === 'status' && hasUnviewedStatus;
-        
+        const showStatusDot  = t.id === 'status' && hasUnviewedStatus;
+
         return (
           <TouchableOpacity
             key={t.id}
@@ -132,11 +131,11 @@ export function BottomNav({ active }: BottomNavProps) {
                 </View>
               ) : isActive ? (
                 <LinearGradient colors={GRADIENTS.primary} style={styles.iconTileActive}>
-                  <AppIcon name={t.iconActive} size={20} color="#fff" fixedColor />
+                  <AppIcon name={t.iconActive} size={19} color="#fff" fixedColor />
                 </LinearGradient>
               ) : (
                 <View style={styles.iconTileInactive}>
-                  <AppIcon name={t.icon} size={20} color={FG.secondary} />
+                  <AppIcon name={t.icon} size={19} color={FG.secondary} />
                 </View>
               )}
               {showChatsBadge && (
@@ -157,11 +156,14 @@ export function BottomNav({ active }: BottomNavProps) {
                 <View style={styles.statusDot} />
               )}
             </View>
-            <AppText style={[
-              styles.navLabel,
-              { color: isActive ? COLORS.blue : FG.secondary, fontFamily },
-              isActive && styles.navLabelActive,
-            ]}>
+            <AppText
+              numberOfLines={1}
+              style={[
+                styles.navLabel,
+                { color: isActive ? COLORS.blue : FG.secondary, fontFamily },
+                isActive && styles.navLabelActive,
+              ]}
+            >
               {t.label}
             </AppText>
           </TouchableOpacity>
@@ -172,7 +174,6 @@ export function BottomNav({ active }: BottomNavProps) {
 }
 
 // ─── UserAvatar ───────────────────────────────────────────────────────────────
-// Renders the signed-in user's profile picture (or initials fallback).
 interface UserAvatarProps { size?: number; }
 export function UserAvatar({ size = 44 }: UserAvatarProps) {
   const { avatarUri, displayName } = useAuth();
@@ -191,6 +192,7 @@ export function UserAvatar({ size = 44 }: UserAvatarProps) {
   }
   return <Avatar initials={initials} color={COLORS.blue} size={size} />;
 }
+
 interface AppHeaderProps {
   title: string;
   showBack?: boolean;
@@ -237,56 +239,53 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     borderRadius: 50,
     paddingVertical: 10,
-    paddingHorizontal: 8,
-    marginHorizontal: 20,
+    paddingHorizontal: 6,
+    marginHorizontal: 14,
     marginTop: 6,
   },
   navItem: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 5,
+    gap: 4,
   },
 
-  // Active — blue gradient tile with glow
   iconTileActive: {
-    width: 46,
-    height: 40,
+    width: 42,
+    height: 38,
     borderRadius: RADIUS.md,
     alignItems: 'center',
     justifyContent: 'center',
     ...SHADOW.button,
   },
 
-  // Inactive — plain container, no glass tile (avoids Android overflow artifacts)
   iconTileInactive: {
-    width: 46,
-    height: 40,
+    width: 42,
+    height: 38,
     borderRadius: RADIUS.md,
     alignItems: 'center',
     justifyContent: 'center',
   },
 
-  // "You" tab avatar
   navAvatarImg: {
-    width: 30, height: 30, borderRadius: 15,
+    width: 28, height: 28, borderRadius: 14,
     borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.7)',
   },
   navAvatarFallback: {
-    width: 30, height: 30, borderRadius: 15,
+    width: 28, height: 28, borderRadius: 14,
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: COLORS.blue,
   },
-  navAvatarInitials: { fontSize: 11, fontWeight: '700', color: '#fff' },
+  navAvatarInitials: { fontSize: 10, fontWeight: '700', color: '#fff' },
   avatarActiveRing: {
     borderWidth: 2,
     borderColor: COLORS.blue,
-    borderRadius: 18,
+    borderRadius: 17,
   },
 
-  navLabel:       { fontSize: 10, fontWeight: '500' },
+  navLabel:       { fontSize: 9, fontWeight: '500' },
   navLabelActive: { fontWeight: '700', color: COLORS.blue },
-  
+
   badge: {
     position: 'absolute',
     top: -4,
@@ -325,9 +324,7 @@ const styles = StyleSheet.create({
 });
 
 // ─── Re-exports ──────────────────────────────────────────────────────────────
-// Export other components that are in separate files
 export { IncomingCallOverlay } from './IncomingCallOverlay';
 export { IncomingCallManager } from './IncomingCallManager';
 export { FloatingCallOverlay } from './FloatingCallOverlay';
 export { default as RTCView } from './RTCView';
-

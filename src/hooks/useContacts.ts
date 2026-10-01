@@ -13,8 +13,8 @@ export interface AppContact {
   phone:             string;
   displayName:       string;
   isSaved:           boolean;       // true if registered in Firestore
-  photoUri?:         string | null;
-  firebasePhotoURL?: string | null;
+  photoUri?:         string;
+  firebasePhotoURL?: string;
 }
 
 type PermState = 'granted' | 'denied' | 'undetermined';
@@ -134,7 +134,7 @@ export function useContacts() {
 
           registeredUsers.set(phone, {
             userId: doc.id,
-            photoURL: firebasePhotoURL ?? null,
+            photoURL: firebasePhotoURL ?? undefined,
           });
         }
       }
@@ -152,8 +152,8 @@ export function useContacts() {
           phone,
           displayName:      contactInfo.name,
           isSaved:          !!registeredUser,
-          photoUri:         contactInfo.photoUri || null,
-          firebasePhotoURL: registeredUser?.photoURL || null,
+          photoUri:         contactInfo.photoUri || undefined,
+          firebasePhotoURL: registeredUser?.photoURL || undefined,
         });
       }
 
@@ -182,8 +182,8 @@ export function useContacts() {
                 phone: c.phone,
                 displayName: c.displayName,
                 isSaved: c.isSaved,
-                photoUri: c.photoUri || null,
-                firebasePhotoURL: c.firebasePhotoURL || null,
+                photoUri: c.photoUri ?? null,
+                firebasePhotoURL: c.firebasePhotoURL ?? null,
               };
               
               batch.set(docRef, safeContactData, { merge: true });

@@ -11,9 +11,10 @@ import {
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useWebRTC } from '../hooks/useWebRTC';
+import { useCallContext } from '../context/CallContext';
 import { useAuth } from '../hooks/useAuth';
 import { useFloatingCall } from '../context/FloatingCallContext';
+import { SignalingService } from '../services/signalingService';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
@@ -44,36 +45,36 @@ export default function AudioCallScreen() {
   const [callStatus,   setCallStatus]   = useState<string>('connecting');
   const [showQuality,  setShowQuality]  = useState(false);
 
-  // WebRTC hook for managing peer connection and streams
+  // Use the shared CallContext WebRTC instance — the same one that
+  // useOutgoingCall / useIncomingCallAnswer used to initiate/answer the call.
   const {
     connectionState,
     networkQuality,
-    initializePeerConnection,
-    createOffer,
-    createAnswer,
-    setRemoteAnswer,
-    addIceCandidate,
     toggleMute: toggleMuteWebRTC,
     startNetworkMonitoring,
     cleanup: cleanupWebRTC,
-  } = useWebRTC({
-    onConnectionStateChange: (state) => {
-      console.log('[AudioCall] Connection state:', state);
-      if (state === 'connected') {
-        setCallStatus('connected');
-        startNetworkMonitoring();
-      } else if (state === 'disconnected' || state === 'failed') {
-        setCallStatus('disconnected');
-      }
-    },
-    onNetworkQualityChange: (quality) => {
-      console.log('[AudioCall] Network quality:', quality);
-      if (quality === 'poor' || quality === 'fair') {
-        setShowQuality(true);
-        setTimeout(() => setShowQuality(false), 3000);
-      }
-    },
-  });
+  } = useCallContext();
+
+  // Observe connection state for UI
+  const startNetworkMonitoringRef = useRef(startNetworkMonitoring);
+  useEffect(() => { startNetworkMonitoringRef.current = startNetworkMonitoring; }, [startNetworkMonitoring]);
+
+  useEffect(() => {
+    if (connectionState === 'connected') {
+      setCallStatus('connected');
+      startNetworkMonitoringRef.current();
+    } else if (connectionState === 'disconnected' || connectionState === 'failed') {
+      setCallStatus('disconnected');
+    }
+  }, [connectionState]);
+
+  useEffect(() => {
+    if (networkQuality === 'poor' || networkQuality === 'fair') {
+      setShowQuality(true);
+      const t = setTimeout(() => setShowQuality(false), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [networkQuality]);
 
   // Build contact from otherParty
   const contact: Contact = {
@@ -113,57 +114,23 @@ export default function AudioCallScreen() {
         }
 
         // Initialize WebRTC peer connection for audio only
-        await initializePeerConnection(false); // false for audio-only call
-
-        if (isOutgoing) {
-          // Caller: Create offer
-          console.log('[AudioCall] Creating offer as caller...');
-          const offer = await createOffer(false);
-          
-          // Update call document with offer
-          await callRef.update({
-            offer: offer,
-            status: 'ringing',
-          });
-
-          // Listen for answer from callee
-          unsubscribeCallRef.current = callRef.onSnapshot((snapshot) => {
+        // NOTE: for outgoing calls, useOutgoingCall.initiateCall() already called
+        // initializePeerConnection + createOffer before navigating here.
+        // For incoming calls, useIncomingCallAnswer.answerCall() did the same.
+        // We only handle the case where the screen is opened without those hooks
+        // (e.g. a direct navigation without the hook flow).
+        if (!isOutgoing) {
+          // Callee path: hooks handle everything; just watch for status changes
+          unsubscribeCallRef.current = callRef.onSnapshot(async (snapshot) => {
             const data = snapshot.data();
-            if (data?.answer) {
-              console.log('[AudioCall] Received answer, setting remote description...');
-              setRemoteAnswer(data.answer).catch(console.error);
-            }
-            if (data?.iceCandidates) {
-              data.iceCandidates.forEach((candidate: any) => {
-                if (candidate.from !== otherParty.userId) return;
-                addIceCandidate(candidate).catch(console.error);
-              });
-            }
             if (data?.status === 'ended') {
               navigation.goBack();
             }
           });
         } else {
-          // Callee: Listen for offer and create answer
-          console.log('[AudioCall] Waiting for offer as callee...');
-          
-          unsubscribeCallRef.current = callRef.onSnapshot(async (snapshot) => {
+          // Caller path: hooks handle signaling; just watch for status changes
+          unsubscribeCallRef.current = callRef.onSnapshot((snapshot) => {
             const data = snapshot.data();
-            if (data?.offer) {
-              console.log('[AudioCall] Received offer, creating answer...');
-              const answer = await createAnswer(data.offer);
-              
-              await callRef.update({
-                answer: answer,
-                status: 'active',
-              });
-            }
-            if (data?.iceCandidates) {
-              data.iceCandidates.forEach((candidate: any) => {
-                if (candidate.from === otherParty.userId) return;
-                addIceCandidate(candidate).catch(console.error);
-              });
-            }
             if (data?.status === 'ended') {
               navigation.goBack();
             }
@@ -220,16 +187,36 @@ export default function AudioCallScreen() {
 
   const hangUp = async () => {
     try {
-      // End call in Firestore
       const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('calls').doc(callId).update({
+      const callRef = fsDb.collection('calls').doc(callId);
+
+      await callRef.update({
         status: 'ended',
         endedAt: new Date(),
+        duration,
       });
+
+      // Save call history for both parties
+      const callSnap = await callRef.get();
+      const callData = callSnap.data();
+      if (callData) {
+        const durationVal = duration > 0 ? duration : null;
+        const status = duration > 0 ? 'completed' : 'missed';
+        await SignalingService.saveToCallHistory(
+          callData.caller.userId, callId,
+          callData.callee, callData.type,
+          'outgoing', status, durationVal,
+        );
+        await SignalingService.saveToCallHistory(
+          callData.callee.userId, callId,
+          callData.caller, callData.type,
+          'incoming', status, durationVal,
+        );
+      }
     } catch (error) {
-      console.error('[AudioCall] Failed to update call status:', error);
+      console.error('[AudioCall] Failed to end call:', error);
     }
-    
+
     cleanupWebRTC();
     navigation.goBack();
   };

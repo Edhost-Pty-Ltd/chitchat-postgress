@@ -200,3 +200,159 @@ export const mintCompanionToken = onCall(async (request) => {
 
   return { customToken };
 });
+
+// ─── Push Notifications for new messages ───────────────────────────────────
+// Triggers whenever a chat document is written (i.e. lastMessage is updated).
+// Fans out an Expo push notification to every member except the sender.
+//
+// Token storage:   users/{memberId}/pushTokens/{deviceId} → { token, platform }
+// Push delivery:   Expo Push API  (https://exp.host/--/api/v2/push/send)
+//                  Works for both iOS and Android Expo-managed apps.
+
+import { onDocumentWritten } from 'firebase-functions/v2/firestore';
+import * as https from 'https';
+
+const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
+
+interface ExpoPushMessage {
+  to: string;
+  title: string;
+  body: string;
+  data?: Record<string, unknown>;
+  sound?: 'default';
+  badge?: number;
+  channelId?: string;
+}
+
+/** POST a batch of Expo push messages (max 100 per call). */
+async function sendExpoPushBatch(messages: ExpoPushMessage[]): Promise<void> {
+  if (messages.length === 0) return;
+
+  const payload = JSON.stringify(messages);
+
+  await new Promise<void>((resolve, reject) => {
+    const url = new URL(EXPO_PUSH_URL);
+    const req = https.request(
+      {
+        hostname: url.hostname,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'Accept-Encoding': 'gzip, deflate',
+        },
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+        res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            logger.warn('[sendMessageNotification] Expo push error:', res.statusCode, body);
+          }
+          resolve();
+        });
+      },
+    );
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+export const sendMessageNotification = onDocumentWritten(
+  'chats/{chatId}',
+  async (event) => {
+    const after  = event.data?.after;
+    const before = event.data?.before;
+
+    if (!after?.exists) return; // chat deleted — nothing to do
+
+    const chatData   = after.data()!;
+    const lastMsg    = chatData.lastMessage as {
+      text?: string;
+      senderId?: string;
+      timestamp?: FirebaseFirestore.Timestamp;
+      type?: string;
+    } | undefined;
+
+    if (!lastMsg?.senderId || !lastMsg?.timestamp) return;
+
+    // Only fire when lastMessage.timestamp actually changed (a new message was sent)
+    const prevLastMsg = before?.exists ? (before.data()!.lastMessage as typeof lastMsg) : undefined;
+    const prevTs = prevLastMsg?.timestamp?.toMillis?.() ?? 0;
+    const newTs  = lastMsg.timestamp.toMillis?.() ?? 0;
+    if (newTs <= prevTs) return;  // timestamp didn't advance — skip
+
+    const senderId   = lastMsg.senderId;
+    const members    = (chatData.members ?? []) as string[];
+    const isGroup    = chatData.type === 'group';
+    const groupName  = (chatData.groupName ?? 'Group') as string;
+    const msgText    = lastMsg.text || (lastMsg.type === 'image' ? '📷 Photo' : lastMsg.type === 'voice' ? '🎤 Voice message' : '📎 File');
+
+    const dbAdmin = getFirestore();
+
+    // Resolve sender display name for group chats
+    let senderName = 'Someone';
+    if (isGroup) {
+      try {
+        const senderDoc = await dbAdmin.collection('users').doc(senderId).get();
+        if (senderDoc.exists) {
+          const d = senderDoc.data()!;
+          const dn = (d.displayName ?? '').trim();
+          const ph = (d.phone ?? '').trim();
+          const PHONE_LIKE = /^\+?[\d\s\-()]{5,}$/;
+          senderName = (dn && !PHONE_LIKE.test(dn) && dn !== ph) ? dn : (ph || dn || 'Someone');
+        }
+      } catch (err) {
+        logger.warn('[sendMessageNotification] Could not resolve sender name:', err);
+      }
+    }
+
+    // Collect all push tokens for non-sender members
+    const pushMessages: ExpoPushMessage[] = [];
+
+    await Promise.all(
+      members
+        .filter((uid) => uid !== senderId)
+        .map(async (uid) => {
+          try {
+            const tokensSnap = await dbAdmin
+              .collection('users').doc(uid)
+              .collection('pushTokens')
+              .get();
+
+            for (const tokenDoc of tokensSnap.docs) {
+              const token = tokenDoc.data().token as string | undefined;
+              if (!token || !token.startsWith('ExponentPushToken[')) continue;
+
+              pushMessages.push({
+                to:        token,
+                sound:     'default',
+                title:     isGroup ? groupName : senderName,
+                body:      isGroup ? `${senderName}: ${msgText}` : msgText,
+                channelId: 'default',
+                data: {
+                  chatId:     event.params.chatId,
+                  senderId,
+                  type:       'message',
+                },
+              });
+            }
+          } catch (err) {
+            logger.warn(`[sendMessageNotification] Failed to get tokens for uid ${uid}:`, err);
+          }
+        }),
+    );
+
+    if (pushMessages.length === 0) return;
+
+    // Expo limits 100 messages per batch
+    const BATCH_SIZE = 100;
+    for (let i = 0; i < pushMessages.length; i += BATCH_SIZE) {
+      await sendExpoPushBatch(pushMessages.slice(i, i + BATCH_SIZE));
+    }
+
+    logger.info(`[sendMessageNotification] Sent ${pushMessages.length} push(es) for chat ${event.params.chatId}`);
+  },
+);

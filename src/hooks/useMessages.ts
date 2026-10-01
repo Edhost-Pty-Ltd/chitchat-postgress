@@ -53,6 +53,8 @@ export interface FireMessage {
     messageId: string; senderId: string; text: string | null;
     type: 'text' | 'image' | 'voice' | 'video' | 'file' | 'location' | 'system' | 'catalog';
   } | null;
+  edited?:    boolean;
+  editedAt?:  Date | null;
 }
 
 function toDate(raw: any): Date | null {
@@ -111,6 +113,8 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
               isLiveLocation:     d.isLiveLocation ?? false,
               liveLocationExpiry: toDate(d.liveLocationExpiry),
               replyTo:            d.replyTo    ?? null,
+              edited:             d.edited     ?? false,
+              editedAt:           toDate(d.editedAt),
             };
           });
 
@@ -137,6 +141,16 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     try {
       const trimmed = text.trim();
       const fsDb = db as ReturnType<typeof firestore>;
+      const chatRef = fsDb.collection('chats').doc(chatId);
+
+      // Fetch members so we can increment unread counts for everyone else
+      const chatSnap = await chatRef.get();
+      const members: string[] = chatSnap.exists ? (chatSnap.data()?.members ?? []) : [];
+      const otherMembers = members.filter((id) => id !== ownerUid);
+      const unreadIncrements = Object.fromEntries(
+        otherMembers.map((id) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
+      );
+
       await fsDb.collection('chats').doc(chatId).collection('messages').add({
         senderId:    ownerUid,
         text:        trimmed,
@@ -147,10 +161,11 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
         readBy:      [ownerUid],
         deliveredTo: [],
       });
-      await fsDb.collection('chats').doc(chatId).update({
+      await chatRef.update({
         'lastMessage.text':      trimmed,
         'lastMessage.senderId':  ownerUid,
         'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
+        ...unreadIncrements,
       });
       return true;
     } catch (err: any) {

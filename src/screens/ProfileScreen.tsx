@@ -27,7 +27,7 @@ import { useAuth } from '../context/AuthContext';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
-import { CatalogItem, CatalogCollection } from '../types';
+import { CatalogItem, CatalogCollection, INDUSTRY_CATEGORIES, BusinessAddress } from '../types';
 import { CatalogShareSheet } from '../components/CatalogShareSheet';
 
 export default function ProfileScreen() {
@@ -55,18 +55,26 @@ export default function ProfileScreen() {
   const nameInputRef = useRef<TextInput>(null);
 
   // Business fields
-  const [email, setEmail] = useState('');
+  const [email,   setEmail]   = useState('');
+  const [website, setWebsite] = useState('');
+
+  // ── Enhanced profile fields ──────────────────────────────────────────────
+  const [industry,    setIndustry]    = useState('');
+  const [description, setDescription] = useState('');
+  const [address,     setAddress]     = useState({
+    street: '', city: '', province: '', postalCode: '', country: '',
+  });
+  const [industryModalOpen, setIndustryModalOpen] = useState(false);
   const [auto_responder_message, setauto_responder_message] = useState('');
   const [autoResponderEnabled, setAutoResponderEnabled] = useState(false);
   const [autoResponderPending, setAutoResponderPending] = useState(false);
   const [draftAutoMessage, setDraftAutoMessage] = useState('');
-  const [website, setWebsite] = useState('');
+
   const [editingField, setEditingField] = useState<string | null>(null);
   const [draftValue, setDraftValue] = useState('');
   const fieldInputRef = useRef<TextInput>(null);
 
-  // Work hours — structured
-  const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as const;
 
   interface DaySchedule { open: string; close: string; }
 
@@ -143,6 +151,10 @@ export default function ProfileScreen() {
           if (data.workSchedule) setWorkSchedule(data.workSchedule);
           setCatalog(data.catalog || []);
           setCollections(data.collections || []);
+          // Enhanced profile fields
+          setIndustry(data.industry || '');
+          setDescription(data.description || '');
+          if (data.address) setAddress({ ...address, ...data.address });
         }
       } catch (err) {
         console.warn('[ProfileScreen] Error loading profile:', err);
@@ -177,14 +189,44 @@ export default function ProfileScreen() {
     if (!guardEdit()) { setEditingField(null); return; }
     if (!ownerUid) return;
     try {
-      if (field === 'email') setEmail(value);
-      else if (field === 'website') setWebsite(value);
+      if (field === 'email')       setEmail(value);
+      else if (field === 'website')     setWebsite(value);
+      else if (field === 'description') setDescription(value);
       else if (field === 'auto_responder_message') setauto_responder_message(value);
 
       const fsDb = db as ReturnType<typeof firestore>;
       await fsDb.collection('users').doc(ownerUid).update({ [field]: value });
     } catch (error) {
       console.warn('[ProfileScreen] Error saving field:', error);
+    }
+    setEditingField(null);
+  };
+
+  // ── Save industry ─────────────────────────────────────────────────────────
+  const saveIndustry = async (id: string) => {
+    if (!guardEdit()) return;
+    if (!ownerUid) return;
+    setIndustry(id);
+    setIndustryModalOpen(false);
+    try {
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('users').doc(ownerUid).update({ industry: id });
+    } catch (err) {
+      console.warn('[ProfileScreen] Error saving industry:', err);
+    }
+  };
+
+  // ── Save address field ─────────────────────────────────────────────────────
+  const saveAddressField = async (field: keyof BusinessAddress, value: string) => {
+    if (!guardEdit()) { setEditingField(null); return; }
+    if (!ownerUid) return;
+    const updated = { ...address, [field]: value };
+    setAddress(updated);
+    try {
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('users').doc(ownerUid).update({ address: updated });
+    } catch (err) {
+      console.warn('[ProfileScreen] Error saving address:', err);
     }
     setEditingField(null);
   };
@@ -747,6 +789,43 @@ export default function ProfileScreen() {
             readOnly={isCompanion}
           />
 
+          {/* Industry */}
+          <TouchableOpacity
+            style={styles.infoCard}
+            activeOpacity={isCompanion ? 1 : 0.8}
+            onPress={() => { if (isCompanion) { guardEdit(); return; } setIndustryModalOpen(true); }}
+            disabled={isCompanion}
+          >
+            <View style={styles.iconCircle}>
+              <AppIcon name="briefcase-outline" size={18} color={COLORS.blue} fixedColor />
+            </View>
+            <View style={styles.infoContent}>
+              <AppText style={[styles.infoLabel, { fontFamily }]}>Industry</AppText>
+              <AppText style={[styles.infoValue, {
+                color: industry ? textColor : COLORS.textFaint, fontFamily
+              }]}>
+                {industry
+                  ? (() => {
+                      const cat = INDUSTRY_CATEGORIES.find((c) => c.id === industry);
+                      return cat ? `${cat.emoji}  ${cat.label}` : industry;
+                    })()
+                  : 'Select your industry'}
+              </AppText>
+            </View>
+            {!isCompanion && <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />}
+          </TouchableOpacity>
+
+          {/* Description */}
+          <EditableField
+            field="description"
+            label="About the Business"
+            icon="document-text-outline"
+            value={description}
+            placeholder="Tell customers what your business does…"
+            isMultiline
+            readOnly={isCompanion}
+          />
+
           {/* Work Hours */}
           <TouchableOpacity
             style={styles.infoCard}
@@ -768,6 +847,79 @@ export default function ProfileScreen() {
             </View>
             {!isCompanion && <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />}
           </TouchableOpacity>
+        </View>
+
+        {/* ── Address ── */}
+        <View style={styles.section}>
+          <AppText style={[styles.sectionTitle, { color: COLORS.sub, fontFamily }]}>PHYSICAL ADDRESS</AppText>
+
+          {(['street', 'city', 'province', 'postalCode', 'country'] as const).map((field) => {
+            const labels: Record<string, string> = {
+              street:     'Street Address',
+              city:       'City',
+              province:   'Province / State',
+              postalCode: 'Postal Code',
+              country:    'Country',
+            };
+            const icons: Record<string, string> = {
+              street:     'location-outline',
+              city:       'map-outline',
+              province:   'flag-outline',
+              postalCode: 'barcode-outline',
+              country:    'earth-outline',
+            };
+            return (
+              <TouchableOpacity
+                key={field}
+                style={styles.infoCard}
+                activeOpacity={isCompanion ? 1 : 0.8}
+                onPress={() => {
+                  if (isCompanion) { guardEdit(); return; }
+                  startEditField(`addr_${field}`, address[field]);
+                }}
+                disabled={isCompanion}
+              >
+                <View style={styles.iconCircle}>
+                  <AppIcon name={icons[field] as any} size={18} color={COLORS.blue} fixedColor />
+                </View>
+                <View style={styles.infoContent}>
+                  <AppText style={[styles.infoLabel, { fontFamily }]}>{labels[field]}</AppText>
+                  {editingField === `addr_${field}` && !isCompanion ? (
+                    <TextInput
+                      ref={fieldInputRef}
+                      style={[styles.infoInput, { color: textColor, fontFamily }]}
+                      value={draftValue}
+                      onChangeText={setDraftValue}
+                      placeholder={`Enter ${labels[field].toLowerCase()}`}
+                      placeholderTextColor={COLORS.textFaint}
+                      returnKeyType="done"
+                      autoFocus
+                      onSubmitEditing={() => saveAddressField(field, draftValue)}
+                      onBlur={() => saveAddressField(field, draftValue)}
+                    />
+                  ) : (
+                    <AppText style={[styles.infoValue, {
+                      color: address[field] ? textColor : COLORS.textFaint, fontFamily,
+                    }]}>
+                      {address[field] || `Add ${labels[field].toLowerCase()}`}
+                    </AppText>
+                  )}
+                </View>
+                {!isCompanion && (
+                  editingField === `addr_${field}` ? (
+                    <TouchableOpacity
+                      onPress={() => saveAddressField(field, draftValue)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <AppIcon name="checkmark-circle" size={22} fixedColor color={COLORS.blue} />
+                    </TouchableOpacity>
+                  ) : (
+                    <AppIcon name="create-outline" size={16} color={COLORS.sub} />
+                  )
+                )}
+              </TouchableOpacity>
+            );
+          })}
         </View>
 
         {/* ── Auto Responder ── */}
@@ -1129,7 +1281,8 @@ export default function ProfileScreen() {
               </ScrollView>
             </View>
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardAvoidingView
+        >
       </Modal>
 
       {/* ── Create Collection Modal ── */}
@@ -1505,6 +1658,46 @@ export default function ProfileScreen() {
           onClose={() => setShareItem(null)}
         />
       )}
+
+      {/* ── Industry Picker Modal ── */}
+      <Modal
+        visible={industryModalOpen}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setIndustryModalOpen(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: 'transparent' }}>
+          <AppBg />
+          <View style={[ { paddingTop: 20 }]}>
+            <TouchableOpacity onPress={() => setIndustryModalOpen(false)} style={{ width: 36 }}>
+              <AppIcon name="close" size={22} color={COLORS.text} />
+            </TouchableOpacity>
+            <AppText style={[styles.modalTitle, { color: textColor, fontFamily }]}>
+              Select Industry
+            </AppText>
+            <View style={{ width: 36 }} />
+          </View>
+          <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 40, gap: 8 }}>
+            {INDUSTRY_CATEGORIES.map((cat) => {
+              const selected = industry === cat.id;
+              return (
+                <TouchableOpacity
+                  key={cat.id}
+                  style={[styles.industryOption, selected && styles.industryOptionSelected, { backgroundColor: selected ? COLORS.blue : 'rgba(255,255,255,0.7)' }]}
+                  activeOpacity={0.8}
+                  onPress={() => saveIndustry(cat.id)}
+                >
+                  <AppText style={[styles.industryEmoji]}>{cat.emoji}</AppText>
+                  <AppText style={[styles.industryLabel, { color: selected ? '#fff' : textColor, fontFamily }]}>
+                    {cat.label}
+                  </AppText>
+                  {selected && <AppIcon name="checkmark-circle" size={20} color="#fff" fixedColor />}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -2010,4 +2203,21 @@ const styles = StyleSheet.create({
   collectionName:   { fontSize: 14, fontWeight: '700' as const },
   collectionCount:  { fontSize: 11, marginTop: 1 },
   colEmptyHint:     { paddingHorizontal: 14, paddingBottom: 12 },
+
+  // ── Industry picker ──────────────────────────────────────────────────────
+  industryOption: {
+    flexDirection:     'row',
+    alignItems:        'center',
+    gap:               12,
+    borderRadius:      RADIUS.md,
+    paddingHorizontal: 16,
+    paddingVertical:   14,
+    borderWidth:       1,
+    borderColor:       'rgba(255,255,255,0.7)',
+  },
+  industryOptionSelected: {
+    borderColor: COLORS.blue,
+  },
+  industryEmoji: { fontSize: 22, width: 30 },
+  industryLabel: { flex: 1, fontSize: 15, fontWeight: '500' },
 });

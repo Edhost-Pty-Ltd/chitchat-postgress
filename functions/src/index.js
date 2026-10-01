@@ -35,7 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.mintCompanionToken = exports.cleanupExpiredLinkTokens = exports.cleanupStaleCalls = exports.cleanupExpiredMessages = exports.cleanupExpiredStatuses = void 0;
+exports.recordProfileView = exports.sendMessageNotification = exports.mintCompanionToken = exports.cleanupExpiredLinkTokens = exports.cleanupStaleCalls = exports.cleanupExpiredMessages = exports.cleanupExpiredStatuses = void 0;
 const app_1 = require("firebase-admin/app");
 const firestore_1 = require("firebase-admin/firestore");
 const storage_1 = require("firebase-admin/storage");
@@ -163,111 +163,192 @@ exports.cleanupExpiredLinkTokens = (0, scheduler_1.onSchedule)('every 60 minutes
 });
 // ─── Companion-device linking ──────────────────────────────────────────────
 const MAX_LINK_AGE_MS = 15 * 60 * 1000;
-
-exports.mintCompanionToken = functionsV1.https.onCall(async (data, context) => {
-  try {
-    functionsV1.logger.info('mintCompanionToken called', {
-      hasAuth: !!context.auth,
-      uid: context.auth ? context.auth.uid : null,
-      companionClaim: context.auth ? (context.auth.token && context.auth.token.companion) : null,
-      dataKeys: Object.keys(data || {}),
-    });
-
-    if (!context.auth) {
-      throw new functionsV1.https.HttpsError(
-        'unauthenticated',
-        'You must be signed in to link a device.',
-      );
+exports.mintCompanionToken = (0, https_1.onCall)(async (request) => {
+    if (!request.auth) {
+        throw new https_1.HttpsError('unauthenticated', 'You must be signed in to link a device.');
     }
-    const ownerUid = context.auth.uid;
-
-    if (context.auth.token && context.auth.token.companion === true) {
-      throw new functionsV1.https.HttpsError(
-        'permission-denied',
-        'Companion devices cannot link other devices.',
-      );
+    const ownerUid = request.auth.uid;
+    if (request.auth.token?.companion === true) {
+        throw new https_1.HttpsError('permission-denied', 'Companion devices cannot link other devices.');
     }
-
-    const requestId = (data && data.requestId) || '';
-    if (
-      typeof requestId !== 'string' ||
-      requestId.length !== 64 ||
-      !/^[0-9a-f]+$/i.test(requestId)
-    ) {
-      throw new functionsV1.https.HttpsError('invalid-argument', 'Invalid requestId.');
+    const requestId = (request.data?.requestId ?? '');
+    if (typeof requestId !== 'string' || requestId.length !== 64 || !/^[0-9a-f]+$/i.test(requestId)) {
+        throw new https_1.HttpsError('invalid-argument', 'Invalid requestId.');
     }
-
-    // Ensure Admin app is initialized before use
-    if (getApps().length === 0) {
-      initializeApp();
-    }
-
-    const dbAdmin = getFirestore();
-    const tokenRef  = dbAdmin.collection('deviceLinkTokens').doc(requestId);
+    const dbAdmin = (0, firestore_1.getFirestore)();
+    const tokenRef = dbAdmin.collection('deviceLinkTokens').doc(requestId);
     const tokenSnap = await tokenRef.get();
     if (!tokenSnap.exists) {
-      throw new functionsV1.https.HttpsError('not-found', 'Link request not found.');
+        throw new https_1.HttpsError('not-found', 'Link request not found.');
     }
     const t = tokenSnap.data();
-
     if (t.requesterUid === ownerUid) {
-      throw new functionsV1.https.HttpsError(
-        'invalid-argument',
-        'You cannot link a device to itself.',
-      );
+        throw new https_1.HttpsError('invalid-argument', 'You cannot link a device to itself.');
     }
-
-    const expiresAt = t.expiresAt && t.expiresAt.toDate
-      ? t.expiresAt.toDate()
-      : new Date(t.expiresAt);
-    if (
-      Number.isNaN(expiresAt.getTime()) ||
-      Date.now() > expiresAt.getTime() + MAX_LINK_AGE_MS
-    ) {
-      throw new functionsV1.https.HttpsError(
-        'failed-precondition',
-        'This link request has expired.',
-      );
+    const expiresAt = t.expiresAt?.toDate ? t.expiresAt.toDate() : new Date(t.expiresAt);
+    if (Number.isNaN(expiresAt.getTime()) || Date.now() > expiresAt.getTime() + MAX_LINK_AGE_MS) {
+        throw new https_1.HttpsError('failed-precondition', 'This link request has expired.');
     }
-
     if (t.companionCustomToken) {
-      throw new functionsV1.https.HttpsError(
-        'already-exists',
-        'A companion token has already been minted for this request.',
-      );
+        throw new https_1.HttpsError('already-exists', 'A companion token has already been minted for this request.');
     }
-
     if (t.ownerUid && t.ownerUid !== ownerUid) {
-      throw new functionsV1.https.HttpsError(
-        'permission-denied',
-        'This request has already been claimed by another account.',
-      );
+        throw new https_1.HttpsError('permission-denied', 'This request has already been claimed by another account.');
     }
-
-    const customToken = await getAuth().createCustomToken(ownerUid, {
-      companion: true,
-    });
-
-    functionsV1.logger.info('mintCompanionToken success', {
-      ownerUid,
-      requestId,
-    });
-
+    const customToken = await (0, auth_1.getAuth)().createCustomToken(ownerUid, { companion: true });
+    logger.info('mintCompanionToken', { ownerUid, requestId, deviceName: t.deviceName ?? null });
     return { customToken };
-  } catch (err) {
-    // If it's already an HttpsError, rethrow it cleanly
-    if (err instanceof functionsV1.https.HttpsError) {
-      throw err;
-    }
-    // Otherwise log everything and turn it into an INTERNAL with detail
-    functionsV1.logger.error('mintCompanionToken FAILED', {
-      message: err && err.message,
-      stack: err && err.stack,
-      code: err && err.code,
-    });
-    throw new functionsV1.https.HttpsError(
-      'internal',
-      (err && err.message) || 'Internal error.',
-    );
-  }
 });
+// ─── Push Notifications for new messages ───────────────────────────────────
+// Triggers whenever a chat document is written (i.e. lastMessage is updated).
+// Fans out an Expo push notification to every member except the sender.
+//
+// Token storage:   users/{memberId}/pushTokens/{deviceId} → { token, platform }
+// Push delivery:   Expo Push API  (https://exp.host/--/api/v2/push/send)
+//                  Works for both iOS and Android Expo-managed apps.
+const firestore_2 = require("firebase-functions/v2/firestore");
+const https = __importStar(require("https"));
+const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
+/** POST a batch of Expo push messages (max 100 per call). */
+async function sendExpoPushBatch(messages) {
+    if (messages.length === 0)
+        return;
+    const payload = JSON.stringify(messages);
+    await new Promise((resolve, reject) => {
+        const url = new URL(EXPO_PUSH_URL);
+        const req = https.request({
+            hostname: url.hostname,
+            path: url.pathname,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                'Accept-Encoding': 'gzip, deflate',
+            },
+        }, (res) => {
+            let body = '';
+            res.on('data', (chunk) => { body += chunk.toString(); });
+            res.on('end', () => {
+                if (res.statusCode && res.statusCode >= 400) {
+                    logger.warn('[sendMessageNotification] Expo push error:', res.statusCode, body);
+                }
+                resolve();
+            });
+        });
+        req.on('error', reject);
+        req.write(payload);
+        req.end();
+    });
+}
+exports.sendMessageNotification = (0, firestore_2.onDocumentWritten)('chats/{chatId}', async (event) => {
+    const after = event.data?.after;
+    const before = event.data?.before;
+    if (!after?.exists)
+        return; // chat deleted — nothing to do
+    const chatData = after.data();
+    const lastMsg = chatData.lastMessage;
+    if (!lastMsg?.senderId || !lastMsg?.timestamp)
+        return;
+    // Only fire when lastMessage.timestamp actually changed (a new message was sent)
+    const prevLastMsg = before?.exists ? before.data().lastMessage : undefined;
+    const prevTs = prevLastMsg?.timestamp?.toMillis?.() ?? 0;
+    const newTs = lastMsg.timestamp.toMillis?.() ?? 0;
+    if (newTs <= prevTs)
+        return; // timestamp didn't advance — skip
+    const senderId = lastMsg.senderId;
+    const members = (chatData.members ?? []);
+    const isGroup = chatData.type === 'group';
+    const groupName = (chatData.groupName ?? 'Group');
+    const msgText = lastMsg.text || (lastMsg.type === 'image' ? '📷 Photo' : lastMsg.type === 'voice' ? '🎤 Voice message' : '📎 File');
+    const dbAdmin = (0, firestore_1.getFirestore)();
+    // Resolve sender display name for group chats
+    let senderName = 'Someone';
+    if (isGroup) {
+        try {
+            const senderDoc = await dbAdmin.collection('users').doc(senderId).get();
+            if (senderDoc.exists) {
+                const d = senderDoc.data();
+                const dn = (d.displayName ?? '').trim();
+                const ph = (d.phone ?? '').trim();
+                const PHONE_LIKE = /^\+?[\d\s\-()]{5,}$/;
+                senderName = (dn && !PHONE_LIKE.test(dn) && dn !== ph) ? dn : (ph || dn || 'Someone');
+            }
+        }
+        catch (err) {
+            logger.warn('[sendMessageNotification] Could not resolve sender name:', err);
+        }
+    }
+    // Collect all push tokens for non-sender members
+    const pushMessages = [];
+    await Promise.all(members
+        .filter((uid) => uid !== senderId)
+        .map(async (uid) => {
+        try {
+            const tokensSnap = await dbAdmin
+                .collection('users').doc(uid)
+                .collection('pushTokens')
+                .get();
+            for (const tokenDoc of tokensSnap.docs) {
+                const token = tokenDoc.data().token;
+                if (!token || !token.startsWith('ExponentPushToken['))
+                    continue;
+                pushMessages.push({
+                    to: token,
+                    sound: 'default',
+                    title: isGroup ? groupName : senderName,
+                    body: isGroup ? `${senderName}: ${msgText}` : msgText,
+                    channelId: 'default',
+                    data: {
+                        chatId: event.params.chatId,
+                        senderId,
+                        type: 'message',
+                    },
+                });
+            }
+        }
+        catch (err) {
+            logger.warn(`[sendMessageNotification] Failed to get tokens for uid ${uid}:`, err);
+        }
+    }));
+    if (pushMessages.length === 0)
+        return;
+    // Expo limits 100 messages per batch
+    const BATCH_SIZE = 100;
+    for (let i = 0; i < pushMessages.length; i += BATCH_SIZE) {
+        await sendExpoPushBatch(pushMessages.slice(i, i + BATCH_SIZE));
+    }
+    logger.info(`[sendMessageNotification] Sent ${pushMessages.length} push(es) for chat ${event.params.chatId}`);
+});
+// ─── Profile View Tracker ────────────────────────────────────────────────────
+exports.recordProfileView = (0, https_1.onCall)(async (request) => {
+    if (!request.auth) {
+        throw new https_1.HttpsError('unauthenticated', 'Must be signed in to record a profile view.');
+    }
+    const viewerUid = request.auth.uid;
+    const viewedUid = (request.data?.viewedUid ?? '');
+    if (!viewedUid) {
+        throw new https_1.HttpsError('invalid-argument', 'viewedUid is required.');
+    }
+    if (viewerUid === viewedUid) {
+        // Silently ignore self-views
+        return { ok: true };
+    }
+    const dbAdmin = (0, firestore_1.getFirestore)();
+    const userRef = dbAdmin.collection('users').doc(viewedUid);
+    const now = new Date();
+    const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const snap = await userRef.get();
+    const storedDayKey = snap.exists ? (snap.data()?.profileViewsDayKey ?? '') : '';
+    const todayIncrement = storedDayKey === todayKey
+        ? firestore_1.FieldValue.increment(1)
+        : 1;
+    await userRef.set({
+        profileViews: firestore_1.FieldValue.increment(1),
+        profileViewsToday: todayIncrement,
+        profileViewsDayKey: todayKey,
+        profileViewsUpdatedAt: firestore_1.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    logger.info('[recordProfileView] Recorded view', { viewerUid, viewedUid });
+    return { ok: true };
+});
+//# sourceMappingURL=index.js.map

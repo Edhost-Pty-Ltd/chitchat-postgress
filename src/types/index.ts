@@ -5,6 +5,46 @@ export type AgentStatus = 'available' | 'busy' | 'away';
 /** Which role a user has in the whole app (was implicit before). */
 export type UserRole = 'customer' | 'agent' | 'admin';
 
+// ─── Business Profile Enhancements ───────────────────────────────────────────
+
+/** Industry categories for business profile categorisation */
+export const INDUSTRY_CATEGORIES = [
+  { id: 'retail',        label: 'Retail & Shopping',       emoji: '🛍️' },
+  { id: 'food',          label: 'Food & Beverage',         emoji: '🍽️' },
+  { id: 'beauty',        label: 'Beauty & Wellness',       emoji: '💅' },
+  { id: 'health',        label: 'Health & Medical',        emoji: '🏥' },
+  { id: 'tech',          label: 'Technology & IT',         emoji: '💻' },
+  { id: 'finance',       label: 'Finance & Accounting',    emoji: '💰' },
+  { id: 'legal',         label: 'Legal Services',          emoji: '⚖️' },
+  { id: 'education',     label: 'Education & Training',    emoji: '📚' },
+  { id: 'construction',  label: 'Construction & Property', emoji: '🏗️' },
+  { id: 'automotive',    label: 'Automotive',              emoji: '🚗' },
+  { id: 'travel',        label: 'Travel & Hospitality',    emoji: '✈️' },
+  { id: 'entertainment', label: 'Entertainment & Events',  emoji: '🎭' },
+  { id: 'nonprofit',     label: 'Non-profit & NGO',        emoji: '🤝' },
+  { id: 'freelance',     label: 'Freelancer & Consulting', emoji: '💼' },
+  { id: 'other',         label: 'Other',                   emoji: '📋' },
+] as const;
+
+export type IndustryId = typeof INDUSTRY_CATEGORIES[number]['id'];
+
+/** Physical address for a business */
+export interface BusinessAddress {
+  street:     string;
+  city:       string;
+  province:   string;   // state / province / region
+  postalCode: string;
+  country:    string;
+}
+
+/** Aggregated message delivery statistics stored on users/{uid}.messageStats */
+export interface MessageStats {
+  sent:      number;   // messages sent by this business owner
+  delivered: number;   // of those, how many were delivered to the recipient
+  read:      number;   // of those, how many were read by the recipient
+  lastUpdatedAt?: Date | null;
+}
+
 /** The business account the doc's design centres on. */
 export interface Business {
   businessId: string;
@@ -183,6 +223,7 @@ export type RootStackParamList = {
   Settings: undefined;
   Appearance: undefined;
   Profile: undefined;
+  Dashboard:undefined;
   CreateAccount: undefined;
   AccountSettings: undefined;
   PrivacySettings: undefined;

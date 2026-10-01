@@ -34,12 +34,39 @@ service cloud.firestore {
       // 2. It is a Business Owner linking this user as an agent. The owner is ONLY
       //    allowed to touch 'businessOwnerUid' and 'agentRole', and they must be setting
       //    'businessOwnerUid' to their own UID.
+      // OR
+      // 3. It is a signed-in user incrementing ONLY the profile-view counters
+      //    (used by trackProfileView). The increment must be exactly +1 on the
+      //    two integer counters, and the caller must not be the doc's owner
+      //    (owners use rule 1) or a companion device.
       allow update: if (isOwner(userId) && !isCompanion()) || 
         (
           isSignedIn() && 
           !isCompanion() &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['businessOwnerUid', 'agentRole']) &&
           request.resource.data.businessOwnerUid == request.auth.uid
+        ) ||
+        (
+          // Counter-only update from any signed-in non-companion viewer.
+          // This is what feeds the live dashboard analytics.
+          isSignedIn() &&
+          !isCompanion() &&
+          request.auth.uid != userId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'profileViews',
+            'profileViewsToday',
+            'profileViewsDayKey',
+            'profileViewsUpdatedAt'
+          ]) &&
+          request.resource.data.profileViews is int &&
+          request.resource.data.profileViews == resource.data.profileViews + 1 &&
+          request.resource.data.profileViewsToday is int &&
+          (
+            // Normal increment (same day)
+            request.resource.data.profileViewsToday == resource.data.profileViewsToday + 1 ||
+            // Day rollover — reset to 1
+            request.resource.data.profileViewsToday == 1
+          )
         );
 
       // Blocked contacts — read by owner or the blocked user; write primary only.
@@ -66,10 +93,24 @@ service cloud.firestore {
       match /pushTokens/{deviceId} {
         allow read, write: if isOwner(userId);
       }
+
+      // Message / analytics stats — written by the app after aggregating.
+      // Only the owner (and their companion devices, which share the same auth
+      // uid) can read or write these counters.
+      match /stats/{statDoc} {
+        allow read, write: if isOwner(userId);
+      }
       
       // Synced contacts
       match /syncedContacts/{contactId} {
         allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // Chat labels — user-defined tabs grouping chats (direct + group).
+      // Each account can only read/write its own labels. Companions sign in
+      // as the owner, so isOwner(userId) is true for them too.
+      match /chatLabels/{labelId} {
+        allow read, write: if isOwner(userId);
       }
     }
 

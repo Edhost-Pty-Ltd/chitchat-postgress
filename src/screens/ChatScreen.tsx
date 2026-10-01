@@ -5,7 +5,7 @@ import {
   StyleSheet, TextInput, KeyboardAvoidingView, Platform,
   ActivityIndicator, PanResponder, Linking, Modal, Alert,
   GestureResponderEvent, PanResponderGestureState, Image, Dimensions,
-  Animated,
+  Animated, Share,
 } from 'react-native';
 import { useNavigation, useRoute, RouteProp, useFocusEffect } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -13,6 +13,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import QRCode from 'react-native-qrcode-svg';
 import { NotificationTestPanel } from '../components/NotificationTestPanel';
 
 // Platform-specific imports for native-only modules
@@ -72,10 +73,12 @@ import { getDateLabel, groupMessagesByDate } from '../utils/dateUtils';
 import { useTypingIndicator } from '../hooks/useTypingIndicator';
 import { TypingIndicator } from '../components/TypingIndicator';
 import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
-import { RootStackParamList } from '../types';
+import { RootStackParamList, INDUSTRY_CATEGORIES } from '../types';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 import { useCart } from '../context/CartContext';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+// NEW: profile-view tracking for the live dashboard analytics.
+import { trackProfileView } from '../utils/trackProfileView';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'Chat'>;
 type RoutePropType = RouteProp<RootStackParamList, 'Chat'>;
@@ -85,6 +88,7 @@ const CANCEL_THRESHOLD_DP = 50;
 const MAX_UPLOAD_RETRIES = 3;
 const PERMISSION_MESSAGE_DURATION_MS = 3000;
 const MUTE_STORAGE_KEY_PREFIX = 'chat_mute_';
+const BUSINESS_LINK_BASE = 'https://www.chitchatbusiness.com';
 
 // Common emoji picks
 const EMOJI_LIST = [
@@ -107,6 +111,27 @@ interface PastMember {
   displayName: string;
   photoURL: string | null;
   leftAt: Date;
+}
+
+// ── Business Profile Interface ────────────────────────────────────────────────
+interface DaySchedule { open: string; close: string; }
+interface BusinessAddress {
+  street:     string;
+  city:       string;
+  province:   string;
+  postalCode: string;
+  country:    string;
+}
+interface BusinessProfileData {
+  email:        string;
+  website:      string;
+  phone:        string;
+  workSchedule: Record<string, DaySchedule>;
+  catalogCount:     number;
+  collectionsCount: number;
+  description:  string;
+  industry:     string;
+  address:      BusinessAddress | null;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -216,6 +241,57 @@ async function saveMutedState(chatId: string, muted: boolean): Promise<void> {
   }
 }
 
+/** Convert a "9:00 AM" string into minutes since midnight. */
+function timeToMinutes(t: string): number {
+  if (!t || t === 'Closed') return -1;
+  const m = t.match(/(\d+):(\d+)\s*(AM|PM)/i);
+  if (!m) return -1;
+  let h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  const ap = m[3].toUpperCase();
+  if (ap === 'PM' && h < 12) h += 12;
+  if (ap === 'AM' && h === 12) h = 0;
+  return h * 60 + min;
+}
+
+/** Returns true if the business is open right now, given a work schedule map. */
+function isCurrentlyOpen(schedule?: Record<string, DaySchedule>): boolean {
+  if (!schedule) return false;
+  const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const now = new Date();
+  const today = DAYS[now.getDay()];
+  const s = schedule[today];
+  if (!s || s.open === 'Closed') return false;
+  const openMin = timeToMinutes(s.open);
+  const closeMin = timeToMinutes(s.close);
+  if (openMin < 0 || closeMin < 0) return false;
+  const cur = now.getHours() * 60 + now.getMinutes();
+  return cur >= openMin && cur < closeMin;
+}
+
+/** Today's hours label, e.g. "9:00 AM – 5:00 PM" or "Closed today". */
+function getTodayHoursLabel(schedule?: Record<string, DaySchedule>): string {
+  if (!schedule) return 'Hours not set';
+  const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const now = new Date();
+  const today = DAYS[now.getDay()];
+  const s = schedule[today];
+  if (!s || s.open === 'Closed') return 'Closed today';
+  return `${s.open} – ${s.close}`;
+}
+
+/** Weekday-ordered list of { day, text, isClosed } rows for the work hours block. */
+function getWorkHoursSummary(schedule?: Record<string, DaySchedule>) {
+  const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  return DAYS.map((day) => {
+    const s = schedule?.[day];
+    if (!s || s.open === 'Closed') {
+      return { day, text: 'Closed', isClosed: true };
+    }
+    return { day, text: `${s.open} – ${s.close}`, isClosed: false };
+  });
+}
+
 export default function ChatScreen() {
   const navigation = useNavigation<NavProp>();
   const route = useRoute<RoutePropType>();
@@ -241,6 +317,10 @@ export default function ChatScreen() {
   const [sellerCatalog,      setSellerCatalog]      = useState<import('../types').CatalogItem[]>([]);
   const [sellerCollections,  setSellerCollections]  = useState<import('../types').CatalogCollection[]>([]);
   const [loadingCatalog,     setLoadingCatalog]     = useState(false);
+  // Full business profile data (contact + hours) for the profile sheet + QR share
+  const [businessProfile,    setBusinessProfile]    = useState<BusinessProfileData | null>(null);
+  // QR share sheet visibility
+  const [qrShareVisible,     setQrShareVisible]     = useState(false);
   // which collection is expanded inside the profile sheet (null = all collapsed)
   const [expandedProfileCol, setExpandedProfileCol] = useState<string | null>(null);
   // catalog full-screen sheet
@@ -282,9 +362,8 @@ export default function ChatScreen() {
     const items: MessageListItem[] = [];
     let currentDateLabel: string | null = null;
 
-    filteredMessages.forEach((message, index) => {
+    filteredMessages.forEach((message) => {
       if (!message.timestamp) {
-        // Skip messages without timestamps
         items.push({ type: 'message', data: message });
         return;
       }
@@ -294,20 +373,14 @@ export default function ChatScreen() {
         : new Date(message.timestamp);
 
       if (isNaN(messageDate.getTime())) {
-        // Skip invalid dates
         items.push({ type: 'message', data: message });
         return;
       }
 
       const dateLabel = getDateLabel(messageDate, 'long');
 
-      // Insert date separator if we're entering a new day
       if (dateLabel !== currentDateLabel) {
-        items.push({
-          type: 'dateSeparator',
-          dateLabel,
-          date: messageDate,
-        });
+        items.push({ type: 'dateSeparator', dateLabel, date: messageDate });
         currentDateLabel = dateLabel;
       }
 
@@ -497,6 +570,33 @@ export default function ChatScreen() {
     };
   }, [chatId]);
 
+  // ── Track profile view when the profile modal opens (1-on-1 only) ──
+  // Fires trackProfileView() once per viewer per day, using AsyncStorage as
+  // a debounce so repeated taps don't inflate the counter. Feeds the live
+  // dashboard analytics.
+  useEffect(() => {
+    if (!profileModalOpen) return;
+    if (isGroup) return;
+    if (!otherUserId) return;
+    if (!userId) return;
+    if (userId === otherUserId) return;
+
+    const dayKey = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const storageKey = `pv_${otherUserId}_${dayKey}`;
+
+    (async () => {
+      try {
+        const already = await AsyncStorage.getItem(storageKey);
+        if (already) return;
+        // Set the key AFTER a successful write so a failure allows a retry
+        await trackProfileView(otherUserId);
+        await AsyncStorage.setItem(storageKey, '1');
+      } catch (err) {
+        console.warn('[ChatScreen] trackProfileView failed:', err);
+      }
+    })();
+  }, [profileModalOpen, isGroup, otherUserId, userId]);
+
   // ── Fetch group members when profile modal opens ────────────────
   useEffect(() => {
     if (!profileModalOpen || !isGroup || !chatId) return;
@@ -667,10 +767,12 @@ export default function ChatScreen() {
   // ── Load seller catalog + collections (1-on-1 only) ──────────────
   // IMPORTANT: Loads on mount (not just when the profile modal opens) so
   // that the header catalog button and profile catalog entry both have data.
+  // Also loads business contact + work hours for the profile sheet and QR.
   useEffect(() => {
     if (isGroup || !otherUserId) {
       setSellerCatalog([]);
       setSellerCollections([]);
+      setBusinessProfile(null);
       setLoadingCatalog(false);
       return;
     }
@@ -681,17 +783,41 @@ export default function ChatScreen() {
         const fsDbCat = db as ReturnType<typeof firestore>;
         const snap = await fsDbCat.collection('users').doc(otherUserId).get();
         if (!cancelled && snap.exists()) {
-          setSellerCatalog(snap.data()?.catalog ?? []);
-          setSellerCollections(snap.data()?.collections ?? []);
+          const data = snap.data() || {};
+          const catalog: import('../types').CatalogItem[] = data.catalog ?? [];
+          const collections: import('../types').CatalogCollection[] = data.collections ?? [];
+          setSellerCatalog(catalog);
+          setSellerCollections(collections);
+          setBusinessProfile({
+            email:            data.email        || '',
+            website:          data.website      || '',
+            phone:            data.phone        || '',
+            workSchedule:     data.workSchedule || {},
+            catalogCount:     catalog.length,
+            collectionsCount: collections.length,
+            description:      data.description  || '',
+            industry:         data.industry     || '',
+            address:          data.address
+              ? {
+                  street:     data.address.street     || '',
+                  city:       data.address.city       || '',
+                  province:   data.address.province   || '',
+                  postalCode: data.address.postalCode || '',
+                  country:    data.address.country    || '',
+                }
+              : null,
+          });
         } else if (!cancelled) {
           setSellerCatalog([]);
           setSellerCollections([]);
+          setBusinessProfile(null);
         }
       } catch (err) {
-        console.warn('[ChatScreen] Failed to load seller catalog:', err);
+        console.warn('[ChatScreen] Failed to load seller catalog/business profile:', err);
         if (!cancelled) {
           setSellerCatalog([]);
           setSellerCollections([]);
+          setBusinessProfile(null);
         }
       } finally {
         if (!cancelled) setLoadingCatalog(false);
@@ -1086,14 +1212,12 @@ export default function ChatScreen() {
   const handleEditMessage = () => {
     if (!selectedMessageId) return;
     const message = messages.find(m => m.messageId === selectedMessageId);
-    // Only own text messages can be edited
     if (message && message.senderId === userId && message.type === 'text') {
       setEditingMessage(message);
       setInput(message.text ?? '');
       setShowEmoji(false);
       handleClearSelection();
     } else {
-      Alert.alert('Cannot edit', 'You can only edit your own text messages.');
       handleClearSelection();
     }
   };
@@ -1804,6 +1928,18 @@ export default function ChatScreen() {
     }
   }, [userId, chatId, isGroup, displayName, user, navigation]);
 
+  // ── Open QR share sheet ─────────────────────────────────────────
+  // Closes the profile sheet first, then presents the QR share sheet so the
+  // two modals don't stack awkwardly on iOS.
+  const openQrShare = useCallback(() => {
+    if (!otherUserId) {
+      Alert.alert('Cannot share', 'Business information is not available yet.');
+      return;
+    }
+    setProfileModalOpen(false);
+    setTimeout(() => setQrShareVisible(true), 60);
+  }, [otherUserId]);
+
   // ── Check if recording is active ────────────────────────────────
   const isRecording = recorder.state.status === 'recording';
 
@@ -1971,7 +2107,12 @@ export default function ChatScreen() {
                 </TouchableOpacity>
               )}
               {item.text && <AppText fixedColor style={styles.bubbleTextIn}>{item.text}</AppText>}
-              <AppText fixedColor style={styles.timeIn}>{formatTime(item.timestamp)}</AppText>
+              <View style={styles.timeInRow}>
+                {item.edited && (
+                  <AppText fixedColor style={styles.editedLabel}>Edited</AppText>
+                )}
+                <AppText fixedColor style={styles.timeIn}>{formatTime(item.timestamp)}</AppText>
+              </View>
             </LinearGradient>
           )
         )}
@@ -2067,6 +2208,9 @@ export default function ChatScreen() {
               )}
               {item.text && <AppText style={[styles.bubbleTextOut, { color: textColor, fontFamily }]}>{item.text}</AppText>}
               <View style={styles.timeOutRow}>
+                {item.edited && (
+                  <AppText style={[styles.editedLabel, { color: textColor }]}>Edited</AppText>
+                )}
                 <AppText style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
                 <AppIcon
                   name={tickIcon.icon}
@@ -2480,14 +2624,20 @@ export default function ChatScreen() {
                   <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Reply</AppText>
                 </TouchableOpacity>
 
-                {/* Edit — only shown for own text messages */}
-                {messages.find(m => m.messageId === selectedMessageId)?.senderId === userId &&
-                 messages.find(m => m.messageId === selectedMessageId)?.type === 'text' && (
-                  <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleEditMessage}>
-                    <AppIcon name="pencil-outline" size={22} color={COLORS.blue} />
-                    <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Edit</AppText>
-                  </TouchableOpacity>
-                )}
+                {/* Edit — only shown for own text messages within 15 minutes of sending */}
+                {(() => {
+                  const EDIT_WINDOW_MS = 15 * 60 * 1000;
+                  const msg = messages.find(m => m.messageId === selectedMessageId);
+                  if (!msg || msg.senderId !== userId || msg.type !== 'text') return null;
+                  const msgTime = msg.timestamp instanceof Date ? msg.timestamp : msg.timestamp ? new Date(msg.timestamp) : null;
+                  if (msgTime && Date.now() - msgTime.getTime() > EDIT_WINDOW_MS) return null;
+                  return (
+                    <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleEditMessage}>
+                      <AppIcon name="pencil-outline" size={22} color={COLORS.blue} />
+                      <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Edit</AppText>
+                    </TouchableOpacity>
+                  );
+                })()}
 
                 <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleForwardMessage}>
                   <AppIcon name="arrow-redo-outline" size={22} color={COLORS.blue} />
@@ -2987,6 +3137,17 @@ export default function ChatScreen() {
         />
       </Modal>
 
+      {/* ── Business QR Share Sheet ── */}
+      <BusinessQrShareSheet
+        visible={qrShareVisible}
+        onClose={() => setQrShareVisible(false)}
+        businessUid={otherUserId ?? ''}
+        displayName={displayName}
+        photoURL={headerPhoto ?? null}
+        initials={getInitials(displayName)}
+        profile={businessProfile}
+      />
+
       {/* ── Profile Modal — Business Profile Overview ── */}
       <Modal
         visible={profileModalOpen}
@@ -3061,7 +3222,7 @@ export default function ChatScreen() {
                   {[
                     { icon: 'call-outline' as const,        label: 'Call',    onPress: () => { setProfileModalOpen(false); handleVoiceCall(); } },
                     { icon: 'storefront-outline' as const,  label: 'Catalog', onPress: openCatalogSheet },
-                    { icon: 'share-social-outline' as const, label: 'Share',  onPress: () => {} },
+                    { icon: 'qr-code-outline' as const,     label: 'Share',   onPress: openQrShare },
                   ].map(a => (
                     <TouchableOpacity
                       key={a.label}
@@ -3086,10 +3247,116 @@ export default function ChatScreen() {
                   {/* Presence / hours */}
                   <View style={profileHeroStyles.infoRow}>
                     <AppIcon name="time-outline" size={18} color={COLORS.blue} fixedColor />
-                    <AppText style={[profileHeroStyles.infoText, { color: textColor }]}>
-                      {isOnline ? 'Open now' : 'Closed now'}
-                    </AppText>
+                    <View style={{ flex: 1 }}>
+                      <AppText style={[profileHeroStyles.infoText, { color: textColor }]}>
+                        {businessProfile && isCurrentlyOpen(businessProfile.workSchedule)
+                          ? 'Open now'
+                          : 'Closed now'}
+                      </AppText>
+                      {businessProfile && (
+                        <AppText style={{ fontSize: 12, color: FG.secondary, marginTop: 1 }}>
+                          {getTodayHoursLabel(businessProfile.workSchedule)}
+                        </AppText>
+                      )}
+                    </View>
                   </View>
+
+                  {/* Full working hours list */}
+                  {businessProfile && Object.keys(businessProfile.workSchedule || {}).length > 0 && (
+                    <View style={profileHeroStyles.hoursCard}>
+                      <AppText style={profileHeroStyles.hoursCardLabel}>OPENING HOURS</AppText>
+                      {getWorkHoursSummary(businessProfile.workSchedule).map((row) => (
+                        <View key={row.day} style={profileHeroStyles.hoursRow}>
+                          <AppText style={[profileHeroStyles.hoursDay, { color: textColor }]}>
+                            {row.day}
+                          </AppText>
+                          <AppText
+                            style={[
+                              profileHeroStyles.hoursValue,
+                              { color: row.isClosed ? FG.secondary : textColor },
+                            ]}
+                          >
+                            {row.text}
+                          </AppText>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  {/* Contact details */}
+                  {businessProfile?.phone ? (
+                    <View style={profileHeroStyles.infoRow}>
+                      <AppIcon name="call-outline" size={18} color={COLORS.blue} fixedColor />
+                      <AppText style={[profileHeroStyles.infoText, { color: textColor }]} numberOfLines={1}>
+                        {businessProfile.phone}
+                      </AppText>
+                    </View>
+                  ) : null}
+                  {businessProfile?.email ? (
+                    <View style={profileHeroStyles.infoRow}>
+                      <AppIcon name="mail-outline" size={18} color={COLORS.blue} fixedColor />
+                      <AppText style={[profileHeroStyles.infoText, { color: textColor }]} numberOfLines={1}>
+                        {businessProfile.email}
+                      </AppText>
+                    </View>
+                  ) : null}
+                  {businessProfile?.website ? (
+                    <View style={profileHeroStyles.infoRow}>
+                      <AppIcon name="globe-outline" size={18} color={COLORS.blue} fixedColor />
+                      <AppText style={[profileHeroStyles.infoText, { color: textColor }]} numberOfLines={1}>
+                        {businessProfile.website}
+                      </AppText>
+                    </View>
+                  ) : null}
+
+                  {/* Industry badge */}
+                  {businessProfile?.industry ? (() => {
+                    const cat = INDUSTRY_CATEGORIES.find(c => c.id === businessProfile.industry);
+                    return cat ? (
+                      <View style={profileHeroStyles.infoRow}>
+                        <AppIcon name="briefcase-outline" size={18} color={COLORS.blue} fixedColor />
+                        <View style={profileHeroStyles.industryBadge}>
+                          <AppText style={profileHeroStyles.industryEmoji}>{cat.emoji}</AppText>
+                          <AppText style={[profileHeroStyles.industryLabel, { color: textColor }]}>
+                            {cat.label}
+                          </AppText>
+                        </View>
+                      </View>
+                    ) : null;
+                  })() : null}
+
+                  {/* About / Description */}
+                  {businessProfile?.description ? (
+                    <View style={profileHeroStyles.aboutCard}>
+                      <AppText style={[profileHeroStyles.aboutLabel, { color: FG.secondary }]}>
+                        ABOUT
+                      </AppText>
+                      <AppText style={[profileHeroStyles.aboutText, { color: textColor }]}>
+                        {businessProfile.description}
+                      </AppText>
+                    </View>
+                  ) : null}
+
+                  {/* Physical address */}
+                  {businessProfile?.address && (
+                    businessProfile.address.street ||
+                    businessProfile.address.city ||
+                    businessProfile.address.country
+                  ) ? (
+                    <View style={profileHeroStyles.infoRow}>
+                      <AppIcon name="location-outline" size={18} color={COLORS.blue} fixedColor />
+                      <AppText style={[profileHeroStyles.infoText, { color: textColor }]}>
+                        {[
+                          businessProfile.address.street,
+                          businessProfile.address.city,
+                          businessProfile.address.province,
+                          businessProfile.address.postalCode,
+                          businessProfile.address.country,
+                        ].filter(Boolean).join(', ')}
+                      </AppText>
+                    </View>
+                  ) : null}
+
                 </View>
               )}
 
@@ -3266,6 +3533,351 @@ export default function ChatScreen() {
     </>
   );
 }
+
+
+// ─── BusinessQrShareSheet ─────────────────────────────────────────────────────
+// Presents a scannable QR code for the business profile, with the business
+// card (avatar, name, verified badge, contact info, work hours) displayed
+// alongside it. The QR encodes:
+//   https://www.chitchatbusiness.com/{businessUid}
+// The ChitChat logo is embedded at the centre of the QR with ECC level H
+// so the code still decodes reliably even with the logo overlay.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const QR_SHARE_SIZE = Math.min(Dimensions.get('window').width - 120, 220);
+const QR_SHARE_LOGO_SIZE = Math.round(QR_SHARE_SIZE * 0.20);
+
+function BusinessQrShareSheet({
+  visible,
+  onClose,
+  businessUid,
+  displayName,
+  photoURL,
+  initials,
+  profile,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  businessUid: string;
+  displayName: string;
+  photoURL: string | null;
+  initials: string;
+  profile: BusinessProfileData | null;
+}) {
+  const { textColor } = useTypography();
+  const { FG } = useForeground();
+  const { bevel } = useGlass();
+  const insets = useSafeAreaInsets();
+
+  const qrValue = `${BUSINESS_LINK_BASE}/${businessUid}`;
+
+  const openNow = isCurrentlyOpen(profile?.workSchedule);
+  const todayLabel = getTodayHoursLabel(profile?.workSchedule);
+  const hoursRows = getWorkHoursSummary(profile?.workSchedule);
+
+  const handleShare = async () => {
+    try {
+      await Share.share({
+        title: displayName,
+        message:
+          `Chat with ${displayName} on ChitChat Business\n\n` +
+          `${qrValue}\n\n` +
+          (profile?.phone ? `☎ ${profile.phone}\n` : '') +
+          (profile?.email ? `✉ ${profile.email}\n` : '') +
+          (profile?.website ? `🌐 ${profile.website}\n` : ''),
+        url: qrValue,
+      });
+    } catch (err) {
+      console.warn('[BusinessQrShareSheet] Share failed:', err);
+    }
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="slide"
+      onRequestClose={onClose}
+      statusBarTranslucent
+    >
+      <View style={qrStyles.overlay}>
+        <TouchableOpacity style={qrStyles.backdrop} activeOpacity={1} onPress={onClose} />
+        <View style={[qrStyles.sheet, { backgroundColor: FG.glassBg }]}>
+          <AppBg />
+
+          <View style={qrStyles.handle} />
+
+          {/* Header */}
+          <View style={qrStyles.header}>
+            <AppText style={[qrStyles.headerTitle, { color: textColor }]}>
+              Share Business
+            </AppText>
+            <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <AppIcon name="close" size={22} color={COLORS.sub} />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={[
+              qrStyles.scroll,
+              { paddingBottom: (Platform.OS === 'ios' ? 40 : 24) + insets.bottom },
+            ]}
+          >
+            {/* Business card */}
+            <View style={[qrStyles.bizCard, bevel]}>
+              <Avatar
+                initials={initials}
+                color={COLORS.blue}
+                size={64}
+                imageUrl={photoURL}
+              />
+              <View style={{ flex: 1, marginLeft: 14 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <AppText style={[qrStyles.bizName, { color: textColor }]} numberOfLines={1}>
+                    {displayName}
+                  </AppText>
+                  <LinearGradient colors={GRADIENTS.primary} style={qrStyles.verified}>
+                    <AppIcon name="checkmark" size={10} color="#fff" fixedColor />
+                  </LinearGradient>
+                </View>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3 }}>
+                  <View
+                    style={[
+                      qrStyles.dot,
+                      { backgroundColor: openNow ? COLORS.green : COLORS.sub },
+                    ]}
+                  />
+                  <AppText style={{ fontSize: 12, color: openNow ? COLORS.green : FG.secondary, fontWeight: '600' }}>
+                    {openNow ? 'Open now' : 'Closed now'}
+                  </AppText>
+                  <AppText style={{ fontSize: 12, color: FG.secondary }}> · {todayLabel}</AppText>
+                </View>
+                <AppText style={{ fontSize: 11, color: FG.secondary, marginTop: 4 }}>
+                  Business account
+                </AppText>
+              </View>
+            </View>
+
+            {/* QR code with logo overlay */}
+            <View style={qrStyles.qrFrame}>
+              {businessUid ? (
+                <QRCode
+                  value={qrValue}
+                  size={QR_SHARE_SIZE}
+                  ecl="H"
+                  color="#000000"
+                  backgroundColor="#FFFFFF"
+                  quietZone={8}
+                  logo={require('../../assets/chitchat-logo.png')}
+                  logoSize={QR_SHARE_LOGO_SIZE}
+                  logoBackgroundColor="#FFFFFF"
+                  logoBorderRadius={12}
+                  logoMargin={6}
+                />
+              ) : (
+                <ActivityIndicator size="large" color={COLORS.blue} />
+              )}
+            </View>
+
+            <AppText style={qrStyles.hint}>
+              Scan to open this business in ChitChat
+            </AppText>
+
+            <View style={[qrStyles.urlPill, bevel]}>
+              <AppIcon name="link-outline" size={14} color={COLORS.blue} fixedColor />
+              <AppText style={qrStyles.urlText} numberOfLines={1}>
+                {qrValue}
+              </AppText>
+            </View>
+
+            {/* Contact details */}
+            {(profile?.phone || profile?.email || profile?.website) && (
+              <View style={[qrStyles.infoBlock, bevel]}>
+                <AppText style={qrStyles.sectionLabel}>CONTACT</AppText>
+                {profile?.phone ? (
+                  <View style={qrStyles.infoRow}>
+                    <AppIcon name="call-outline" size={16} color={COLORS.blue} fixedColor />
+                    <AppText style={[qrStyles.infoText, { color: textColor }]} numberOfLines={1}>
+                      {profile.phone}
+                    </AppText>
+                  </View>
+                ) : null}
+                {profile?.email ? (
+                  <View style={qrStyles.infoRow}>
+                    <AppIcon name="mail-outline" size={16} color={COLORS.blue} fixedColor />
+                    <AppText style={[qrStyles.infoText, { color: textColor }]} numberOfLines={1}>
+                      {profile.email}
+                    </AppText>
+                  </View>
+                ) : null}
+                {profile?.website ? (
+                  <View style={qrStyles.infoRow}>
+                    <AppIcon name="globe-outline" size={16} color={COLORS.blue} fixedColor />
+                    <AppText style={[qrStyles.infoText, { color: textColor }]} numberOfLines={1}>
+                      {profile.website}
+                    </AppText>
+                  </View>
+                ) : null}
+              </View>
+            )}
+
+            {/* Work hours */}
+            {hoursRows.some((r) => !r.isClosed) && (
+              <View style={[qrStyles.infoBlock, bevel]}>
+                <AppText style={qrStyles.sectionLabel}>WORKING HOURS</AppText>
+                {hoursRows.map((row) => (
+                  <View key={row.day} style={qrStyles.hoursRow}>
+                    <AppText style={[qrStyles.hoursDay, { color: textColor }]}>
+                      {row.day}
+                    </AppText>
+                    <AppText
+                      style={[
+                        qrStyles.hoursValue,
+                        { color: row.isClosed ? FG.secondary : textColor },
+                      ]}
+                    >
+                      {row.text}
+                    </AppText>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {/* Share button */}
+            <TouchableOpacity
+              onPress={handleShare}
+              activeOpacity={0.85}
+              style={{ marginTop: 20, width: '100%' }}
+            >
+              <LinearGradient colors={GRADIENTS.primary} style={qrStyles.shareBtn}>
+                <AppIcon name="share-social-outline" size={18} color="#fff" fixedColor style={{ marginRight: 8 }} />
+                <AppText fixedColor style={qrStyles.shareBtnText}>
+                  Share Business
+                </AppText>
+              </LinearGradient>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const qrStyles = StyleSheet.create({
+  overlay:  { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' },
+  backdrop: { ...StyleSheet.absoluteFill },
+  sheet: {
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    borderTopWidth: 1,
+    borderColor: 'rgba(255,255,255,0.7)',
+    maxHeight: '92%',
+    overflow: 'hidden',
+  },
+  handle: {
+    alignSelf: 'center',
+    width: 40, height: 4, borderRadius: 2,
+    backgroundColor: 'rgba(30,156,240,0.30)',
+    marginTop: 10, marginBottom: 4,
+  },
+  header: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 20, paddingVertical: 14,
+  },
+  headerTitle: { fontSize: 17, fontWeight: '800' },
+  scroll: {
+    paddingHorizontal: 20,
+    alignItems: 'center',
+    paddingBottom: 40,
+  },
+
+  // Business card
+  bizCard: {
+    flexDirection: 'row', alignItems: 'center',
+    width: '100%',
+    borderRadius: RADIUS.xl,
+    padding: 14,
+    marginBottom: 22,
+  },
+  bizName: { fontSize: 16, fontWeight: '800' },
+  verified: {
+    width: 16, height: 16, borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  dot: { width: 8, height: 8, borderRadius: 4 },
+
+  // QR frame
+  qrFrame: {
+    padding: 16,
+    borderRadius: 24,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...SHADOW.card,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.10,
+    shadowRadius: 12,
+    elevation: 4,
+  },
+  hint: {
+    marginTop: 14,
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.sub,
+    textAlign: 'center',
+  },
+
+  // URL pill
+  urlPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginTop: 14,
+    paddingHorizontal: 14, paddingVertical: 10,
+    borderRadius: RADIUS.full,
+    maxWidth: '100%',
+  },
+  urlText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.blue,
+    maxWidth: 240,
+  },
+
+  // Info blocks
+  infoBlock: {
+    width: '100%',
+    marginTop: 18,
+    borderRadius: RADIUS.lg,
+    paddingHorizontal: 14, paddingVertical: 14,
+    gap: 10,
+  },
+  sectionLabel: {
+    fontSize: 11, fontWeight: '800',
+    letterSpacing: 0.8,
+    color: COLORS.sub,
+    marginBottom: 2,
+  },
+  infoRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+  },
+  infoText: { fontSize: 14, fontWeight: '600', flex: 1 },
+
+  hoursRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+  },
+  hoursDay:   { fontSize: 13, fontWeight: '600' },
+  hoursValue: { fontSize: 13, fontWeight: '500' },
+
+  // Share button
+  shareBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingVertical: 15,
+    borderRadius: RADIUS.lg,
+    ...SHADOW.button,
+  },
+  shareBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+});
 
 
 // ─── ProfileCatalogCard ───────────────────────────────────────────────────────
@@ -3799,6 +4411,29 @@ const profileHeroStyles = StyleSheet.create({
   },
   infoText: { fontSize: 14, fontWeight: '500', flex: 1 },
 
+  // Work-hours card
+  hoursCard: {
+    marginTop: 4,
+    padding: 14,
+    borderRadius: RADIUS.lg,
+    backgroundColor: 'rgba(30,156,240,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(30,156,240,0.15)',
+    gap: 6,
+  },
+  hoursCardLabel: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    color: COLORS.sub,
+    marginBottom: 4,
+  },
+  hoursRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+  },
+  hoursDay:   { fontSize: 13, fontWeight: '600' },
+  hoursValue: { fontSize: 13, fontWeight: '500' },
+
   // Divider
   divider: {
     height: 1,
@@ -3830,6 +4465,38 @@ const profileHeroStyles = StyleSheet.create({
   },
   catalogEntryTitle: { fontSize: 15, fontWeight: '700' as const },
   catalogEntrySub:   { fontSize: 12, marginTop: 1 },
+
+  // Industry badge
+  industryBadge: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 6,
+    backgroundColor: 'rgba(30,156,240,0.08)',
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(30,156,240,0.15)',
+  },
+  industryEmoji: { fontSize: 14 },
+  industryLabel: { fontSize: 13, fontWeight: '600' as const },
+
+  // About / description card
+  aboutCard: {
+    padding: 14,
+    borderRadius: RADIUS.lg,
+    backgroundColor: 'rgba(30,156,240,0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(30,156,240,0.12)',
+    gap: 6,
+  },
+  aboutLabel: {
+    fontSize: 10,
+    fontWeight: '800' as const,
+    letterSpacing: 0.8,
+    marginBottom: 2,
+  },
+  aboutText: { fontSize: 14, lineHeight: 20 },
 });
 
 const profileCatalogStyles = StyleSheet.create({
@@ -4182,6 +4849,27 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: 'rgba(255,255,255,0.75)',
   },
+  timeInRow: {
+    position: 'absolute',
+    bottom: 4,
+    right: 10,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 3,
+  },
+  timeOutRow: {
+    position: 'absolute',
+    bottom: 4,
+    right: 10,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 3,
+  },
+  editedLabel: {
+    fontSize: 9,
+    opacity: 0.65,
+    fontStyle: 'italic' as const,
+  },
 
   bubbleOut: {
     backgroundColor: 'rgba(180,225,245,0.22)',
@@ -4197,14 +4885,6 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     paddingRight: 70, // Space for time and double tick
     marginBottom: 2,
-  },
-  timeOutRow: {
-    position: 'absolute',
-    bottom: 4,
-    right: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
   },
   timeOut: { fontSize: 10, color: COLORS.sub },
 

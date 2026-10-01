@@ -10,12 +10,28 @@ import { useEffect, useRef } from 'react';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import type { AppNotification } from '../context/NotificationContext';
-import { resolveNotificationName } from '../utils/resolveNotificationName';
 
 interface LastMessageTimestamp { [chatId: string]: Date; }
 type PushNotificationFn = (n: Omit<AppNotification, 'id' | 'time' | 'read'>) => void;
 
 const MAX_PERM_RETRIES = 8;
+
+/**
+ * Resolve a human-readable name for a Firestore user document.
+ * Priority: displayName (if it doesn't look like a raw phone) → phone → 'Someone'
+ */
+function resolveNameFromUserDoc(data: firestore.DocumentData): string {
+  const displayName = (data.displayName ?? '').trim();
+  const phone       = (data.phone       ?? '').trim();
+  const PHONE_LIKE  = /^\+?[\d\s\-()]{5,}$/;
+
+  if (displayName && !PHONE_LIKE.test(displayName) && displayName !== phone) {
+    return displayName;
+  }
+  if (phone) return phone;
+  if (displayName) return displayName;
+  return 'Someone';
+}
 
 export function useNotificationSync(ownerUid: string | null, pushNotification: PushNotificationFn) {
   const pushNotificationRef      = useRef(pushNotification);
@@ -71,7 +87,7 @@ export function useNotificationSync(ownerUid: string | null, pushNotification: P
 
               if (!lastMsg?.timestamp) continue;
 
-              const lastMsgTime  = typeof lastMsg.timestamp.toDate === 'function'
+              const lastMsgTime   = typeof lastMsg.timestamp.toDate === 'function'
                 ? lastMsg.timestamp.toDate() : new Date(lastMsg.timestamp);
               const lastKnownTime = lastMessageTimestamps.current[chatId];
 
@@ -83,12 +99,12 @@ export function useNotificationSync(ownerUid: string | null, pushNotification: P
                 try {
                   const senderSnap = await fsDb.collection('users').doc(lastMsg.senderId).get();
                   if (!senderSnap.exists) continue;
-                  const senderPhone = senderSnap.data()!.phone;
-                  const senderName  = await resolveNotificationName(senderPhone);
-                  const chatName    = chatData.type === 'group' && chatData.groupName
+
+                  const senderName = resolveNameFromUserDoc(senderSnap.data()!);
+                  const chatName   = chatData.type === 'group' && chatData.groupName
                     ? chatData.groupName : senderName;
 
-                  await pushNotificationRef.current({
+                  pushNotificationRef.current({
                     type:  'message',
                     title: chatName,
                     body:  chatData.type === 'group'
@@ -147,13 +163,13 @@ export function useNotificationSync(ownerUid: string | null, pushNotification: P
 
               const callType = callData.type === 'video' ? 'Video Call' : 'Call';
               const status   = callData.status === 'missed' ? 'Missed' : 'Rejected';
-              let callerName = 'Unknown';
+              let callerName = 'Someone';
 
               try {
                 if (callData.otherParty?.userId) {
                   const callerSnap = await fsDb.collection('users').doc(callData.otherParty.userId).get();
                   if (callerSnap.exists()) {
-                    callerName = await resolveNotificationName(callerSnap.data()!.phone);
+                    callerName = resolveNameFromUserDoc(callerSnap.data()!);
                   }
                 }
               } catch (err) {

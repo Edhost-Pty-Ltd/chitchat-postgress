@@ -16,12 +16,11 @@ import SplashScreen from '../screens/SplashScreen';
 import SignInScreen from '../screens/SignInScreen';
 import CreateAccountScreen from '../screens/CreateAccountScreen';
 import ChatsScreen from '../screens/ChatsScreen';
-
-
 // ── Lazy imports — only parsed/executed when first navigated to ───────────────
 // React Navigation does not support React.lazy() directly on Stack.Screen.
 // Each lazy component is wrapped in a Suspense boundary so the navigator
 // always receives a real synchronous component reference.
+// ── Lazy imports ──────────────────────────────────────────────────────────────
 function makeLazy<T extends object>(factory: () => Promise<{ default: React.ComponentType<T> }>) {
   const Lazy = lazy(factory);
   const Wrapped = (props: T) => (
@@ -50,18 +49,16 @@ const NotificationsScreen        = makeLazy(() => import('../screens/Notificatio
 const LinkedDevicesScreen        = makeLazy(() => import('../screens/LinkedDevicesScreen'));
 const BlockedContactsScreen      = makeLazy(() => import('../screens/BlockedContactsScreen'));
 const BroadcastScreen            = makeLazy(() => import('../screens/BroadcastScreen'));
+const DashboardScreen            = makeLazy(() => import('../screens/DashboardScreen'));
 
 import { IncomingCallManager } from '../components';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
-// Minimal fallback while a lazy screen chunk loads — invisible to the user
-// since native screens transition in with an animation anyway.
 function ScreenFallback() {
   return <View style={{ flex: 1 }} />;
 }
 
-// Shared screen transition options — instant slide with no shadow flicker.
 const screenOptions = {
   headerShown: false,
   animation: 'slide_from_right' as const,
@@ -79,24 +76,14 @@ const modalOptions = {
 export default function AppNavigator() {
   const { isSignedIn, loading, phone, displayName, isCompanion } = useAuth();
 
-  // profileExists: null = still checking, true/false = done
   const [profileExists, setProfileExists] = useState<boolean | null>(null);
   const [profileCheckError, setProfileCheckError] = useState(false);
 
-  // ── Profile existence check ─────────────────────────────────────────────
-  // AuthContext.signIn() already fetches the user profile and sets displayName.
-  // If displayName is populated we can skip the extra Firestore round-trip.
-  // We still fall back to a Firestore check for existing sessions where the
-  // displayName may not yet be cached in AsyncStorage.
   const checkProfileExists = useCallback(async (retry = 0) => {
     if (phone === '+0000000000') { setProfileExists(true); return; }
 
-    // Companion devices — linked via QR/code, no Firebase Auth user.
-    // Check AsyncStorage directly since isCompanion state might not be set yet
-    // when this callback first runs.
     if (isCompanion) { setProfileExists(true); return; }
 
-    // Also check AsyncStorage for companion key as a safety net
     try {
       const AsyncStorage = require('@react-native-async-storage/async-storage').default;
       const companionOwner = await AsyncStorage.getItem('linked_device_owner_uid');
@@ -114,7 +101,6 @@ export default function AppNavigator() {
       return;
     }
 
-    // Fast path: displayName already populated in AuthContext means profile exists
     if (displayName) {
       setProfileExists(true);
       return;
@@ -127,7 +113,7 @@ export default function AppNavigator() {
       setProfileExists(snap.exists);
     } catch (err: any) {
       if (err?.code === 'unavailable' || err?.message?.includes('offline') || err?.message === 'Timeout') {
-        setProfileExists(true); // optimistic offline
+        setProfileExists(true);
       } else {
         setProfileCheckError(true);
       }
@@ -143,7 +129,6 @@ export default function AppNavigator() {
     }
   }, [isSignedIn, loading]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sign out users authenticated without a profile (but never companions)
   useEffect(() => {
     if (isSignedIn && profileExists === false && !profileCheckError && phone !== '+0000000000' && !isCompanion) {
       (async () => {
@@ -151,8 +136,6 @@ export default function AppNavigator() {
       })();
     }
   }, [isSignedIn, profileExists, profileCheckError, phone, isCompanion]);
-
-  // ── Loading states ──────────────────────────────────────────────────────
 
   if (loading) {
     return (
@@ -205,12 +188,16 @@ export default function AppNavigator() {
             <>
               {/* Core screens — eager */}
               <Stack.Screen name="Chats" component={ChatsScreen} />
+
               {/* Secondary screens — lazy */}
               <Stack.Screen name="Chat" component={ChatScreen as any} />
               <Stack.Screen name="Calendar" component={CalendarScreen as any} />
               <Stack.Screen name="Calls" component={CallsScreen as any} />
               <Stack.Screen name="Status" component={StatusScreen as any} />
               <Stack.Screen name="Contacts" component={ContactsScreen as any} />
+
+              {/* Business owner dashboard */}
+              <Stack.Screen name="Dashboard" component={DashboardScreen as any} />
 
               {/* Settings group */}
               <Stack.Screen name="Settings" component={SettingsScreen as any} options={modalOptions} />
