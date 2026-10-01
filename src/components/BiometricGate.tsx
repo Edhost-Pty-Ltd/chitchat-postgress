@@ -120,7 +120,7 @@ const styles = StyleSheet.create({
   logo:   { width: 96, height: 96, marginBottom: 24 },
   iconWrap: {
     width: 88, height: 88, borderRadius: 44,
-    backgroundColor: 'rgba(74,153,233,0.12)',
+    backgroundColor: 'rgba(9,178,238,0.12)',
     borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.45)',
     alignItems: 'center', justifyContent: 'center', marginBottom: 20,
     ...SHADOW.glow,

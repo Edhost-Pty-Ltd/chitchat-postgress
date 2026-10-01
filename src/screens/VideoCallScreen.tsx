@@ -1567,7 +1567,7 @@ export default function VideoCallScreen() {
 
               <View style={styles.reportActions}>
                 <TouchableOpacity
-                  style={[styles.reportBtn, { backgroundColor: 'rgba(74,153,233,0.15)', borderColor: 'rgba(74,153,233,0.35)' }]}
+                  style={[styles.reportBtn, { backgroundColor: 'rgba(9,178,238,0.15)', borderColor: 'rgba(9,178,238,0.35)' }]}
                   onPress={exportMinutesPdf}
                   disabled={!minutesText}
                 >
@@ -1669,8 +1669,8 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   sideBtnActive: {
-    backgroundColor: 'rgba(74,153,233,0.35)',
-    borderColor: 'rgba(74,153,233,0.55)',
+    backgroundColor: 'rgba(9,178,238,0.35)',
+    borderColor: 'rgba(9,178,238,0.55)',
   },
   sideBtnDisabled: { opacity: 0.6 },
 
@@ -1742,7 +1742,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 8,
     paddingVertical: 10, paddingHorizontal: 14,
     borderRadius: RADIUS.md,
-    backgroundColor: 'rgba(74,153,233,0.72)',
+    backgroundColor: 'rgba(9,178,238,0.72)',
     ...SHADOW.card,
   },
   aloneText: { flex: 1, fontSize: 13, fontWeight: '600', color: '#fff' },
@@ -1784,7 +1784,7 @@ const styles = StyleSheet.create({
   reportContent: { paddingHorizontal: 18, paddingBottom: 40, paddingTop: 6 },
   reportMeta: {
     borderRadius: RADIUS.lg, padding: 14, gap: 8,
-    borderWidth: 1, borderColor: 'rgba(74,153,233,0.20)',
+    borderWidth: 1, borderColor: 'rgba(9,178,238,0.20)',
   },
   reportMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   reportMetaText: { fontSize: 13 },

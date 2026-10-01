@@ -2023,7 +2023,7 @@ export default function ChatScreen() {
             <View style={[styles.bubble, styles.bubbleOut]}>
               {item.replyTo && (
                 <TouchableOpacity
-                  style={[styles.replyBubble, { backgroundColor: 'rgba(74,153,233,0.08)' }]}
+                  style={[styles.replyBubble, { backgroundColor: 'rgba(9,178,238,0.08)' }]}
                   onPress={() => {
                     const originalMsg = messages.find(m => m.messageId === item.replyTo!.messageId);
                     if (originalMsg) {
@@ -3615,7 +3615,7 @@ const csStyles = StyleSheet.create({
     borderRadius: RADIUS.full,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: 'rgba(74,153,233,0.20)',
+    borderColor: 'rgba(9,178,238,0.20)',
   },
   chipActive: { borderColor: 'transparent' },
   chipGrad: { paddingHorizontal: 16, paddingVertical: 7, borderRadius: RADIUS.full },
@@ -3657,11 +3657,11 @@ const csStyles = StyleSheet.create({
     backgroundColor: '#fff',
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: 'rgba(74,153,233,0.10)',
+    borderColor: 'rgba(9,178,238,0.10)',
     ...SHADOW.card,
   },
   hCardImg:            { width: H_CARD_W, height: 110 },
-  hCardImgPlaceholder: { width: H_CARD_W, height: 100, backgroundColor: 'rgba(74,153,233,0.06)', alignItems: 'center', justifyContent: 'center' },
+  hCardImgPlaceholder: { width: H_CARD_W, height: 100, backgroundColor: 'rgba(9,178,238,0.06)', alignItems: 'center', justifyContent: 'center' },
   hCardInfo: { paddingHorizontal: 8, paddingTop: 8, paddingBottom: 4, gap: 2 },
   hCardName:  { fontSize: 12, fontWeight: '700', lineHeight: 16 },
   hCardPrice: { fontSize: 13, fontWeight: '800', color: COLORS.blue },
@@ -3670,9 +3670,9 @@ const csStyles = StyleSheet.create({
   hCardStepper: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     gap: 8, marginHorizontal: 8, marginBottom: 8,
-    backgroundColor: 'rgba(74,153,233,0.08)', borderRadius: RADIUS.full, paddingVertical: 6,
+    backgroundColor: 'rgba(9,178,238,0.08)', borderRadius: RADIUS.full, paddingVertical: 6,
   },
-  hCardStepBtn: { width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(74,153,233,0.15)', alignItems: 'center', justifyContent: 'center' },
+  hCardStepBtn: { width: 24, height: 24, borderRadius: 12, backgroundColor: 'rgba(9,178,238,0.15)', alignItems: 'center', justifyContent: 'center' },
   hCardStepQty: { fontSize: 13, fontWeight: '800', color: COLORS.text, minWidth: 16, textAlign: 'center' },
 
   // Bottom cart bar
@@ -3733,9 +3733,9 @@ const profileHeroStyles = StyleSheet.create({
   actionBtn: { alignItems: 'center', gap: 6 },
   actionIconWrap: {
     width: 52, height: 52, borderRadius: 26,
-    backgroundColor: 'rgba(74,153,233,0.10)',
+    backgroundColor: 'rgba(9,178,238,0.10)',
     alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: 'rgba(74,153,233,0.18)',
+    borderWidth: 1, borderColor: 'rgba(9,178,238,0.18)',
   },
   actionLabel: { fontSize: 12, fontWeight: '600' },
 
@@ -3838,12 +3838,12 @@ const pcStyles = StyleSheet.create({
     overflow: 'hidden',
     ...SHADOW.card,
     borderWidth: 1,
-    borderColor: 'rgba(74,153,233,0.10)',
+    borderColor: 'rgba(9,178,238,0.10)',
   },
   img: { width: CARD_W, height: CARD_W * 0.75, },
   imgPlaceholder: {
     width: CARD_W, height: CARD_W * 0.65,
-    backgroundColor: 'rgba(74,153,233,0.06)',
+    backgroundColor: 'rgba(9,178,238,0.06)',
     alignItems: 'center', justifyContent: 'center',
   },
   info: {
@@ -3854,7 +3854,7 @@ const pcStyles = StyleSheet.create({
   desc:  { fontSize: 11, color: COLORS.sub, lineHeight: 15, marginTop: 1 },
   footer: {
     paddingHorizontal: 10, paddingBottom: 10, paddingTop: 6,
-    borderTopWidth: 1, borderTopColor: 'rgba(74,153,233,0.07)',
+    borderTopWidth: 1, borderTopColor: 'rgba(9,178,238,0.07)',
   },
   addBtn: { borderRadius: RADIUS.full, overflow: 'hidden' },
   addBtnGrad: {
@@ -3864,12 +3864,12 @@ const pcStyles = StyleSheet.create({
   addBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
   stepper: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 10, backgroundColor: 'rgba(74,153,233,0.08)',
+    gap: 10, backgroundColor: 'rgba(9,178,238,0.08)',
     borderRadius: RADIUS.full, paddingVertical: 6,
   },
   stepBtn: {
     width: 26, height: 26, borderRadius: 13,
-    backgroundColor: 'rgba(74,153,233,0.14)',
+    backgroundColor: 'rgba(9,178,238,0.14)',
     alignItems: 'center', justifyContent: 'center',
   },
   stepQty: { fontSize: 13, fontWeight: '800', color: COLORS.text, minWidth: 18, textAlign: 'center' },
@@ -4017,7 +4017,7 @@ const cartStyles = StyleSheet.create({
   thumb: { width: 44, height: 44, borderRadius: 10 },
   thumbPlaceholder: {
     width: 44, height: 44, borderRadius: 10,
-    backgroundColor: 'rgba(74,153,233,0.08)',
+    backgroundColor: 'rgba(9,178,238,0.08)',
     alignItems: 'center', justifyContent: 'center',
   },
   rowInfo:  { flex: 1 },
@@ -4026,12 +4026,12 @@ const cartStyles = StyleSheet.create({
 
   stepper: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: 'rgba(74,153,233,0.08)',
+    backgroundColor: 'rgba(9,178,238,0.08)',
     borderRadius: RADIUS.full, paddingHorizontal: 6, paddingVertical: 4,
   },
   stepBtn: {
     width: 26, height: 26, borderRadius: 13,
-    backgroundColor: 'rgba(74,153,233,0.12)',
+    backgroundColor: 'rgba(9,178,238,0.12)',
     alignItems: 'center', justifyContent: 'center',
   },
   stepQty: { fontSize: 14, fontWeight: '700', color: COLORS.text, minWidth: 18, textAlign: 'center' },
@@ -4113,53 +4113,51 @@ const styles = StyleSheet.create({
   },
 
   bubble: {
-    maxWidth: '75%',
+    maxWidth: '78%',
     borderRadius: 18,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    paddingBottom: 6,
+    paddingHorizontal: 12,
+    paddingTop: 7,
+    paddingBottom: 7,
     position: 'relative',
   },
   bubbleIn: { borderBottomLeftRadius: 4, ...SHADOW.card },
   bubbleTextIn: {
-    fontSize: 14,
+    fontSize: 15,
     color: '#fff',
     lineHeight: 20,
-    paddingRight: 60, // Space for time and tick
-    marginBottom: 2,
+    paddingRight: 52, // reserve room for the time stamp on the last line
   },
   timeIn: {
     position: 'absolute',
-    bottom: 4,
-    right: 10,
-    fontSize: 10,
+    bottom: 6,
+    right: 12,
+    fontSize: 11,
     color: 'rgba(255,255,255,0.75)',
   },
 
   bubbleOut: {
     backgroundColor: 'rgba(180,225,245,0.22)',
     borderWidth: 1,
-    borderColor: 'rgba(74,153,233,0.18)',
+    borderColor: 'rgba(9,178,238,0.18)',
     borderBottomRightRadius: 4,
     position: 'relative',
     ...SHADOW.card
   },
   bubbleTextOut: {
-    fontSize: 14,
+    fontSize: 15,
     color: COLORS.text,
     lineHeight: 20,
-    paddingRight: 70, // Space for time and double tick
-    marginBottom: 2,
+    paddingRight: 60, // reserve room for time + double tick on the last line
   },
   timeOutRow: {
     position: 'absolute',
-    bottom: 4,
-    right: 10,
+    bottom: 6,
+    right: 12,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 3,
   },
-  timeOut: { fontSize: 10, color: COLORS.sub },
+  timeOut: { fontSize: 11, color: COLORS.sub },
 
   // Voice / image
   imagePlaceholder: {
@@ -4200,10 +4198,10 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(74,153,233,0.06)',
+    backgroundColor: 'rgba(9,178,238,0.06)',
     borderRadius: RADIUS.xl,
     borderWidth: 1,
-    borderColor: 'rgba(74,153,233,0.18)',
+    borderColor: 'rgba(9,178,238,0.18)',
     paddingHorizontal: 14,
     height: 42
   },
@@ -4218,7 +4216,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     paddingVertical: 8,
     backgroundColor: 'rgba(180,225,245,0.18)',
-    borderTopColor: 'rgba(74,153,233,0.18)',
+    borderTopColor: 'rgba(9,178,238,0.18)',
   },
   emojiGrid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 12, gap: 2 },
   emojiItem: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
@@ -4232,14 +4230,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20, paddingTop: 12,
     ...SHADOW.glow,
   },
-  attachHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(74,153,233,0.40)', alignSelf: 'center', marginBottom: 14 },
+  attachHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(9,178,238,0.40)', alignSelf: 'center', marginBottom: 14 },
   attachTitle: { fontSize: 16, fontWeight: '700', color: COLORS.text, marginBottom: 16 },
   attachGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   attachItem: {
     width: 90, paddingVertical: 14, alignItems: 'center', gap: 8,
     borderRadius: RADIUS.lg,
   },
-  attachIconWrap: { width: 48, height: 48, borderRadius: 14, backgroundColor: 'rgba(74,153,233,0.10)', alignItems: 'center', justifyContent: 'center' },
+  attachIconWrap: { width: 48, height: 48, borderRadius: 14, backgroundColor: 'rgba(9,178,238,0.10)', alignItems: 'center', justifyContent: 'center' },
   attachLabel: { fontSize: 11, fontWeight: '600', color: COLORS.sub, textAlign: 'center' },
 
   // Camera UI
@@ -4265,9 +4263,9 @@ const styles = StyleSheet.create({
   permissionBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(74,153,233,0.08)',
+    backgroundColor: 'rgba(9,178,238,0.08)',
     borderWidth: 1,
-    borderColor: 'rgba(74,153,233,0.18)',
+    borderColor: 'rgba(9,178,238,0.18)',
     paddingHorizontal: 14,
     paddingVertical: 10,
     gap: 8,
@@ -4301,7 +4299,7 @@ const styles = StyleSheet.create({
   uploadErrorBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(74,153,233,0.08)',
+    backgroundColor: 'rgba(9,178,238,0.08)',
     borderWidth: 1,
     borderColor: 'rgba(239,68,68,0.25)',
     paddingHorizontal: 14,
@@ -4401,7 +4399,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 4,
     borderRadius: 2,
-    backgroundColor: 'rgba(74,153,233,0.30)',
+    backgroundColor: 'rgba(9,178,238,0.30)',
     marginTop: 10,
     marginBottom: 4,
   },
@@ -4657,7 +4655,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   searchHighlightOverlay: {
-    backgroundColor: 'rgba(74,153,233,0.18)',
+    backgroundColor: 'rgba(9,178,238,0.18)',
     borderRadius: RADIUS.md,
     zIndex: 10,
   },
@@ -4674,10 +4672,10 @@ const styles = StyleSheet.create({
     fontSize: 15,
     paddingVertical: 6,
     paddingHorizontal: 8,
-    backgroundColor: 'rgba(74,153,233,0.08)',
+    backgroundColor: 'rgba(9,178,238,0.08)',
     borderRadius: RADIUS.md,
     borderWidth: 1,
-    borderColor: 'rgba(74,153,233,0.20)',
+    borderColor: 'rgba(9,178,238,0.20)',
     color: COLORS.text,
   },
   searchMatchCount: {
@@ -4790,7 +4788,7 @@ const styles = StyleSheet.create({
 
   // ── Message Action Toolbar ────────────────────────────────────────────────
   selectedMessage: {
-    backgroundColor: 'rgba(74,153,233,0.12)',
+    backgroundColor: 'rgba(9,178,238,0.12)',
     borderRadius: RADIUS.md,
   },
   actionToolbar: {
@@ -4890,7 +4888,7 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderRadius: 26,
-    backgroundColor: 'rgba(74,153,233,0.12)',
+    backgroundColor: 'rgba(9,178,238,0.12)',
     alignItems: 'center',
     justifyContent: 'center',
   },

@@ -653,7 +653,7 @@ const styles = StyleSheet.create({
   backBtn: {
     width: 36, height: 36, borderRadius: 18,
     alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(74,153,233,0.10)',
+    backgroundColor: 'rgba(9,178,238,0.10)',
   },
   subHeaderTitle: { flex: 1, fontSize: 17, fontWeight: '700' },
   subHeaderSub:   { fontSize: 12, marginTop: 1 },
@@ -691,8 +691,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'flex-start',
     gap: 8, marginTop: 16,
     padding: 12, borderRadius: RADIUS.md,
-    backgroundColor: 'rgba(74,153,233,0.07)',
-    borderWidth: 1, borderColor: 'rgba(74,153,233,0.15)',
+    backgroundColor: 'rgba(9,178,238,0.07)',
+    borderWidth: 1, borderColor: 'rgba(9,178,238,0.15)',
   },
   tipText: { flex: 1, fontSize: 12, lineHeight: 17 },
 

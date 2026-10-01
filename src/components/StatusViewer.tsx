@@ -15,14 +15,28 @@ import {
   ActivityIndicator,
   StatusBar,
   Animated,
+  ScrollView,
   GestureResponderEvent,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useEventListener } from 'expo';
+import firestore from '@react-native-firebase/firestore';
+import { db } from '../config/firebase';
+import { resolveNotificationName } from '../utils/resolveNotificationName';
 import type { FireStatus } from '../types';
 import { COLORS, SHADOW } from '../types/theme';
+
+// Shape of a resolved viewer row in the "Viewed by" sheet
+interface ViewerInfo {
+  userId: string;
+  name: string;
+  photoURL: string | null;
+}
+
+// Vertical distance (px) a swipe must travel upward to open the viewers sheet
+const SWIPE_UP_THRESHOLD = 60;
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -76,6 +90,12 @@ export function StatusViewer({
   const timerRef          = useRef<ReturnType<typeof setInterval> | null>(null);
   const shouldAdvanceRef  = useRef(false);
 
+  // ── Viewers sheet (owner only) ──────────────────────────────────────────
+  const [viewersOpen,    setViewersOpen]    = useState(false);
+  const [viewers,        setViewers]        = useState<ViewerInfo[]>([]);
+  const [viewersLoading, setViewersLoading] = useState(false);
+  const viewersAnim = useRef(new Animated.Value(0)).current;
+
   const currentStatus = statuses[currentIndex];
   const isOwner    = currentStatus?.userId === currentUserId;
   const isExcluded = currentStatus?.excludedUsers?.includes(currentUserId) || false;
@@ -104,6 +124,49 @@ export function StatusViewer({
       onClose();
     }
   }, [currentIndex, statuses.length, onClose]);
+
+  // ── Open the "Viewed by" sheet — pauses the status & loads viewer info ────
+  const openViewers = useCallback(async () => {
+    if (!isOwner || !currentStatus) return;
+    setIsPaused(true);
+    setViewersOpen(true);
+    Animated.spring(viewersAnim, {
+      toValue: 1, useNativeDriver: true, friction: 9, tension: 65,
+    }).start();
+
+    const ids = currentStatus.viewedBy || [];
+    if (ids.length === 0) { setViewers([]); return; }
+
+    setViewersLoading(true);
+    try {
+      const fsDb = db as ReturnType<typeof firestore>;
+      const rows = await Promise.all(
+        ids.map(async (uid): Promise<ViewerInfo> => {
+          try {
+            const snap = await fsDb.collection('users').doc(uid).get();
+            const data = snap.data();
+            const phone = data?.phone ?? '';
+            const name  = phone ? await resolveNotificationName(phone) : 'Unknown';
+            return { userId: uid, name, photoURL: data?.photoURL ?? null };
+          } catch {
+            return { userId: uid, name: 'Unknown', photoURL: null };
+          }
+        }),
+      );
+      setViewers(rows);
+    } finally {
+      setViewersLoading(false);
+    }
+  }, [isOwner, currentStatus, viewersAnim]);
+
+  const closeViewers = useCallback(() => {
+    Animated.timing(viewersAnim, {
+      toValue: 0, duration: 180, useNativeDriver: true,
+    }).start(() => {
+      setViewersOpen(false);
+      setIsPaused(false);
+    });
+  }, [viewersAnim]);
 
   // ── Load video when current item changes ───────────────────────────────────
   useEffect(() => {
@@ -266,11 +329,13 @@ export function StatusViewer({
   // on Android. The responder system fires at the JS bridge level BEFORE native views
   // consume the touch, making it work regardless of what's underneath.
   const touchStartXRef    = useRef(0);
+  const touchStartYRef    = useRef(0);
   const touchStartTimeRef = useRef(0);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleTouchStart = useCallback((e: GestureResponderEvent) => {
     touchStartXRef.current    = e.nativeEvent.locationX;
+    touchStartYRef.current    = e.nativeEvent.pageY;
     touchStartTimeRef.current = Date.now();
     longPressTimerRef.current = setTimeout(() => {
       setIsPaused(true);
@@ -282,6 +347,14 @@ export function StatusViewer({
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
+
+    // Swipe-up → open the viewers sheet (owner only). Checked before tap logic.
+    const dy = touchStartYRef.current - e.nativeEvent.pageY; // positive = upward
+    if (isOwner && dy >= SWIPE_UP_THRESHOLD) {
+      openViewers();
+      return;
+    }
+
     const elapsed = Date.now() - touchStartTimeRef.current;
     if (isPaused && elapsed >= 200) {
       setIsPaused(false);
@@ -294,7 +367,7 @@ export function StatusViewer({
     } else {
       handleTapRight();
     }
-  }, [isPaused, handleTapLeft, handleTapRight]);
+  }, [isPaused, isOwner, openViewers, handleTapLeft, handleTapRight]);
 
   const handleDelete = () => {
     if (onDeleteStatus && currentStatus) {
@@ -311,14 +384,17 @@ export function StatusViewer({
 
   if (!visible || !currentStatus) return null;
 
-  const displayName = currentStatus.displayName || 'Unknown';
+  // Show "Me" when viewing your own status; otherwise the resolved name.
+  const displayName = isOwner ? 'Me' : (currentStatus.displayName || 'Unknown');
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <StatusBar hidden />
       <View
         style={styles.container}
-        onStartShouldSetResponder={() => true}
+        // Stop capturing touches while the viewers sheet is open so its own
+        // buttons / scroll receive the gestures instead of the story area.
+        onStartShouldSetResponder={() => !viewersOpen}
         onResponderGrant={handleTouchStart}
         onResponderRelease={handleTouchEnd}
       >
@@ -473,21 +549,87 @@ export function StatusViewer({
           )}
         </View>
 
-        {/* Layer 5: bottom info (caption + view count) — non-interactive */}
+        {/* Layer 5: bottom info (caption + view count) */}
         {(currentStatus.caption || isOwner) && (
-          <View style={styles.bottomInfo} pointerEvents="none">
+          <View style={styles.bottomInfo} pointerEvents="box-none">
             {currentStatus.caption && currentStatus.mediaType !== 'text' && (
-              <Text style={styles.caption}>{currentStatus.caption}</Text>
+              <Text style={[styles.caption, { textAlign: 'center' }]}>{currentStatus.caption}</Text>
             )}
             {isOwner && (
-              <View style={styles.viewsContainer}>
-                <Ionicons name="eye-outline" size={16} color="#ffffff" />
-                <Text style={styles.viewsText}>
-                  {viewCount} {viewCount === 1 ? 'view' : 'views'}
-                </Text>
-              </View>
+              <TouchableOpacity
+                style={styles.viewsContainer}
+                onPress={openViewers}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="chevron-up" size={18} color="#ffffff" />
+                <View style={styles.viewsCountRow}>
+                  <Ionicons name="eye-outline" size={16} color="#ffffff" />
+                  <Text style={styles.viewsText}>
+                    {viewCount} {viewCount === 1 ? 'view' : 'views'}
+                  </Text>
+                </View>
+              </TouchableOpacity>
             )}
           </View>
+        )}
+
+        {/* ── Viewers bottom sheet (owner only) ── */}
+        {viewersOpen && (
+          <>
+            <Pressable style={styles.viewersBackdrop} onPress={closeViewers} />
+            <Animated.View
+              style={[
+                styles.viewersSheet,
+                {
+                  transform: [{
+                    translateY: viewersAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [SCREEN_HEIGHT * 0.55, 0],
+                    }),
+                  }],
+                },
+              ]}
+            >
+              <View style={styles.viewersHandle} />
+              <View style={styles.viewersHeader}>
+                <Ionicons name="eye-outline" size={18} color="#fff" />
+                <Text style={styles.viewersTitle}>
+                  Viewed by {viewCount}
+                </Text>
+                <TouchableOpacity onPress={closeViewers} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                  <Ionicons name="close" size={22} color="rgba(255,255,255,0.7)" />
+                </TouchableOpacity>
+              </View>
+
+              {viewersLoading ? (
+                <View style={styles.viewersEmpty}>
+                  <ActivityIndicator size="small" color="#fff" />
+                </View>
+              ) : viewers.length === 0 ? (
+                <View style={styles.viewersEmpty}>
+                  <Ionicons name="eye-off-outline" size={36} color="rgba(255,255,255,0.4)" />
+                  <Text style={styles.viewersEmptyText}>No views yet</Text>
+                </View>
+              ) : (
+                <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: SCREEN_HEIGHT * 0.42 }}>
+                  {viewers.map((v) => (
+                    <View key={v.userId} style={styles.viewerRow}>
+                      {v.photoURL ? (
+                        <Image source={{ uri: v.photoURL }} style={styles.viewerAvatar} />
+                      ) : (
+                        <View style={[styles.viewerAvatar, styles.viewerAvatarFallback]}>
+                          <Text style={styles.viewerAvatarInitial}>
+                            {v.name.charAt(0).toUpperCase()}
+                          </Text>
+                        </View>
+                      )}
+                      <Text style={styles.viewerName} numberOfLines={1}>{v.name}</Text>
+                    </View>
+                  ))}
+                </ScrollView>
+              )}
+            </Animated.View>
+          </>
         )}
       </View>
     </Modal>
@@ -673,6 +815,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 40,
     paddingBottom: 30,
+    alignItems: 'center',
   },
   missingText: {
     fontSize: 15,
@@ -687,6 +830,12 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   viewsContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    alignSelf: 'center',
+  },
+  viewsCountRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
@@ -705,5 +854,84 @@ const styles = StyleSheet.create({
   },
   tapRight: {
     flex: 1,
+  },
+
+  // ── Viewers sheet ──────────────────────────────────────────────────────────
+  viewersBackdrop: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+  },
+  viewersSheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    maxHeight: SCREEN_HEIGHT * 0.55,
+    backgroundColor: '#1c1c1e',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingTop: 8,
+    paddingBottom: 34,
+    paddingHorizontal: 16,
+  },
+  viewersHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+    alignSelf: 'center',
+    marginBottom: 12,
+  },
+  viewersHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingBottom: 12,
+    marginBottom: 4,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.12)',
+  },
+  viewersTitle: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  viewersEmpty: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 36,
+    gap: 10,
+  },
+  viewersEmptyText: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.5)',
+  },
+  viewerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 10,
+  },
+  viewerAvatar: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+  },
+  viewerAvatarFallback: {
+    backgroundColor: COLORS.blue,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  viewerAvatarInitial: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#ffffff',
+  },
+  viewerName: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '500',
+    color: '#ffffff',
   },
 });

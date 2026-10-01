@@ -84,7 +84,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
         name: 'default',
         importance: Notifications.AndroidImportance.MAX,
         vibrationPattern: [0, 250, 250, 250],
-        lightColor: '#4A99E9',
+        lightColor: '#09B2EE',
       });
     }
 

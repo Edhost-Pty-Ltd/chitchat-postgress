@@ -92,10 +92,10 @@ const ChatAvatar = memo(function ChatAvatar({ displayName, contactPhotoUri, fire
     </View>
   );
 
-  // If user has status, wrap in gradient ring
+  // If user has an active status, wrap the avatar in a light-blue ring.
   if (hasStatus) {
     return (
-      <LinearGradient colors={[color, COLORS.blue]} style={styles.ring}
+      <LinearGradient colors={['#5FD4F5', '#09B2EE']} style={styles.ring}
         start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}>
         <View style={styles.ringInner}>
           {avatarContent}
@@ -143,7 +143,7 @@ const ChatRow = memo(function ChatRow({
   })();
 
   return (
-    <TouchableOpacity style={[styles.chatCard, bevel]} activeOpacity={0.75} onPress={onPress}>
+    <TouchableOpacity style={styles.chatCard} activeOpacity={0.6} onPress={onPress}>
       <View style={styles.chatAvatarWrap}>
         <ChatAvatar
           displayName={displayName}
@@ -998,7 +998,7 @@ export default function ChatsScreen() {
           renderItem={renderChat}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.listContent}
-          ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+          ItemSeparatorComponent={() => <View style={styles.chatSeparator} />}
           removeClippedSubviews
           maxToRenderPerBatch={10}
           windowSize={10}
@@ -1091,12 +1091,18 @@ const styles = StyleSheet.create({
   tabLabel:        { fontSize: 14, fontWeight: '600', color: COLORS.sub },
   tabLabelActive:  { fontSize: 14, fontWeight: '700', color: '#fff' },
 
-  // ── Chat cards ────────────────────────────────────────────────────────────
-  listContent: { paddingHorizontal: 14, paddingBottom: 110 },
+  // ── Chat rows ─────────────────────────────────────────────────────────────
+  listContent: { paddingBottom: 110 },
   chatCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
-    borderRadius: RADIUS.lg,
-    paddingHorizontal: 14, paddingVertical: 10, 
+    paddingHorizontal: 16, paddingVertical: 12,
+    backgroundColor: '#ffffff',
+  },
+  // Thin grey divider between rows, inset so it starts after the avatar
+  chatSeparator: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(0,0,0,0.08)',
+    marginLeft: 80,
   }, 
   chatAvatarWrap: { position: 'relative', width: 52, height: 52 }, 
   onlineDot: {
@@ -1142,7 +1148,7 @@ const styles = StyleSheet.create({
   },
   handle: {
     alignSelf: 'center', width: 40, height: 4, borderRadius: 2,
-    backgroundColor: 'rgba(74,153,233,0.30)', marginTop: 10, marginBottom: 4,
+    backgroundColor: 'rgba(9,178,238,0.30)', marginTop: 10, marginBottom: 4,
   },
 
   // ── Sheet shared ──────────────────────────────────────────────────────────
@@ -1289,14 +1295,16 @@ const styles = StyleSheet.create({
   emptyWrap: { alignItems: 'center', paddingTop: 80, gap: 12 },
   emptyText: { fontSize: 15, color: COLORS.sub },
 
-  // Status ring (for future stories feature)
+  // Status ring — light-blue band + thin gap around the avatar
   ring: {
-    width: 54, height: 54, borderRadius: 27,
-    padding: 2, alignItems: 'center', justifyContent: 'center',
+    width: 56, height: 56, borderRadius: 28,
+    padding: 2.5, alignItems: 'center', justifyContent: 'center',
   },
   ringInner: {
-    width: 50, height: 50, borderRadius: 25,
-    backgroundColor: COLORS.sky1, overflow: 'hidden',
+    width: 52, height: 52, borderRadius: 26,
+    backgroundColor: '#ffffff',   // thin white gap between ring and avatar
+    alignItems: 'center', justifyContent: 'center',
+    overflow: 'hidden',
   },
 
   // Dropdown menu

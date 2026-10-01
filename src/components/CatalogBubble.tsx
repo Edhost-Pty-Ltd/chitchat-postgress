@@ -331,7 +331,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     ...SHADOW.card,
     borderWidth: 1,
-    borderColor: 'rgba(74,153,233,0.10)',
+    borderColor: 'rgba(9,178,238,0.10)',
   },
 
   // Image
@@ -339,7 +339,7 @@ const styles = StyleSheet.create({
   productImage: { width: CARD_W - 2, height: 180 },   // -2 for border
   imagePlaceholder: {
     width: CARD_W - 2, height: 140,
-    backgroundColor: 'rgba(74,153,233,0.06)',
+    backgroundColor: 'rgba(9,178,238,0.06)',
     alignItems: 'center', justifyContent: 'center',
   },
   zoomHint: {
@@ -392,7 +392,7 @@ const styles = StyleSheet.create({
   // Cart bar
   cartBar: {
     borderTopWidth: 1,
-    borderTopColor: 'rgba(74,153,233,0.08)',
+    borderTopColor: 'rgba(9,178,238,0.08)',
     paddingHorizontal: 14,
     paddingVertical: 10,
   },
@@ -420,14 +420,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 16,
-    backgroundColor: 'rgba(74,153,233,0.07)',
+    backgroundColor: 'rgba(9,178,238,0.07)',
     borderRadius: RADIUS.full,
     paddingVertical: 8,
     paddingHorizontal: 12,
   },
   stepperBtn: {
     width: 30, height: 30, borderRadius: 15,
-    backgroundColor: 'rgba(74,153,233,0.14)',
+    backgroundColor: 'rgba(9,178,238,0.14)',
     alignItems: 'center', justifyContent: 'center',
   },
   stepperQty: {
@@ -523,7 +523,7 @@ const viewerStyles = StyleSheet.create({
   },
   forwardAvatar: {
     width: 42, height: 42, borderRadius: 21,
-    backgroundColor: 'rgba(74,153,233,0.14)',
+    backgroundColor: 'rgba(9,178,238,0.14)',
     alignItems: 'center', justifyContent: 'center',
   },
   forwardAvatarText: { fontSize: 14, fontWeight: '700', color: COLORS.blue },

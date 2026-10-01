@@ -5,6 +5,10 @@ import { useState, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
+import {
+  registerChatReplyCategory,
+  handleNotificationReply,
+} from './useNotificationReply';
 
 let Notifications: any = null;
 try {
@@ -45,11 +49,15 @@ function removeSubscription(sub: any) {
 export function usePushNotifications(userId: string | null) {
   const [expoPushToken, setExpoPushToken] = useState<string | null>(null);
   const [notification, setNotification] = useState<any | null>(null);
-  const notificationListener = useRef<any>();
-  const responseListener = useRef<any>();
+  const notificationListener = useRef<any>(null);
+  const responseListener = useRef<any>(null);
 
   useEffect(() => {
     if (!userId || !Notifications) return;
+
+    // Register the inline quick-reply category so chat notifications show a
+    // "Reply" text field and a "Mark as read" button in the shade.
+    registerChatReplyCategory();
 
     registerForPushNotificationsAsync().then((token) => {
       if (token) {
@@ -63,10 +71,26 @@ export function usePushNotifications(userId: string | null) {
       setNotification(notif);
     });
 
-    responseListener.current = Notifications.addNotificationResponseReceivedListener((response: any) => {
+    responseListener.current = Notifications.addNotificationResponseReceivedListener(async (response: any) => {
       console.log('[usePushNotifications] Notification response:', response);
-      handleNotificationResponse(response);
+      // First, try to handle an inline reply / mark-as-read action. If it was
+      // one of those, we're done — don't also run the open-chat navigation.
+      const handled = await handleNotificationReply(response);
+      if (!handled) {
+        handleNotificationResponse(response);
+      }
     });
+
+    // Cold-start / wake case: if the app was launched by tapping a notification
+    // action (e.g. the Reply field), the live listener above can miss it.
+    // getLastNotificationResponseAsync returns that initial response once.
+    if (Notifications.getLastNotificationResponseAsync) {
+      Notifications.getLastNotificationResponseAsync()
+        .then((response: any) => {
+          if (response) handleNotificationReply(response);
+        })
+        .catch(() => {});
+    }
 
     return () => {
       if (notificationListener.current) removeSubscription(notificationListener.current);

@@ -1,18 +1,18 @@
 // ─── Design Tokens — Clean iOS Light Theme ───────────────────────────────────
 
 export const COLORS = {
-  // ── Backgrounds ───────────────────────────────────────────────────────
-  sky1:      '#F2F2F7',   // page background (iOS grouped)
-  sky2:      '#E5E5EA',   // slightly darker surface
+  // ── Backgrounds — pure white throughout ──────────────────────────────────
+  sky1:      '#FFFFFF',   // page background
+  sky2:      '#F2F2F7',   // subtle grey surface (dividers / insets)
   sky3:      '#FFFFFF',   // pure white surface
-  bg1:       '#F2F2F7',
+  bg1:       '#FFFFFF',
   bg2:       '#FFFFFF',
 
-  // ── Brand blue ─────────────────────────────────────────────────────────
-  blue:      '#4A99E9',
-  blueDark:  '#3A82CF',
-  blueDeep:  '#3A82CF',
-  blueGlow:  'rgba(74,153,233,0.20)',
+  // ── Brand blue — sparkly pool cyan ───────────────────────────────────────
+  blue:      '#09B2EE',
+  blueDark:  '#0890C9',
+  blueDeep:  '#0890C9',
+  blueGlow:  'rgba(9,178,238,0.20)',
 
   // ── Surfaces ──────────────────────────────────────────────────────────
   glass:         '#FFFFFF',
@@ -43,12 +43,12 @@ export const COLORS = {
 } as const;
 
 export const GRADIENTS = {
-  primary:  ['#4A99E9', '#3A82CF']                              as [string, string],
-  sky:      ['#4A99E9', '#4A99E9', '#3A82CF']                   as [string, string, string],
-  bg:       ['#F2F2F7', '#F2F2F7', '#FFFFFF']                   as [string, string, string],
+  primary:  ['#09B2EE', '#0890C9']                              as [string, string],
+  sky:      ['#09B2EE', '#09B2EE', '#0890C9']                   as [string, string, string],
+  bg:       ['#FFFFFF', '#FFFFFF', '#FFFFFF']                   as [string, string, string],
   card:     ['#FFFFFF', '#FFFFFF']                              as [string, string],
-  glow:     ['rgba(74,153,233,0.15)', 'rgba(74,153,233,0.0)']  as [string, string],
-  chatSent: ['#4A99E9', '#4A99E9']                              as [string, string],
+  glow:     ['rgba(9,178,238,0.15)', 'rgba(9,178,238,0.0)']    as [string, string],
+  chatSent: ['#09B2EE', '#09B2EE']                              as [string, string],
   chatRecv: ['#FFFFFF', '#FFFFFF']                              as [string, string],
 } as const;
 
@@ -92,14 +92,14 @@ export const SHADOW = {
     elevation:     2,
   },
   button: {
-    shadowColor:   '#4A99E9',
+    shadowColor:   '#09B2EE',
     shadowOffset:  { width: 0, height: 3 },
     shadowOpacity: 0.25,
     shadowRadius:  8,
     elevation:     6,
   },
   glow: {
-    shadowColor:   '#4A99E9',
+    shadowColor:   '#09B2EE',
     shadowOffset:  { width: 0, height: 0 },
     shadowOpacity: 0.20,
     shadowRadius:  12,

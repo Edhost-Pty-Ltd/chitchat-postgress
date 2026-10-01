@@ -150,3 +150,138 @@ export const cleanupStaleCalls = functionsV1.pubsub
     console.log(`[cleanupStaleCalls] Deleted ${deleted} stale call doc(s).`);
     return null;
   });
+
+// ─── 4. Push notifications for new chat messages ────────────────────────────
+// Fires whenever a message is created in any chat. Sends an Expo push to every
+// other member of the chat, carrying the data + categoryId the client needs to
+// show the inline "Reply" field in the notification shade.
+//
+// The Expo push payload uses:
+//   • categoryId: 'chat_message'      → triggers the Reply / Mark-as-read actions
+//   • data: { chatId, senderId }      → consumed by handleNotificationReply()
+//   • _displayInForeground: false     → OS shows it; the app's own in-app toast
+//                                        handles the foregrounded case
+//
+// Expo Push API: https://exp.host/--/api/v2/push/send
+
+const EXPO_PUSH_ENDPOINT = 'https://exp.host/--/api/v2/push/send';
+
+/** Resolve the display name to show as the notification title. */
+async function resolveSenderName(
+  dbAdmin: FirebaseFirestore.Firestore,
+  senderId: string,
+): Promise<string> {
+  try {
+    const snap = await dbAdmin.collection('users').doc(senderId).get();
+    const data = snap.data();
+    return data?.displayName || data?.phone || 'New message';
+  } catch {
+    return 'New message';
+  }
+}
+
+/** Build the notification body from a message document. */
+function messageBody(msg: FirebaseFirestore.DocumentData): string {
+  if (msg.text) return msg.text as string;
+  switch (msg.type) {
+    case 'image':   return '📷 Photo';
+    case 'video':   return '🎥 Video';
+    case 'voice':   return '🎤 Voice message';
+    case 'file':    return `📎 ${msg.fileName || 'File'}`;
+    case 'catalog': return '🛍️ Product';
+    default:        return 'New message';
+  }
+}
+
+export const onMessageCreated = functionsV1.firestore
+  .document('chats/{chatId}/messages/{messageId}')
+  .onCreate(async (snap, context) => {
+    const msg    = snap.data();
+    const chatId = context.params.chatId as string;
+    if (!msg) return null;
+
+    const senderId: string = msg.senderId;
+    if (!senderId) return null;
+
+    // Messages flagged as blocked are hidden from the recipient — don't notify.
+    if (msg.blockedMessage) return null;
+
+    const dbAdmin = getFirestore();
+
+    // Load the chat to find the other members + group metadata.
+    const chatSnap = await dbAdmin.collection('chats').doc(chatId).get();
+    if (!chatSnap.exists) return null;
+    const chatData   = chatSnap.data()!;
+    const members: string[] = chatData.members ?? [];
+    const recipients = members.filter((id) => id !== senderId);
+    if (recipients.length === 0) return null;
+
+    const senderName = await resolveSenderName(dbAdmin, senderId);
+    const isGroup    = chatData.type === 'group';
+    const title      = isGroup && chatData.groupName ? chatData.groupName : senderName;
+    const bodyText   = messageBody(msg);
+    const body       = isGroup ? `${senderName}: ${bodyText}` : bodyText;
+
+    // Collect each recipient's push token, skipping anyone who blocked the sender.
+    const messages: any[] = [];
+    await Promise.all(
+      recipients.map(async (recipientId) => {
+        try {
+          // Skip if the recipient has blocked the sender.
+          const blockDoc = await dbAdmin
+            .collection('users').doc(recipientId)
+            .collection('blockedUsers').doc(senderId)
+            .get();
+          if (blockDoc.exists) return;
+
+          const userSnap = await dbAdmin.collection('users').doc(recipientId).get();
+          const token    = userSnap.data()?.pushToken;
+          if (!token || typeof token !== 'string') return;
+
+          messages.push({
+            to: token,
+            sound: 'default',
+            title,
+            body,
+            categoryId: 'chat_message',   // enables inline Reply in the shade
+            data: {
+              chatId,
+              senderId,
+              type: 'message',
+            },
+            // Android: group messages from the same chat into one thread
+            ...(isGroup ? {} : {}),
+          });
+        } catch (err) {
+          console.warn('[onMessageCreated] token lookup failed for', recipientId, err);
+        }
+      }),
+    );
+
+    if (messages.length === 0) {
+      console.log('[onMessageCreated] No push tokens to notify.');
+      return null;
+    }
+
+    // Expo accepts up to 100 messages per request — chunk to be safe.
+    for (let i = 0; i < messages.length; i += 100) {
+      const chunk = messages.slice(i, i + 100);
+      try {
+        const res = await fetch(EXPO_PUSH_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(chunk),
+        });
+        const json = await res.json();
+        console.log('[onMessageCreated] Expo push response:', JSON.stringify(json));
+      } catch (err) {
+        console.error('[onMessageCreated] Failed to send push chunk:', err);
+      }
+    }
+
+    console.log(`[onMessageCreated] Sent ${messages.length} push notification(s) for chat ${chatId}.`);
+    return null;
+  });

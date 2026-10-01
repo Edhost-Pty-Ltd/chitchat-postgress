@@ -372,7 +372,7 @@ const styles = StyleSheet.create({
   },
   fontTileActive: {
     borderColor: COLORS.blue,
-    backgroundColor: 'rgba(74,153,233,0.08)',
+    backgroundColor: 'rgba(9,178,238,0.08)',
   },
   fontTilePreview:{ fontSize: 26, color: COLORS.text },
   fontTileLabel:  { fontSize: 9, fontWeight: '600', color: COLORS.sub, textAlign: 'center' },
@@ -402,8 +402,8 @@ const styles = StyleSheet.create({
   },
   photoPickerIcon: {
     width: 46, height: 46, borderRadius: RADIUS.md,
-    backgroundColor: 'rgba(74,153,233,0.12)',
-    borderWidth: 1, borderColor: 'rgba(74,153,233,0.20)',
+    backgroundColor: 'rgba(9,178,238,0.12)',
+    borderWidth: 1, borderColor: 'rgba(9,178,238,0.20)',
     alignItems: 'center', justifyContent: 'center',
   },
   photoPickerTitle: { fontSize: 14, fontWeight: '600', color: COLORS.text },
@@ -414,7 +414,7 @@ const styles = StyleSheet.create({
   swatch:       { width: 72, alignItems: 'center', gap: 5, padding: 3, borderRadius: RADIUS.md, borderWidth: 2, borderColor: 'transparent' },
   swatchActive: { 
     borderColor: COLORS.blue,
-    shadowColor: '#4A99E9',
+    shadowColor: '#09B2EE',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.40,
     shadowRadius: 12,
@@ -426,7 +426,7 @@ const styles = StyleSheet.create({
     width: 20, height: 20, borderRadius: 10,
     backgroundColor: COLORS.blue, 
     alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#4A99E9',
+    shadowColor: '#09B2EE',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.40,
     shadowRadius: 12,

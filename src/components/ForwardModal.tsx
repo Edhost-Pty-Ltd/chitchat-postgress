@@ -277,7 +277,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 4,
     borderRadius: 2,
-    backgroundColor: 'rgba(74,153,233,0.40)',
+    backgroundColor: 'rgba(9,178,238,0.40)',
     alignSelf: 'center',
     marginTop: 12,
     marginBottom: 8,
@@ -289,7 +289,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(74,153,233,0.15)',
+    borderBottomColor: 'rgba(9,178,238,0.15)',
   },
   title: {
     fontSize: 18,
@@ -301,9 +301,9 @@ const styles = StyleSheet.create({
   selectedBanner: {
     paddingHorizontal: 20,
     paddingVertical: 10,
-    backgroundColor: 'rgba(74,153,233,0.08)',
+    backgroundColor: 'rgba(9,178,238,0.08)',
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(74,153,233,0.15)',
+    borderBottomColor: 'rgba(9,178,238,0.15)',
   },
   selectedText: {
     fontSize: 14,
@@ -342,7 +342,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   chatItemSelected: {
-    backgroundColor: 'rgba(74,153,233,0.12)',
+    backgroundColor: 'rgba(9,178,238,0.12)',
   },
   chatItemContent: {
     flex: 1,
@@ -360,7 +360,7 @@ const styles = StyleSheet.create({
     height: 24,
     borderRadius: 12,
     borderWidth: 2,
-    borderColor: 'rgba(74,153,233,0.35)',
+    borderColor: 'rgba(9,178,238,0.35)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -381,7 +381,7 @@ const styles = StyleSheet.create({
     ...SHADOW.button,
   },
   forwardBtnDisabled: {
-    backgroundColor: 'rgba(74,153,233,0.35)',
+    backgroundColor: 'rgba(9,178,238,0.35)',
     opacity: 0.6,
   },
   forwardBtnText: {

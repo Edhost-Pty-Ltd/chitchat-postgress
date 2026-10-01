@@ -495,8 +495,8 @@ const styles = StyleSheet.create({
     borderRadius: 20,
   },
   iconBtnActive: {
-    backgroundColor: 'rgba(74,153,233,0.35)',
-    borderColor: 'rgba(74,153,233,0.55)',
+    backgroundColor: 'rgba(9,178,238,0.35)',
+    borderColor: 'rgba(9,178,238,0.55)',
   },
   topName:   { fontSize: 15, fontWeight: '700', color: '#fff' },
   topStatus: { fontSize: 11, color: 'rgba(255,255,255,0.65)', marginTop: 2 },
