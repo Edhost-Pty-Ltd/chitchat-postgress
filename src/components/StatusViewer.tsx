@@ -99,7 +99,8 @@ export function StatusViewer({
   const currentStatus = statuses[currentIndex];
   const isOwner    = currentStatus?.userId === currentUserId;
   const isExcluded = currentStatus?.excludedUsers?.includes(currentUserId) || false;
-  const viewCount  = currentStatus?.viewedBy?.length || 0;
+  // Exclude the owner's own view from the count — you don't "view" your own status.
+  const viewCount  = (currentStatus?.viewedBy || []).filter((id) => id !== currentUserId).length;
   const isVideo    = currentStatus?.mediaType === 'video';
   const isText     = currentStatus?.mediaType === 'text';
 
@@ -134,7 +135,8 @@ export function StatusViewer({
       toValue: 1, useNativeDriver: true, friction: 9, tension: 65,
     }).start();
 
-    const ids = currentStatus.viewedBy || [];
+    // Exclude the owner — you shouldn't appear in your own viewers list.
+    const ids = (currentStatus.viewedBy || []).filter((id) => id !== currentUserId);
     if (ids.length === 0) { setViewers([]); return; }
 
     setViewersLoading(true);
@@ -157,7 +159,7 @@ export function StatusViewer({
     } finally {
       setViewersLoading(false);
     }
-  }, [isOwner, currentStatus, viewersAnim]);
+  }, [isOwner, currentStatus, currentUserId, viewersAnim]);
 
   const closeViewers = useCallback(() => {
     Animated.timing(viewersAnim, {

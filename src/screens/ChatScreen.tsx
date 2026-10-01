@@ -5,7 +5,7 @@ import {
   StyleSheet, TextInput, KeyboardAvoidingView, Platform,
   ActivityIndicator, PanResponder, Linking, Modal, Alert, Share,
   GestureResponderEvent, PanResponderGestureState, Image, Dimensions,
-  Animated,
+  Animated, Keyboard,
 } from 'react-native';
 import { useNavigation, useRoute, RouteProp, useFocusEffect } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -211,6 +211,126 @@ async function saveMutedState(chatId: string, muted: boolean): Promise<void> {
   }
 }
 
+// ─── SwipeableMessage ──────────────────────────────────────────────────────────
+// Wraps a message bubble so the user can swipe it to the right to reply.
+// A reply arrow fades/slides in as the row is dragged; releasing past the
+// threshold triggers onReply and the row springs back.
+const SWIPE_REPLY_THRESHOLD = 56;   // px of drag needed to trigger a reply
+const SWIPE_MAX_TRANSLATE   = 72;   // clamp so the row can't be dragged too far
+
+const SwipeableMessage = React.memo(function SwipeableMessage({
+  children,
+  onReply,
+  onLongPress,
+}: {
+  children: React.ReactNode;
+  onReply: () => void;
+  onLongPress: () => void;
+}) {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const triggeredRef = useRef(false);
+
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        // Capture-phase move check: claim a deliberate horizontal LEFT-swipe
+        // (negative dx) even if an inner Touchable or the FlatList scroll grabbed
+        // the touch on press-in. Left-swipe avoids clashing with the iOS
+        // edge-swipe-back gesture. Vertical scrolls are left to the list.
+        onMoveShouldSetPanResponderCapture: (_evt, g) =>
+          g.dx < -8 && Math.abs(g.dx) > Math.abs(g.dy) * 1.2,
+        onStartShouldSetPanResponderCapture: () => false,
+        onMoveShouldSetPanResponder: (_evt, g) =>
+          g.dx < -8 && Math.abs(g.dx) > Math.abs(g.dy) * 1.2,
+
+        onPanResponderGrant: () => {
+          triggeredRef.current = false;
+        },
+
+        onPanResponderMove: (_evt, g) => {
+          if (g.dx >= 0) { translateX.setValue(0); return; }
+          // Drag left → negative translate, clamped
+          const x = Math.max(g.dx, -SWIPE_MAX_TRANSLATE);
+          translateX.setValue(x);
+          if (!triggeredRef.current && -x >= SWIPE_REPLY_THRESHOLD) {
+            triggeredRef.current = true; // latch (fires once per swipe)
+          }
+        },
+
+        onPanResponderRelease: (_evt, g) => {
+          const passed = -g.dx >= SWIPE_REPLY_THRESHOLD;
+          Animated.spring(translateX, {
+            toValue: 0,
+            useNativeDriver: true,
+            friction: 7,
+            tension: 70,
+          }).start();
+          if (passed) onReply();
+        },
+
+        onPanResponderTerminate: () => {
+          Animated.spring(translateX, {
+            toValue: 0, useNativeDriver: true, friction: 7, tension: 70,
+          }).start();
+        },
+        // Don't let other components (the FlatList) steal the gesture mid-swipe
+        onPanResponderTerminationRequest: () => false,
+      }),
+    [onReply, translateX],
+  );
+
+  // Reply arrow opacity/scale ramps up as the row is dragged left (negative dx).
+  const replyIconOpacity = translateX.interpolate({
+    inputRange: [-SWIPE_REPLY_THRESHOLD, 0],
+    outputRange: [1, 0],
+    extrapolate: 'clamp',
+  });
+  const replyIconScale = translateX.interpolate({
+    inputRange: [-SWIPE_REPLY_THRESHOLD, 0],
+    outputRange: [1, 0.5],
+    extrapolate: 'clamp',
+  });
+
+  return (
+    <View>
+      {/* Reply arrow revealed on the right as the row slides left */}
+      <Animated.View
+        pointerEvents="none"
+        style={{
+          position: 'absolute',
+          right: 16,
+          top: 0,
+          bottom: 0,
+          justifyContent: 'center',
+          opacity: replyIconOpacity,
+          transform: [{ scale: replyIconScale }],
+        }}
+      >
+        <View style={{
+          width: 34, height: 34, borderRadius: 17,
+          backgroundColor: 'rgba(9,178,238,0.15)',
+          alignItems: 'center', justifyContent: 'center',
+        }}>
+          <AppIcon name="arrow-undo" size={18} color={COLORS.blue} fixedColor />
+        </View>
+      </Animated.View>
+
+      <Animated.View
+        {...panResponder.panHandlers}
+        style={{ transform: [{ translateX }] }}
+      >
+        <TouchableOpacity
+          activeOpacity={1}
+          onLongPress={onLongPress}
+          delayLongPress={300}
+        >
+          {children}
+        </TouchableOpacity>
+      </Animated.View>
+    </View>
+  );
+});
+
 export default function ChatScreen() {
   const navigation = useNavigation<NavProp>();
   const route = useRoute<RoutePropType>();
@@ -381,6 +501,7 @@ export default function ChatScreen() {
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const highlightAnim = useRef(new Animated.Value(0)).current;
   const searchInputRef = useRef<TextInput>(null);
+  const messageInputRef = useRef<TextInput>(null);
 
   // ── Group members state ─────────────────────────────────────────
   const [groupMembers, setGroupMembers] = useState<GroupMember[]>([]);
@@ -1063,6 +1184,24 @@ export default function ChatScreen() {
     setSelectedMessageId(null);
     setShowMessageActions(false);
   };
+
+  // ── Emoji button ────────────────────────────────────────────────
+  // Toggles the custom emoji grid. Opening it dismisses the OS keyboard first
+  // so the grid takes over that space cleanly (they can't both be shown).
+  // Tapping again (keypad icon) re-focuses the input to bring the keyboard back.
+  const toggleEmoji = useCallback(() => {
+    setShowAttach(false);
+    setShowEmoji((open) => {
+      const next = !open;
+      if (next) {
+        Keyboard.dismiss();
+      } else {
+        // Closing the grid → bring the text keyboard back
+        setTimeout(() => messageInputRef.current?.focus(), 50);
+      }
+      return next;
+    });
+  }, []);
 
   const handleEditMessage = () => {
     if (!selectedMessageId) return;
@@ -1906,7 +2045,7 @@ export default function ChatScreen() {
               isOutgoing={false}
             />
           ) : item.type === 'image' && item.imageUrl ? (
-            <LinearGradient colors={GRADIENTS.chatSent} style={[styles.bubble, styles.bubbleIn, styles.imageBubble]}>
+            <View style={[styles.bubble, styles.bubbleIn, styles.imageBubble]}>
               <TouchableOpacity
                 activeOpacity={0.9}
                 onPress={() => {
@@ -1923,9 +2062,9 @@ export default function ChatScreen() {
               <View style={styles.imageTimeOverlay}>
                 <AppText fixedColor style={styles.timeIn}>{formatTime(item.timestamp)}</AppText>
               </View>
-            </LinearGradient>
+            </View>
           ) : (
-            <LinearGradient colors={GRADIENTS.chatSent} style={[styles.bubble, styles.bubbleIn]}>
+            <View style={[styles.bubble, styles.bubbleIn]}>
               {item.replyTo && (
                 <TouchableOpacity
                   style={styles.replyBubble}
@@ -1940,12 +2079,12 @@ export default function ChatScreen() {
                   }}
                   activeOpacity={0.7}
                 >
-                  <View style={styles.replyBubbleBar} />
+                  <View style={[styles.replyBubbleBar, { backgroundColor: COLORS.blue }]} />
                   <View style={{ flex: 1 }}>
-                    <AppText fixedColor style={styles.replyBubbleSender}>
+                    <AppText style={[styles.replyBubbleSender, { color: COLORS.blue }]}>
                       {item.replyTo.senderId === userId ? 'You' : resolveSenderName(item.replyTo.senderId)}
                     </AppText>
-                    <AppText fixedColor style={styles.replyBubbleText} numberOfLines={1}>
+                    <AppText style={[styles.replyBubbleText, { color: COLORS.text, opacity: 0.7 }]} numberOfLines={1}>
                       {item.replyTo.type === 'text' && item.replyTo.text
                         ? item.replyTo.text
                         : item.replyTo.type === 'voice'
@@ -1963,7 +2102,7 @@ export default function ChatScreen() {
               )}
               {item.text && <AppText fixedColor style={styles.bubbleTextIn}>{item.text}</AppText>}
               <AppText fixedColor style={styles.timeIn}>{formatTime(item.timestamp)}</AppText>
-            </LinearGradient>
+            </View>
           )
         )}
         {isOut && (
@@ -2035,12 +2174,12 @@ export default function ChatScreen() {
                   }}
                   activeOpacity={0.7}
                 >
-                  <View style={[styles.replyBubbleBar, { backgroundColor: COLORS.blue }]} />
+                  <View style={[styles.replyBubbleBar, { backgroundColor: '#ffffff' }]} />
                   <View style={{ flex: 1 }}>
-                    <AppText style={[styles.replyBubbleSender, { color: COLORS.blue }]}>
+                    <AppText fixedColor style={[styles.replyBubbleSender, { color: '#ffffff' }]}>
                       {item.replyTo.senderId === userId ? 'You' : resolveSenderName(item.replyTo.senderId)}
                     </AppText>
-                    <AppText style={[styles.replyBubbleText, { color: textColor, opacity: 0.7 }]} numberOfLines={1}>
+                    <AppText fixedColor style={[styles.replyBubbleText, { color: 'rgba(255,255,255,0.85)' }]} numberOfLines={1}>
                       {item.replyTo.type === 'text' && item.replyTo.text
                         ? item.replyTo.text
                         : item.replyTo.type === 'voice'
@@ -2056,13 +2195,13 @@ export default function ChatScreen() {
                   </View>
                 </TouchableOpacity>
               )}
-              {item.text && <AppText style={[styles.bubbleTextOut, { color: textColor, fontFamily }]}>{item.text}</AppText>}
+              {item.text && <AppText fixedColor style={[styles.bubbleTextOut, { fontFamily }]}>{item.text}</AppText>}
               <View style={styles.timeOutRow}>
-                <AppText style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
+                <AppText fixedColor style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
                 <AppIcon
                   name={tickIcon.icon}
                   size={13}
-                  color={tickIcon.color}
+                  color="#ffffff"
                   fixedColor
                 />
               </View>
@@ -2073,10 +2212,9 @@ export default function ChatScreen() {
     );
 
     return (
-      <TouchableOpacity
-        activeOpacity={1}
+      <SwipeableMessage
+        onReply={() => setReplyingTo(item)}
         onLongPress={() => handleLongPressMessage(item.messageId)}
-        delayLongPress={300}
       >
         <View style={[isSelected && styles.selectedMessage]}>
           {messageContent}
@@ -2104,7 +2242,7 @@ export default function ChatScreen() {
             />
           )}
         </View>
-      </TouchableOpacity>
+      </SwipeableMessage>
     );
   };
 
@@ -2447,21 +2585,24 @@ export default function ChatScreen() {
             </View>
           )}
 
-          {/* ── Emoji panel ── */}
+          {/* ── Emoji panel — custom grid shown in place of the OS keyboard ── */}
           {showEmoji && (
-            <View style={[styles.emojiPanel, { backgroundColor: FG.glassBg, borderTopColor: FG.glassBorder }]}>
-              <ScrollView horizontal={false} showsVerticalScrollIndicator={false}>
-                <View style={styles.emojiGrid}>
-                  {EMOJI_LIST.map((e) => (
-                    <TouchableOpacity
-                      key={e}
-                      style={styles.emojiItem}
-                      onPress={() => setInput((prev) => prev + e)}
-                    >
-                      <AppText fixedColor style={styles.emojiChar}>{e}</AppText>
-                    </TouchableOpacity>
-                  ))}
-                </View>
+            <View style={styles.emojiPanel}>
+              <ScrollView
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="always"
+                contentContainerStyle={styles.emojiGrid}
+              >
+                {EMOJI_LIST.map((e) => (
+                  <TouchableOpacity
+                    key={e}
+                    style={styles.emojiItem}
+                    activeOpacity={0.6}
+                    onPress={() => setInput((prev) => prev + e)}
+                  >
+                    <AppText fixedColor style={styles.emojiChar}>{e}</AppText>
+                  </TouchableOpacity>
+                ))}
               </ScrollView>
             </View>
           )}
@@ -2568,6 +2709,7 @@ export default function ChatScreen() {
                     {/* Text field + emoji */}
                     <View style={styles.inputFieldWrap}>
                       <TextInput
+                        ref={messageInputRef}
                         style={[styles.inputField, { color: FG.primary, opacity: blockedByThem ? 0.45 : 1 }]}
                         placeholder={blockedByThem ? 'You cannot reply' : 'Message'}
                         placeholderTextColor={FG.faint}
@@ -2581,7 +2723,7 @@ export default function ChatScreen() {
                         editable={!blockedByThem}
                         onFocus={() => { setShowEmoji(false); setShowAttach(false); }}
                       />
-                      <TouchableOpacity style={styles.emojiBtn} onPress={() => { setShowAttach(false); setShowEmoji((e) => !e); }}>
+                      <TouchableOpacity style={styles.emojiBtn} onPress={toggleEmoji}>
                         <AppIcon name={showEmoji ? 'keypad-outline' : 'happy-outline'} size={22} color={COLORS.sub} />
                       </TouchableOpacity>
                     </View>
@@ -2635,6 +2777,7 @@ export default function ChatScreen() {
                 {/* Text field + emoji */}
                 <View style={styles.inputFieldWrap}>
                   <TextInput
+                    ref={messageInputRef}
                     style={[styles.inputField, { color: FG.primary, opacity: blockedByThem ? 0.45 : 1 }]}
                     placeholder={blockedByThem ? 'You cannot reply' : 'Message'}
                     placeholderTextColor={FG.faint}
@@ -2648,7 +2791,7 @@ export default function ChatScreen() {
                     editable={!blockedByThem}
                     onFocus={() => { setShowEmoji(false); setShowAttach(false); }}
                   />
-                  <TouchableOpacity style={styles.emojiBtn} onPress={() => { setShowAttach(false); setShowEmoji((e) => !e); }}>
+                  <TouchableOpacity style={styles.emojiBtn} onPress={toggleEmoji}>
                     <AppIcon name={showEmoji ? 'keypad-outline' : 'happy-outline'} size={22} color={COLORS.sub} />
                   </TouchableOpacity>
                 </View>
@@ -4120,10 +4263,14 @@ const styles = StyleSheet.create({
     paddingBottom: 7,
     position: 'relative',
   },
-  bubbleIn: { borderBottomLeftRadius: 4, ...SHADOW.card },
+  bubbleIn: {
+    borderBottomLeftRadius: 4,
+    backgroundColor: '#F0F1F3',   // neutral light grey — received message
+    ...SHADOW.card,
+  },
   bubbleTextIn: {
     fontSize: 15,
-    color: '#fff',
+    color: COLORS.text,
     lineHeight: 20,
     paddingRight: 52, // reserve room for the time stamp on the last line
   },
@@ -4132,20 +4279,18 @@ const styles = StyleSheet.create({
     bottom: 6,
     right: 12,
     fontSize: 11,
-    color: 'rgba(255,255,255,0.75)',
+    color: COLORS.sub,
   },
 
   bubbleOut: {
-    backgroundColor: 'rgba(180,225,245,0.22)',
-    borderWidth: 1,
-    borderColor: 'rgba(9,178,238,0.18)',
+    backgroundColor: COLORS.blue,   // solid brand cyan — your sent messages
     borderBottomRightRadius: 4,
     position: 'relative',
     ...SHADOW.card
   },
   bubbleTextOut: {
     fontSize: 15,
-    color: COLORS.text,
+    color: '#ffffff',
     lineHeight: 20,
     paddingRight: 60, // reserve room for time + double tick on the last line
   },
@@ -4157,7 +4302,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 3,
   },
-  timeOut: { fontSize: 11, color: COLORS.sub },
+  timeOut: { fontSize: 11, color: 'rgba(255,255,255,0.8)' },
 
   // Voice / image
   imagePlaceholder: {
@@ -4203,24 +4348,41 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(9,178,238,0.18)',
     paddingHorizontal: 14,
-    height: 42
+    minHeight: 42,
+    maxHeight: 120,     // grows for multi-line, caps so it doesn't fill the screen
+    paddingVertical: 4,
   },
-  inputField: { flex: 1, fontSize: 14, color: COLORS.text, padding: 0, margin: 0, height: 42 },
+  // No fixed height — let the text size naturally so it's vertically centered
+  // by the wrapper's alignItems:'center'. A fixed height top-anchors multiline text on iOS.
+  inputField: {
+    flex: 1,
+    fontSize: 15,
+    color: COLORS.text,
+    padding: 0,
+    margin: 0,
+    paddingTop: Platform.OS === 'ios' ? 2 : 0,
+  },
   emojiBtn: { paddingLeft: 8, alignSelf: 'center' },
   sendBtn: { width: 42, height: 42, borderRadius: 21, ...SHADOW.button },
   sendBtnInner: { flex: 1, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
 
   // Emoji panel
   emojiPanel: {
-    maxHeight: 160,
-    borderTopWidth: 1,
-    paddingVertical: 8,
-    backgroundColor: 'rgba(180,225,245,0.18)',
-    borderTopColor: 'rgba(9,178,238,0.18)',
+    height: 240,                     // fixed keyboard-sized block so it's always visible
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 10,
+    backgroundColor: '#F7F8FA',      // solid light surface so emojis read clearly
+    borderTopColor: 'rgba(0,0,0,0.08)',
   },
-  emojiGrid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 12, gap: 2 },
-  emojiItem: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  emojiChar: { fontSize: 26 },
+  emojiGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-start',
+    paddingHorizontal: 10,
+    gap: 4,
+  },
+  emojiItem: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
+  emojiChar: { fontSize: 30 },
 
   // Attachment sheet
   attachOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.30)' },

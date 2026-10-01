@@ -803,15 +803,27 @@ export default function ChatsScreen() {
   const directChats = useMemo(() => chats.filter((c) => c.type === 'direct'), [chats]);
   const groupChats  = useMemo(() => chats.filter((c) => c.type === 'group'), [chats]);
 
-  // Memoize the filtered + searched list so FlatList only re-renders when it changes
+  // Memoize the filtered + searched list so FlatList only re-renders when it changes.
+  // Always sorted by most recent activity (latest lastMessage timestamp first);
+  // chats with no messages yet sink to the bottom.
   const data = useMemo(() => {
     const base = tab === 'Chats' ? directChats : groupChats;
-    if (!query.trim()) return base;
+
+    const sortByRecent = (list: ChatPreview[]) =>
+      [...list].sort((a, b) => {
+        const ta = a.timestamp ? a.timestamp.getTime() : 0;
+        const tb = b.timestamp ? b.timestamp.getTime() : 0;
+        return tb - ta;
+      });
+
+    if (!query.trim()) return sortByRecent(base);
+
     const q = query.toLowerCase();
-    return base.filter((c) => {
+    const matched = base.filter((c) => {
       if (!userId) return false;
       return resolveDisplayName(c, userId, contactsMap, firestoreUsersMap).toLowerCase().includes(q);
     });
+    return sortByRecent(matched);
   }, [tab, directChats, groupChats, query, userId, contactsMap, firestoreUsersMap]);
 
   const openSearch = () => {

@@ -65,10 +65,13 @@ export async function mergeLocalMessages(
     for (const m of existing)  map.set(m.messageId, m);
     for (const m of incoming)  map.set(m.messageId, m);
 
-    // Sort ascending by timestamp.
+    // Sort ascending by timestamp. A null timestamp means the message was just
+    // sent and its serverTimestamp() hasn't resolved yet — it's the newest
+    // message, so it must sort to the BOTTOM (treat null as +Infinity), not the
+    // top. Using 0 here would date it to 1970 and float it above everything.
     const merged = Array.from(map.values()).sort((a, b) => {
-      const ta = a.timestamp?.getTime() ?? 0;
-      const tb = b.timestamp?.getTime() ?? 0;
+      const ta = a.timestamp?.getTime() ?? Number.POSITIVE_INFINITY;
+      const tb = b.timestamp?.getTime() ?? Number.POSITIVE_INFINITY;
       return ta - tb;
     });
 
