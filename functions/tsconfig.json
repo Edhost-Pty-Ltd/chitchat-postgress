@@ -2,9 +2,10 @@
   "compilerOptions": {
     "module": "commonjs",
     "target": "es2020",
+    "outDir": "../functions/lib",
+    "rootDir": "src",
     "noImplicitReturns": true,
-    "noUnusedLocals": true, 
-    
+    "noUnusedLocals": true,
     "sourceMap": true,
     "strict": true,
     "esModuleInterop": true,

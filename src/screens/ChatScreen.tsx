@@ -1425,6 +1425,54 @@ export default function ChatScreen() {
 
   const handleVoiceCall = useCallback(() => startCall(), [startCall]);
 
+  // ── Video call handler ──────────────────────────────────────────
+  const handleVideoCall = useCallback(async () => {
+    if (!userId || !otherUserId) {
+      Alert.alert('Cannot call', 'User information not available.');
+      return;
+    }
+    if (isGroup) {
+      Alert.alert('Not Supported', 'Group calls are not available.');
+      return;
+    }
+    try {
+      const calleePrivacy = await fetchUserPrivacySettings(otherUserId);
+      if (calleePrivacy.calls === 'Nobody') {
+        Alert.alert("Can't call", `${displayName} has turned off calls.`);
+        return;
+      }
+      const callerInfo = {
+        userId,
+        displayName: user?.displayName || user?.phoneNumber || 'You',
+        photoUrl: user?.photoURL || null,
+      };
+      const calleeInfo = {
+        userId: otherUserId,
+        displayName,
+        photoUrl: otherUserPhoto || null,
+      };
+      const callId = await outgoingCall.initiateCall(
+        userId,
+        otherUserId,
+        callerInfo,
+        calleeInfo,
+        'video',
+      );
+      if (callId) {
+        navigation.navigate('VideoCall', {
+          callId,
+          isOutgoing: true,
+          otherParty: calleeInfo,
+        });
+      } else {
+        Alert.alert('Error', 'Failed to start video call');
+      }
+    } catch (error) {
+      console.error('[ChatScreen] Error initiating video call:', error);
+      Alert.alert('Error', 'Failed to start video call');
+    }
+  }, [userId, otherUserId, isGroup, displayName, user, outgoingCall, navigation, otherUserPhoto]);
+
   // ── PanResponder for mic button ─────────────────────────────────
   const micPanResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => true,
@@ -2401,6 +2449,12 @@ export default function ChatScreen() {
             <TouchableOpacity style={styles.iconBtn} onPress={handleVoiceCall} disabled={outgoingCall.isInitiating}>
               <AppIcon name="call" size={20} color={COLORS.blue} fixedColor />
             </TouchableOpacity>
+
+            {!isGroup && (
+              <TouchableOpacity style={styles.iconBtn} onPress={handleVideoCall} disabled={outgoingCall.isInitiating}>
+                <AppIcon name="videocam-outline" size={22} color={COLORS.blue} fixedColor />
+              </TouchableOpacity>
+            )}
 
             <TouchableOpacity style={styles.iconBtn} onPress={() => setMenuOpen((v) => !v)}>
               <AppIcon name="ellipsis-vertical" size={20} color={COLORS.blue} fixedColor />

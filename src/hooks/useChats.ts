@@ -2,10 +2,14 @@
 // Real-time listener for the current user's chat list.
 //
 // COMPANION NOTE
-//   `ownerUid` is the real account uid. On a companion device, the Firestore
-//   rule resolves `effectiveUid()` via companionLinks/{anonUid}. If that doc
-//   hasn't propagated yet, the listener gets permission-denied. We retry with
-//   backoff to cover that race, and only surface an error after several tries.
+//   `ownerUid` is the real account uid. On both primary and companion devices,
+//   `auth.uid` equals the owner uid — the companion signs in with a Firebase
+//   Custom Token whose uid IS the owner uid (plus a `companion: true` claim).
+//   There is no `companionLinks` collection or `effectiveUid()` helper in the
+//   rules; the companion is authorised by virtue of sharing the owner uid.
+//   If the companion's custom token hasn't been issued yet (linking still in
+//   progress) the listener gets permission-denied. We retry with backoff to
+//   cover that race, and only surface an error after several tries.
 
 import { useState, useEffect } from 'react';
 import firestore from '@react-native-firebase/firestore';

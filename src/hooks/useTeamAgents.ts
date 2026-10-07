@@ -179,23 +179,39 @@ export async function removeAgent(
 
     await batch.commit();
 
-    // Unassign any open conversations assigned to this agent
-    const assignedSnap = await fsDb()
-      .collection('chats')
-      .where('members', 'array-contains', ownerUid)
-      .where('assignedTo', '==', agentUid)
-      .get();
+    // Unassign any open conversations assigned to this agent.
+    // This query needs a composite index on (members array-contains, assignedTo ==).
+    // If the index doesn't exist yet Firestore throws a failed-precondition error.
+    // We catch it so the agent removal still succeeds — the conversations will
+    // simply remain assigned to the now-removed agent uid until manually
+    // reassigned or until the index is created and a re-run completes the cleanup.
+    try {
+      const assignedSnap = await fsDb()
+        .collection('chats')
+        .where('members', 'array-contains', ownerUid)
+        .where('assignedTo', '==', agentUid)
+        .get();
 
-    if (!assignedSnap.empty) {
-      const unassignBatch = fsDb().batch();
-      assignedSnap.docs.forEach((doc) => {
-        unassignBatch.update(doc.ref, {
-          assignedTo:     null,
-          assignedToName: null,
-          status:         'open',
+      if (!assignedSnap.empty) {
+        const unassignBatch = fsDb().batch();
+        assignedSnap.docs.forEach((doc) => {
+          unassignBatch.update(doc.ref, {
+            assignedTo:     null,
+            assignedToName: null,
+            status:         'open',
+          });
         });
-      });
-      await unassignBatch.commit();
+        await unassignBatch.commit();
+      }
+    } catch (unassignErr: any) {
+      // Log but don't fail — agent is removed; conversations may need manual cleanup.
+      // Most likely cause: missing composite index for (members array-contains + assignedTo ==).
+      // Create it at: https://console.firebase.google.com/project/_/firestore/indexes
+      console.warn(
+        '[useTeamAgents] removeAgent: could not unassign conversations —',
+        unassignErr?.message ?? unassignErr,
+        '— agent was removed successfully; please create the required Firestore composite index.',
+      );
     }
 
     return { success: true };

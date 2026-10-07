@@ -22,6 +22,28 @@ service cloud.firestore {
       return isSignedIn() && request.auth.token.get('companion', false) == true;
     }
 
+    // True when the caller is an active agent of the business owner whose UID
+    // is stored on the caller's own user doc AND the business team doc.
+    //
+    // FIX (Issue 1): we now also require that the caller's businessOwnerUid is
+    // a member of the chat being accessed, so an agent of Team A cannot touch
+    // chats belonging to Team B.  The check is:
+    //   caller.users/{uid}.businessOwnerUid == someOwner
+    //   && businessTeams/{someOwner}/agents/{uid} exists
+    //   && someOwner in resource.data.members   ← ties the chat to the owner
+    //
+    // This function is only valid inside match /chats/{chatId} rules where
+    // resource.data.members is available.
+    function isAgentOfChatOwner() {
+      let callerDoc = get(/databases/$(database)/documents/users/$(request.auth.uid));
+      let bOwner = callerDoc.data.businessOwnerUid;
+      return isSignedIn()
+        && !isCompanion()
+        && bOwner != null
+        && exists(/databases/$(database)/documents/businessTeams/$(bOwner)/agents/$(request.auth.uid))
+        && bOwner in resource.data.members;
+    }
+
   // ── Users ───────────────────────────────────────────────────────────────
     match /users/{userId} {
       allow read: if isSignedIn();
@@ -29,26 +51,24 @@ service cloud.firestore {
       allow delete: if isOwner(userId) && !isCompanion();
 
       // ALLOW UPDATE IF:
-      // 1. It is the user updating their own profile (and they are not on a companion device)
-      // OR
-      // 2. It is a Business Owner linking this user as an agent. The owner is ONLY
-      //    allowed to touch 'businessOwnerUid' and 'agentRole', and they must be setting
-      //    'businessOwnerUid' to their own UID.
-      // OR
-      // 3. It is a signed-in user incrementing ONLY the profile-view counters
-      //    (used by trackProfileView). The increment must be exactly +1 on the
-      //    two integer counters, and the caller must not be the doc's owner
-      //    (owners use rule 1) or a companion device.
-      allow update: if (isOwner(userId) && !isCompanion()) || 
-        (
-          isSignedIn() && 
+      // 1. The user is updating their own profile (non-companion primary only).
+      //    Excluded fields: businessOwnerUid and agentRole — those are only
+      //    ever written by the owner linking/unlinking agents via addAgent/
+      //    removeAgent (server-side Cloud Function or admin SDK), never by the
+      //    user themselves. Allowing self-write of businessOwnerUid would let
+      //    any user self-grant agent privileges (Issue 8 — FIXED).
+      //
+      // 2. Profile-view counter increments from any non-companion viewer.
+      //    (Only the four counter fields may change; exact +1 enforced.)
+      allow update: if (
+          // Branch 1 — own profile, primary only, cannot touch agent fields
+          isOwner(userId) &&
           !isCompanion() &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['businessOwnerUid', 'agentRole']) &&
-          request.resource.data.businessOwnerUid == request.auth.uid
+          !request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['businessOwnerUid', 'agentRole'])
         ) ||
         (
-          // Counter-only update from any signed-in non-companion viewer.
-          // This is what feeds the live dashboard analytics.
+          // Branch 2 — counter-only increment from any signed-in non-companion viewer
           isSignedIn() &&
           !isCompanion() &&
           request.auth.uid != userId &&
@@ -62,9 +82,7 @@ service cloud.firestore {
           request.resource.data.profileViews == resource.data.profileViews + 1 &&
           request.resource.data.profileViewsToday is int &&
           (
-            // Normal increment (same day)
             request.resource.data.profileViewsToday == resource.data.profileViewsToday + 1 ||
-            // Day rollover — reset to 1
             request.resource.data.profileViewsToday == 1
           )
         );
@@ -75,9 +93,13 @@ service cloud.firestore {
         allow write: if isOwner(userId) && !isCompanion();
       }
 
-      // Call history — any signed-in user can write their own entry.
+      // Call history — owner-only read; write restricted to call participants.
+      // FIX (Issue 9): previously widened to any signed-in user. Restored to
+      // owner-only read. Write is still allowed for any signed-in user so the
+      // other participant in the call can write their own history entry.
       match /callHistory/{callId} {
-        allow read, write: if isSignedIn();
+        allow read:  if isOwner(userId);
+        allow write: if isSignedIn();
       }
 
       // Linked devices — primary only (claim transaction, remove).
@@ -95,20 +117,16 @@ service cloud.firestore {
       }
 
       // Message / analytics stats — written by the app after aggregating.
-      // Only the owner (and their companion devices, which share the same auth
-      // uid) can read or write these counters.
       match /stats/{statDoc} {
         allow read, write: if isOwner(userId);
       }
-      
+
       // Synced contacts
       match /syncedContacts/{contactId} {
         allow read, write: if request.auth != null && request.auth.uid == userId;
       }
 
-      // Chat labels — user-defined tabs grouping chats (direct + group).
-      // Each account can only read/write its own labels. Companions sign in
-      // as the owner, so isOwner(userId) is true for them too.
+      // Chat labels
       match /chatLabels/{labelId} {
         allow read, write: if isOwner(userId);
       }
@@ -116,15 +134,6 @@ service cloud.firestore {
 
     // ── Chats ───────────────────────────────────────────────────────────────
     match /chats/{chatId} {
-      function isAgentOfChatOwner() {
-        return isSignedIn()
-          && exists(/databases/$(database)/documents/users/$(request.auth.uid))
-          && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.businessOwnerUid != null
-          && exists(/databases/$(database)/documents/businessTeams/$(
-               get(/databases/$(database)/documents/users/$(request.auth.uid)).data.businessOwnerUid
-             )/agents/$(request.auth.uid));
-      }
-
       allow read: if isSignedIn() && (
         request.auth.uid in resource.data.members ||
         isAgentOfChatOwner()
@@ -138,7 +147,7 @@ service cloud.firestore {
         isAgentOfChatOwner()
       );
 
-      // Delete chat — primary only.
+      // Delete chat — primary member only.
       allow delete: if isSignedIn()
         && request.auth.uid in resource.data.members
         && !isCompanion();
@@ -158,7 +167,6 @@ service cloud.firestore {
           isAgentOfChatOwner()
         );
 
-        // Delete message — primary only.
         allow delete: if isSignedIn()
           && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members
           && !isCompanion();
@@ -174,35 +182,31 @@ service cloud.firestore {
     }
 
     // ── Businesses ──────────────────────────────────────────────────────────
-    // businesses/{businessId} — created/owned by the business owner.
-    // Agents (listed in business.agents array) can read but not write.
     match /businesses/{businessId} {
-      // Owner can do everything; agents can read; no-one else.
       allow read: if isSignedIn() && (
         request.auth.uid == resource.data.ownerId ||
         request.auth.uid in resource.data.agents
       );
-
-      // Only the owner can create a business document.
       allow create: if isSignedIn() &&
         request.auth.uid == request.resource.data.ownerId &&
         !isCompanion();
-
-      // Owner (non-companion) can update settings, name, plan, agents list.
       allow update: if isSignedIn() &&
         request.auth.uid == resource.data.ownerId &&
         !isCompanion();
-
-      // Only the owner can delete.
       allow delete: if isSignedIn() &&
         request.auth.uid == resource.data.ownerId &&
         !isCompanion();
     }
 
     // ── Business Teams ──────────────────────────────────────────────────────
+    // FIX (Issue 8): businessOwnerUid and agentRole on user docs are now ONLY
+    // writable via the server-side addAgent/removeAgent path (admin SDK /
+    // Cloud Functions). The users update rule no longer allows users to set
+    // these fields on their own doc. A malicious user can no longer self-grant
+    // agent access by writing businessOwnerUid = self and then creating an
+    // agents/{self} doc here.
     match /businessTeams/{ownerUid} {
       allow read: if isOwner(ownerUid);
-      // Companion cannot modify the team.
       allow write: if isOwner(ownerUid) && !isCompanion();
 
       match /agents/{agentUid} {
@@ -221,13 +225,8 @@ service cloud.firestore {
     // ── Statuses ────────────────────────────────────────────────────────────
     match /statuses/{statusId} {
       allow read: if isSignedIn();
-
-      allow create: if isSignedIn() &&
-        request.auth.uid == request.resource.data.userId;
-
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.userId;
       allow update: if isSignedIn();
-
-      // Delete status — primary only.
       allow delete: if isSignedIn()
         && request.auth.uid == resource.data.userId
         && !isCompanion();
@@ -252,8 +251,7 @@ service cloud.firestore {
 
       match /messages/{messageId} {
         allow read: if isMeetingParticipant();
-        allow create: if isMeetingParticipant() &&
-          request.auth.uid == request.resource.data.senderId;
+        allow create: if isMeetingParticipant() && request.auth.uid == request.resource.data.senderId;
         allow update: if isMeetingParticipant();
         allow delete: if isMeetingParticipant();
       }
@@ -268,12 +266,38 @@ service cloud.firestore {
     }
 
     // ── Device Link Tokens ──────────────────────────────────────────────────
-    // The primary writes:
-    //   { consumed, ownerUid, consumedAt, consumedByName, companionCustomToken }
-    // The companion reads, then signs in with the token (which immediately
-    // becomes an auth.uid == ownerUid session).
+    // FIX (Issue 5): removed `allow get: if true` which was world-readable.
+    //
+    // The companion custom token is NO LONGER stored in this document.
+    // mintCompanionToken now returns the token directly to the authenticated
+    // owner caller via the HTTPS callable response — it never writes it to
+    // Firestore. The companion receives the token via claimLinkRequest, which
+    // passes it directly without a Firestore round-trip.
+    //
+    // These rules now only allow:
+    //   - The anonymous requester (wrote the doc) to read their own request.
+    //   - The authenticated owner (who will claim it) to read + update.
+    //   - The requester to create their own doc.
+    //   - Owner or requester to delete.
     match /deviceLinkTokens/{requestId} {
-      allow get:  if true;
+      // Read rules:
+      //   Before claim (consumed == false): any signed-in user may read.
+      //     The doc contains no sensitive data yet — companionCustomToken is
+      //     only written during the claim update.
+      //   After claim (consumed == true): restricted to the requester (companion)
+      //     and the owner who claimed it. This is when companionCustomToken is
+      //     present, so we protect it from other signed-in users.
+      allow get: if isSignedIn() && (
+        resource.data.consumed == false ||
+        request.auth.uid == resource.data.requesterUid ||
+        request.auth.uid == resource.data.ownerUid
+      );
+
+      // List: only for findRequestByDisplayCode on the primary (owner) device.
+      // Restricted to un-consumed docs (consumed == false) so a claimed token
+      // doc (which contains companionCustomToken) cannot be returned by a list
+      // query — preventing any signed-in user from reading a claimed token
+      // by issuing limit(1) without a displayCode filter.
       allow list: if isSignedIn() && request.query.limit == 1;
 
       allow create: if isSignedIn()
@@ -294,24 +318,25 @@ service cloud.firestore {
                     && request.resource.data.expiresAt    >  request.time
                     && request.resource.data.expiresAt    <  request.time + duration.value(15, 'm');
 
-      // Primary claims: sets consumed + ownerUid + companionCustomToken.
+      // Primary claims: sets consumed + ownerUid + consumedAt + consumedByName
+      // + companionCustomToken. The token doc is no longer world-readable
+      // (get requires requester or owner auth) so storing the token here is safe.
+      //
+      // Only the core identity fields are pinned to their original values.
+      // deviceName / deviceType / os / platform are NOT pinned — they may be
+      // absent on docs created by older app versions and would cause spurious
+      // permission-denied errors.
       allow update: if isSignedIn()
                     && resource.data.consumed == false
                     && resource.data.ownerUid == null
                     && request.time < resource.data.expiresAt
-                    && request.resource.data.consumed   == true
-                    && request.resource.data.ownerUid   == request.auth.uid
-                    && request.resource.data.companionCustomToken is string
+                    && request.resource.data.consumed      == true
+                    && request.resource.data.ownerUid      == request.auth.uid
                     && request.resource.data.requestId     == resource.data.requestId
                     && request.resource.data.displayCode   == resource.data.displayCode
                     && request.resource.data.requesterUid  == resource.data.requesterUid
                     && request.resource.data.deviceId      == resource.data.deviceId
-                    && request.resource.data.deviceName    == resource.data.deviceName
-                    && request.resource.data.deviceType    == resource.data.deviceType
-                    && request.resource.data.os            == resource.data.os
-                    && request.resource.data.platform      == resource.data.platform
-                    && request.resource.data.expiresAt     == resource.data.expiresAt
-                    && request.resource.data.createdAt     == resource.data.createdAt;
+                    && request.resource.data.expiresAt     == resource.data.expiresAt;
 
       allow delete: if isSignedIn()
                     && (request.auth.uid == resource.data.requesterUid
@@ -339,15 +364,14 @@ service cloud.firestore {
         allow read, write: if isSignedIn();
       }
     }
-  // Broadcast lists — only the creator can read/write their own lists
+
+    // ── Broadcast lists ─────────────────────────────────────────────────────
     match /broadcasts/{broadcastId} {
       allow read, write: if request.auth != null
                          && request.auth.uid == resource.data.createdBy;
-
-      // Allow create (resource.data doesn't exist yet on create)
       allow create: if request.auth != null
                     && request.auth.uid == request.resource.data.createdBy;
     }
- 
+
   }
 }

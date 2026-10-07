@@ -2,3 +2,7 @@ node_modules/
 lib/
 *.local
 .env
+
+# Compiled output — tsc emits into lib/, never into src/
+src/*.js
+src/*.js.map

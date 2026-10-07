@@ -43,8 +43,17 @@ function docToInbox(doc: firestore.QueryDocumentSnapshot): InboxConversation {
 }
 
 // ─── useInboxConversations ────────────────────────────────────────────────────
-// Real-time listener for ALL inbox conversations visible to this agent.
-// Admins see everything; agents see only their assigned + unassigned open ones.
+// Real-time listener for inbox conversations visible to this agent.
+//
+// BOUNDED QUERIES (Issue 6 fix):
+//   Admins:     single query — all of the owner's chats, capped at 200.
+//   Non-admins: two parallel server-side queries, each capped at 100:
+//                 1. Chats assigned to this agent (open or assigned status).
+//                 2. Unassigned open chats (available to take).
+//
+//   This pushes visibility filtering to the server so a regular agent's device
+//   never downloads conversations assigned to other agents or resolved chats.
+//   Results from both queries are merged, de-duped, and sorted client-side.
 export function useInboxConversations(
   ownerUid: string | null,
   currentUid: string | null,
@@ -63,44 +72,97 @@ export function useInboxConversations(
 
     setLoading(true);
 
-    // Business chats: all chats where the owner UID is a member.
-    // We then filter client-side by assignment for non-admins to keep
-    // Firestore index requirements simple.
-    const unsub = fsDb()
+    const ADMIN_LIMIT = 200;
+    const AGENT_LIMIT = 100;
+
+    // ── Merge helper ─────────────────────────────────────────────────────────
+    // Merges two result arrays, de-dupes by chatId, and sorts.
+    const mergeAndSort = (a: InboxConversation[], b: InboxConversation[]) => {
+      const map = new Map<string, InboxConversation>();
+      [...a, ...b].forEach((c) => map.set(c.chatId, c));
+      return Array.from(map.values()).sort((x, y) => {
+        if (x.status === 'resolved' && y.status !== 'resolved') return 1;
+        if (x.status !== 'resolved' && y.status === 'resolved') return -1;
+        const tx = x.timestamp?.getTime() ?? 0;
+        const ty = y.timestamp?.getTime() ?? 0;
+        return ty - tx;
+      });
+    };
+
+    if (isAdmin) {
+      // ── Admin path: bounded single query ─────────────────────────────────
+      const unsub = fsDb()
+        .collection('chats')
+        .where('members', 'array-contains', ownerUid)
+        .orderBy('lastMessage.timestamp', 'desc')
+        .limit(ADMIN_LIMIT)
+        .onSnapshot(
+          (snap) => {
+            const result = snap.docs.map(docToInbox).sort((a, b) => {
+              if (a.status === 'resolved' && b.status !== 'resolved') return 1;
+              if (a.status !== 'resolved' && b.status === 'resolved') return -1;
+              const ta = a.timestamp?.getTime() ?? 0;
+              const tb = b.timestamp?.getTime() ?? 0;
+              return tb - ta;
+            });
+            setConversations(result);
+            setLoading(false);
+          },
+          (err) => { setError(err.message); setLoading(false); },
+        );
+      return () => unsub();
+    }
+
+    // ── Non-admin path: two bounded server-side queries ───────────────────
+    // Query 1: chats assigned to this agent (open or assigned)
+    // Query 2: unassigned open chats (available pool)
+    //
+    // Both queries scope to the owner's chats via `members array-contains`.
+    // Each result set is kept in a ref so merging is correct when either fires.
+
+    let assigned: InboxConversation[] = [];
+    let unassigned: InboxConversation[] = [];
+    let bothLoaded = 0; // incremented to 2 once both queries have fired once
+
+    const notify = () => {
+      if (bothLoaded < 2) return; // wait for both queries to fire at least once
+      setConversations(mergeAndSort(assigned, unassigned));
+      setLoading(false);
+    };
+
+    const unsub1 = fsDb()
       .collection('chats')
       .where('members', 'array-contains', ownerUid)
+      .where('assignedTo', '==', currentUid)
+      .where('status', 'in', ['open', 'assigned'])
+      .orderBy('lastMessage.timestamp', 'desc')
+      .limit(AGENT_LIMIT)
       .onSnapshot(
         (snap) => {
-          let result = snap.docs.map(docToInbox);
-
-          // Non-admins only see open/unassigned + their own assigned conversations
-          if (!isAdmin) {
-            result = result.filter(
-              (c) =>
-                c.status !== 'resolved' &&
-                (c.assignedTo === null || c.assignedTo === currentUid),
-            );
-          }
-
-          // Sort: unresolved first, then by most recent message
-          result.sort((a, b) => {
-            if (a.status === 'resolved' && b.status !== 'resolved') return 1;
-            if (a.status !== 'resolved' && b.status === 'resolved') return -1;
-            const ta = a.timestamp?.getTime() ?? 0;
-            const tb = b.timestamp?.getTime() ?? 0;
-            return tb - ta;
-          });
-
-          setConversations(result);
-          setLoading(false);
+          assigned = snap.docs.map(docToInbox);
+          if (bothLoaded < 2) bothLoaded++;
+          notify();
         },
-        (err) => {
-          setError(err.message);
-          setLoading(false);
-        },
+        (err) => { setError(err.message); setLoading(false); },
       );
 
-    return () => unsub();
+    const unsub2 = fsDb()
+      .collection('chats')
+      .where('members', 'array-contains', ownerUid)
+      .where('assignedTo', '==', null)
+      .where('status', '==', 'open')
+      .orderBy('lastMessage.timestamp', 'desc')
+      .limit(AGENT_LIMIT)
+      .onSnapshot(
+        (snap) => {
+          unassigned = snap.docs.map(docToInbox);
+          if (bothLoaded < 2) bothLoaded++;
+          notify();
+        },
+        (err) => { setError(err.message); setLoading(false); },
+      );
+
+    return () => { unsub1(); unsub2(); };
   }, [ownerUid, currentUid, isAdmin]);
 
   return { conversations, loading, error };
@@ -159,6 +221,18 @@ export function useAssignmentHistory(chatId: string | null) {
         (snap) => {
           const entries: AssignmentHistoryEntry[] = snap.docs.map((doc) => {
             const d = doc.data();
+            // d.timestamp is null locally until the server resolves serverTimestamp().
+            // Coalesce to Date.now() so freshly written entries sort to the top
+            // rather than producing Invalid Date and landing at an undefined position.
+            let ts: Date;
+            if (d.timestamp && typeof d.timestamp.toDate === 'function') {
+              ts = d.timestamp.toDate();
+            } else if (d.timestamp) {
+              const parsed = new Date(d.timestamp);
+              ts = isNaN(parsed.getTime()) ? new Date() : parsed;
+            } else {
+              ts = new Date(); // pending server timestamp — treat as "just now"
+            }
             return {
               id:        doc.id,
               action:    d.action,
@@ -166,7 +240,7 @@ export function useAssignmentHistory(chatId: string | null) {
               byName:    d.byName,
               toUid:     d.toUid     ?? null,
               toName:    d.toName    ?? null,
-              timestamp: d.timestamp?.toDate ? d.timestamp.toDate() : new Date(d.timestamp),
+              timestamp: ts,
               note:      d.note      ?? undefined,
             };
           });

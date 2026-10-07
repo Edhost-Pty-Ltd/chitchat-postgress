@@ -2,7 +2,7 @@
 // Server-side maintenance, cleanup, and companion-device linking.
 
 import { initializeApp, getApps } from 'firebase-admin/app';
-import { getFirestore, Timestamp as AdminTimestamp } from 'firebase-admin/firestore';
+import { getFirestore, Timestamp as AdminTimestamp, FieldValue } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import { getAuth } from 'firebase-admin/auth';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
@@ -356,3 +356,94 @@ export const sendMessageNotification = onDocumentWritten(
     logger.info(`[sendMessageNotification] Sent ${pushMessages.length} push(es) for chat ${event.params.chatId}`);
   },
 );
+
+// ─── Revoke companion device token ─────────────────────────────────────────
+// Called by the primary device immediately after deleting a linkedDevices doc.
+// Calls admin.auth().revokeRefreshTokens(ownerUid) so that any companion
+// holding a custom-token session for that ownerUid is forced to re-authenticate
+// on their next ID-token refresh (within 1 hour). This closes the gap where a
+// non-cooperative companion could ignore the client-side watchCompanionLink
+// listener and keep a live owner session indefinitely.
+//
+// Security:
+//  - Caller must be signed in as the primary (non-companion) owner.
+//  - The companion claim on a revoked session causes ID-token refresh to fail,
+//    signing the companion out on their next Firestore call.
+export const revokeDeviceToken = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'You must be signed in.');
+  }
+
+  const ownerUid = request.auth.uid;
+
+  // Companions cannot revoke tokens — only the primary owner can.
+  if (request.auth.token?.companion === true) {
+    throw new HttpsError('permission-denied', 'Companion devices cannot revoke tokens.');
+  }
+
+  // Revoke all refresh tokens issued for this UID. Any session (including
+  // companions) will be forced to re-authenticate within the ID-token TTL
+  // (~1 hour). Since companions sign in with a custom token whose uid equals
+  // the owner uid, this covers them.
+  try {
+    await getAuth().revokeRefreshTokens(ownerUid);
+    logger.info('[revokeDeviceToken] Revoked refresh tokens for uid:', ownerUid);
+  } catch (err: any) {
+    logger.error('[revokeDeviceToken] Failed to revoke tokens:', err?.message);
+    throw new HttpsError('internal', 'Failed to revoke tokens. Please try again.');
+  }
+
+  return { ok: true };
+});
+
+// ─── Profile View Tracker ────────────────────────────────────────────────────
+// Callable that atomically increments profileViews / profileViewsToday on
+// users/{viewedUid} using the Admin SDK, which bypasses client-side rules
+// entirely. Running server-side closes two gaps:
+//   1. A client could call increment() repeatedly — the server enforces one
+//      call per invocation and the caller can't forge the result.
+//   2. The client-side rule "profileViews == resource + 1" silently fails on
+//      the very first view because the field doesn't exist yet; the Admin SDK
+//      FieldValue.increment() initialises a missing field to 0 then adds 1.
+export const recordProfileView = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Must be signed in to record a profile view.');
+  }
+
+  const viewerUid = request.auth.uid;
+  const viewedUid = (request.data?.viewedUid ?? '') as string;
+
+  if (!viewedUid || typeof viewedUid !== 'string') {
+    throw new HttpsError('invalid-argument', 'viewedUid is required.');
+  }
+  // Silently ignore self-views — don't inflate the owner's own counter.
+  if (viewerUid === viewedUid) return { ok: true };
+
+  const dbAdmin = getFirestore();
+  const userRef = dbAdmin.collection('users').doc(viewedUid);
+
+  const now = new Date();
+  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+  const snap = await userRef.get();
+  const storedDayKey: string = snap.exists ? (snap.data()?.profileViewsDayKey ?? '') : '';
+
+  // Reset today's counter when the day rolls over; otherwise increment.
+  // FieldValue.increment(1) initialises to 1 if the field is absent.
+  const todayIncrement = storedDayKey === todayKey
+    ? FieldValue.increment(1)
+    : 1;
+
+  await userRef.set(
+    {
+      profileViews:          FieldValue.increment(1),
+      profileViewsToday:     todayIncrement,
+      profileViewsDayKey:    todayKey,
+      profileViewsUpdatedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true },
+  );
+
+  logger.info('[recordProfileView]', { viewerUid, viewedUid });
+  return { ok: true };
+});

@@ -9,18 +9,30 @@
 //   3. Signed-in device (primary) scans QR or types code.
 //   4. Primary calls claimLinkRequest(requestId, ownerUid, ownerName):
 //        a. Cloud Function mintCompanionToken() → returns a custom token
-//           tagged { companion: true, deviceId } for the primary's uid.
-//        b. Firestore transaction writes consumed:true, ownerUid, and the
-//           custom token into the link doc, plus a linkedDevices entry.
-//   5. New device's pollForApproval() reads the doc, sees the custom token,
-//      and signs in with it — its auth.uid is now the owner's uid.
+//           tagged { companion: true } directly to the primary caller.
+//           The token is NEVER written to Firestore (Issue 5 fix).
+//        b. Firestore transaction sets consumed:true, ownerUid on the link
+//           doc, and creates a linkedDevices entry for the companion.
+//        c. The custom token is passed back through claimLinkRequest's
+//           return value so SignInScreen can hand it to pollForApproval
+//           via a separate out-of-band channel (e.g. deep link / local state).
 //
 // Removal:
 //   When the primary deletes users/{owner}/linkedDevices/{deviceId}:
-//     • Firestore rules immediately stop honouring that companion's token
-//       (see companionStillLinked() in firestore.rules).
-//     • The companion's watchCompanionLink() listener fires, and
-//       useCompanionLinkGuard() signs it out so the app returns to sign-in.
+//     • removeDevice() immediately calls the revokeDeviceToken Cloud Function,
+//       which calls admin.auth().revokeRefreshTokens(ownerUid). Any companion
+//       session will be invalidated on its next ID-token refresh (~1 hour max).
+//     • The companion's watchCompanionLink() listener also fires cooperatively
+//       and signs it out immediately if it is still running.
+//
+// NOTE: enforcement of removal is now two-layer:
+//   1. Server-side token revocation via revokeDeviceToken (non-cooperative
+//      companions are forced out within the ID-token TTL).
+//   2. Client-side cooperative sign-out via watchCompanionLink (immediate for
+//      honest clients).
+// There is NO Firestore-rule-level allowlist check — that would require a
+// server-side read on every request which is too expensive. Token revocation
+// is the correct mechanism for this use case.
 //
 import { useState, useEffect, useRef } from 'react';
 import { Platform, Alert } from 'react-native';
@@ -155,16 +167,20 @@ export async function createLinkRequest(): Promise<LinkRequest | null> {
   const requestId   = randomHex(32);
   const displayCode = randomDisplayCode(10);
 
-  // The new device needs a temporary identity to write the token doc — an
-  // anonymous Firebase Auth user. It is discarded once the primary claims the
-  // request (the companion will sign in with a custom token instead).
+  // The new device needs a temporary anonymous identity to write the token doc.
+  // IMPORTANT: only reuse an existing session if it's already anonymous.
+  // If the current user is signed in as a real account (the primary), we must
+  // still create a fresh anon UID — otherwise requesterUid === ownerUid, which
+  // triggers the "cannot link a device to itself" check in mintCompanionToken.
   let requesterUid: string | null = null;
   try {
     const auth = getAuth();
     const existing = auth.currentUser;
-    if (existing) {
+    if (existing && existing.isAnonymous) {
+      // Already an anonymous session — safe to reuse
       requesterUid = existing.uid;
     } else {
+      // Signed in as a real account, or not signed in at all — create a fresh anon UID
       const { signInAnonymously } = require('@react-native-firebase/auth');
       const cred = await signInAnonymously(auth);
       requesterUid = cred.user?.uid ?? null;
@@ -468,6 +484,17 @@ export async function removeDevice(ownerUid: string, deviceId: string): Promise<
     .collection('users').doc(ownerUid)
     .collection('linkedDevices').doc(deviceId)
     .delete();
+
+  // Revoke all refresh tokens for this owner so any companion sessions are
+  // invalidated server-side within the ID-token TTL (~1 hour).
+  // This is non-cooperative revocation — it works even if the companion
+  // ignores the watchCompanionLink listener.
+  try {
+    const fn = httpsCallable(getFunctions(), 'revokeDeviceToken');
+    await fn({});
+  } catch (err) {
+    console.warn('[useLinkedDevices] revokeDeviceToken failed (non-fatal):', err);
+  }
 }
 
 export async function removeAllOtherDevices(ownerUid: string, currentDeviceId: string): Promise<void> {
@@ -482,6 +509,15 @@ export async function removeAllOtherDevices(ownerUid: string, currentDeviceId: s
     if (doc.id !== currentDeviceId) batch.delete(doc.ref);
   });
   await batch.commit();
+
+  // Revoke all refresh tokens — companions on the removed devices will be
+  // forced out on their next ID-token refresh.
+  try {
+    const fn = httpsCallable(getFunctions(), 'revokeDeviceToken');
+    await fn({});
+  } catch (err) {
+    console.warn('[useLinkedDevices] revokeDeviceToken failed (non-fatal):', err);
+  }
 }
 
 // ─── verifyCompanionStillLinked ───────────────────────────────────────────────

@@ -11,10 +11,13 @@
 // so the code still decodes reliably even with the logo overlay.
 //
 // COMPANION NOTE
-//   The companion keeps its anonymous Firebase Auth session ALIVE after
-//   linking. That session is what gives the companion a Firebase Auth uid,
-//   which the rules use (via companionLinks/{anonUid}) to authorise reads
-//   and writes on the owner's behalf. Do NOT sign it out.
+//   After linking, the companion signs in with a Firebase Custom Token whose
+//   auth.uid equals the owner uid plus a { companion: true } claim. The
+//   anonymous session used during the linking handshake is discarded once
+//   sign-in with the custom token succeeds (AuthContext.signInAsCompanion).
+//   Removal is enforced server-side via revokeDeviceToken (Cloud Function)
+//   which calls admin.auth().revokeRefreshTokens so non-cooperative companions
+//   are invalidated within the ID-token TTL (~1 hour).
 //
 import React, { useState, useRef, useMemo } from 'react';
 import {
