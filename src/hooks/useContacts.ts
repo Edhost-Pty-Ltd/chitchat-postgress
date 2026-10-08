@@ -5,6 +5,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { getContactsAsync, requestPermissionsAsync, Fields } from 'expo-contacts/legacy';
 import firestore from '@react-native-firebase/firestore';
 import { normalizePhone, chunkArray } from '../utils/phoneUtils';
+import { useBackend } from '../config/featureFlags';
+import { endpoints } from '../api/endpoints';
 
 export interface AppContact {
   userId:            string;        // Normalized phone number (used as unique key)
@@ -87,27 +89,48 @@ export function useContacts() {
         return;
       }
 
-      // ── 3. Check Firestore to see which contacts are registered ────────
+      // ── 3. Check which contacts are registered ─────────────────────────
       const phones = Array.from(contactsByPhone.keys());
-      const chunks = chunkArray(phones, 30);
       const registeredUsers = new Map<string, { userId: string; photoURL?: string }>();
 
-      for (const chunk of chunks) {
-        const snap = await firestore()
-          .collection('users')
-          .where('phone', 'in', chunk)
-          .get();
+      if (useBackend('users')) {
+        // Backend applies privacy filtering and block exclusion server-side.
+        // Chunk by the backend's 500-number cap (Req 4.5).
+        const chunks = chunkArray(phones, 500);
+        for (const chunk of chunks) {
+          const res = await endpoints.matchContacts(chunk);
+          if (!res.ok) {
+            console.error('[useContacts] backend match failed:', res.error);
+            continue;
+          }
+          for (const m of res.data.matches) {
+            if (m.phoneNumber) {
+              registeredUsers.set(m.phoneNumber, {
+                userId: m.userId,
+                photoURL: m.avatarObjectKey ?? undefined,
+              });
+            }
+          }
+        }
+      } else {
+        const chunks = chunkArray(phones, 30);
+        for (const chunk of chunks) {
+          const snap = await firestore()
+            .collection('users')
+            .where('phone', 'in', chunk)
+            .get();
 
-        for (const doc of snap.docs) {
-          const data          = doc.data();
-          const phone         = data.phone as string;
-          const photoPrivacy  = data.privacyProfilePhoto ?? 'Contacts';
-          const firebasePhotoURL = photoPrivacy === 'Nobody' ? null : (data.photoURL || null);
+          for (const doc of snap.docs) {
+            const data          = doc.data();
+            const phone         = data.phone as string;
+            const photoPrivacy  = data.privacyProfilePhoto ?? 'Contacts';
+            const firebasePhotoURL = photoPrivacy === 'Nobody' ? null : (data.photoURL || null);
 
-          registeredUsers.set(phone, {
-            userId: doc.id,
-            photoURL: firebasePhotoURL ?? undefined,
-          });
+            registeredUsers.set(phone, {
+              userId: doc.id,
+              photoURL: firebasePhotoURL ?? undefined,
+            });
+          }
         }
       }
 

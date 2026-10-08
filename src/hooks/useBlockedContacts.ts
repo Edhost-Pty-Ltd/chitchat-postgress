@@ -2,6 +2,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
+import { useBackend } from '../config/featureFlags';
+import { endpoints } from '../api/endpoints';
 
 export interface BlockedContact {
   userId: string;
@@ -122,9 +124,35 @@ export function useBlockedContacts(currentUserId: string | null) {
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
 
+  const backend = useBackend('users');
+
+  const reloadBackend = useCallback(async () => {
+    const res = await endpoints.listBlocks();
+    if (res.ok) {
+      setBlockedContacts(
+        res.data.blocked.map((b) => ({
+          userId: b.userId,
+          displayName: b.displayName || 'Unknown',
+          photoURL: b.photoObjectKey,
+          phone: b.phone ?? undefined,
+          blockedAt: new Date(b.blockedAt),
+          lastSeenAtBlock: b.lastSeenAtBlock ? new Date(b.lastSeenAtBlock) : undefined,
+        })),
+      );
+    } else {
+      setError('error' in res ? String(res.error.code) : 'Failed to load');
+    }
+    setLoading(false);
+  }, []);
+
   useEffect(() => {
     if (!currentUserId) { setBlockedContacts([]); setLoading(false); return; }
     setLoading(true);
+
+    if (backend) {
+      void reloadBackend();
+      return;
+    }
 
     const unsub = fsDb()
       .collection('users').doc(currentUserId).collection('blockedUsers')
@@ -148,7 +176,7 @@ export function useBlockedContacts(currentUserId: string | null) {
       );
 
     return () => unsub();
-  }, [currentUserId]);
+  }, [currentUserId, backend, reloadBackend]);
 
   const blockContact = useCallback(
     async (
@@ -157,6 +185,17 @@ export function useBlockedContacts(currentUserId: string | null) {
     ): Promise<{ success: boolean; error?: string }> => {
       if (!currentUserId) return { success: false, error: 'Not authenticated' };
       try {
+        if (backend) {
+          const res = await endpoints.blockUser(userId, {
+            displayName,
+            photoObjectKey: photoURL || null,
+            phone: phone || null,
+          });
+          if (!res.ok) return { success: false, error: String(res.error.code) };
+          await reloadBackend();
+          return { success: true };
+        }
+
         const currentUserSnap = await fsDb().collection('users').doc(currentUserId).get();
         const currentLastSeen = currentUserSnap.exists ? currentUserSnap.data()!.lastSeen : null;
 
@@ -174,7 +213,7 @@ export function useBlockedContacts(currentUserId: string | null) {
         return { success: false, error: err.message };
       }
     },
-    [currentUserId],
+    [currentUserId, backend, reloadBackend],
   );
 
   const unblockContact = useCallback(
@@ -183,6 +222,13 @@ export function useBlockedContacts(currentUserId: string | null) {
     ): Promise<{ success: boolean; error?: string }> => {
       if (!currentUserId) return { success: false, error: 'Not authenticated' };
       try {
+        if (backend) {
+          const res = await endpoints.unblockUser(userId);
+          if (!res.ok) return { success: false, error: String(res.error.code) };
+          await reloadBackend();
+          return { success: true };
+        }
+
         const blockedRef  = fsDb().collection('users').doc(currentUserId).collection('blockedUsers').doc(userId);
         const blockedSnap = await blockedRef.get();
         let contactDisplayName = displayName;
@@ -198,7 +244,7 @@ export function useBlockedContacts(currentUserId: string | null) {
         return { success: false, error: err.message };
       }
     },
-    [currentUserId],
+    [currentUserId, backend, reloadBackend],
   );
 
   const isContactBlocked = useCallback(

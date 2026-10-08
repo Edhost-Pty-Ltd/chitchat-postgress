@@ -13,6 +13,7 @@ import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { startStatusCleanupService, stopStatusCleanupService } from '../services/statusCleanupService';
 import { writePresence } from '../hooks/usePresence';
+import { socketClient } from '../realtime/socket';
 import { FirebaseAuthTypes } from '@react-native-firebase/auth'; // Add this import at the top
 const WEB_SESSION_TIMEOUT_MS = 4 * 60 * 60 * 1000; // 4 hours
 
@@ -102,6 +103,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {}
 
     stopStatusCleanupService();
+
+    // Disconnect the backend socket and clear its cached state (Req 2.10).
+    try {
+      socketClient.disconnect();
+    } catch {}
 
     try {
       await fbSignOut(getAuth());

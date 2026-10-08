@@ -4,6 +4,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
+import { useBackend } from '../config/featureFlags';
+import { endpoints } from '../api/endpoints';
 
 export type Visibility = 'Everyone' | 'Contacts' | 'Nobody';
 
@@ -54,8 +56,23 @@ export function usePrivacySettings(userId: string | null) {
   const [loading,  setLoading]  = useState(true);
   const [saving,   setSaving]   = useState(false);
 
+  const backend = useBackend('users');
+
   useEffect(() => {
     if (!userId) { setLoading(false); return; }
+
+    if (backend) {
+      let active = true;
+      endpoints
+        .getPrivacy()
+        .then((res) => {
+          if (!active) return;
+          if (res.ok) setSettings(res.data);
+          setLoading(false);
+        })
+        .catch(() => active && setLoading(false));
+      return () => { active = false; };
+    }
 
     const fsDb = db as ReturnType<typeof firestore>;
     const unsub = fsDb.collection('users').doc(userId).onSnapshot(
@@ -68,26 +85,33 @@ export function usePrivacySettings(userId: string | null) {
     );
 
     return () => unsub();
-  }, [userId]);
+  }, [userId, backend]);
 
   const updateSetting = useCallback(
     async <K extends keyof PrivacySettings>(key: K, value: PrivacySettings[K]): Promise<void> => {
       if (!userId) return;
-      setSettings((prev) => ({ ...prev, [key]: value }));
+      // Optimistic update, then persist the full settings object.
+      const next = { ...settings, [key]: value } as PrivacySettings;
+      setSettings(next);
       setSaving(true);
       try {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(userId).set(
-          { [FIELD_MAP[key]]: value },
-          { merge: true },
-        );
+        if (backend) {
+          const res = await endpoints.updatePrivacy(next);
+          if (res.ok) setSettings(res.data);
+        } else {
+          const fsDb = db as ReturnType<typeof firestore>;
+          await fsDb.collection('users').doc(userId).set(
+            { [FIELD_MAP[key]]: value },
+            { merge: true },
+          );
+        }
       } catch (err) {
         console.error('[usePrivacySettings] Failed to save:', key, err);
       } finally {
         setSaving(false);
       }
     },
-    [userId],
+    [userId, backend, settings],
   );
 
   const saveAll = useCallback(
@@ -96,19 +120,24 @@ export function usePrivacySettings(userId: string | null) {
       setSettings(s);
       setSaving(true);
       try {
-        const patch: Record<string, unknown> = {};
-        (Object.keys(FIELD_MAP) as (keyof PrivacySettings)[]).forEach((k) => {
-          patch[FIELD_MAP[k]] = s[k];
-        });
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(userId).set(patch, { merge: true });
+        if (backend) {
+          const res = await endpoints.updatePrivacy(s);
+          if (res.ok) setSettings(res.data);
+        } else {
+          const patch: Record<string, unknown> = {};
+          (Object.keys(FIELD_MAP) as (keyof PrivacySettings)[]).forEach((k) => {
+            patch[FIELD_MAP[k]] = s[k];
+          });
+          const fsDb = db as ReturnType<typeof firestore>;
+          await fsDb.collection('users').doc(userId).set(patch, { merge: true });
+        }
       } catch (err) {
         console.error('[usePrivacySettings] Failed to save all:', err);
       } finally {
         setSaving(false);
       }
     },
-    [userId],
+    [userId, backend],
   );
 
   return { settings, loading, saving, updateSetting, saveAll };

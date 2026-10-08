@@ -6,6 +6,9 @@ import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import type { FireStatus } from '../types';
 import { uploadFile, generateFileName, getFileExtension, deleteFile } from '../config/storage';
+import { useBackend } from '../config/featureFlags';
+import { endpoints, type BackendStatus } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
 
 export const IMAGE_STATUS_DURATION_MS = 5000;
 export const VIDEO_STATUS_DURATION_MS = 15000;
@@ -33,14 +36,75 @@ function isExpired(expiresAt: Date): boolean {
   return new Date() > expiresAt;
 }
 
+/** Map a backend status to the FireStatus shape the UI consumes. */
+function backendToFireStatus(s: BackendStatus): FireStatus {
+  return {
+    statusId: s.statusId,
+    userId: s.userId,
+    displayName: s.displayName ?? '',
+    userPhone: s.userPhone ?? null,
+    photoURL: null, // avatar object-key resolution is Slice 6
+    mediaUrl: s.mediaObjectKey, // object key until Slice 6 resolves to a URL
+    mediaType: s.mediaType,
+    thumbnailUrl: s.thumbnailObjectKey,
+    durationMs: s.durationMs ?? IMAGE_STATUS_DURATION_MS,
+    caption: s.caption,
+    backgroundColor: s.backgroundColor,
+    textColor: s.textColor,
+    createdAt: new Date(s.createdAt),
+    expiresAt: new Date(s.expiresAt),
+    viewedBy: s.viewedBy,
+    visibility: s.visibility,
+  };
+}
+
 export function useStatus(currentUserId: string | null) {
   const [myStatuses,      setMyStatuses]      = useState<FireStatus[]>([]);
   const [contactStatuses, setContactStatuses] = useState<StatusGroup[]>([]);
   const [loading,         setLoading]         = useState(true);
   const [error,           setError]           = useState<string | null>(null);
 
+  const backend = useBackend('status');
+
   useEffect(() => {
     if (!currentUserId) { setLoading(false); return; }
+
+    if (backend) {
+      let active = true;
+      const load = async () => {
+        const res = await endpoints.listStatuses();
+        if (!active) return;
+        if (res.ok) {
+          setMyStatuses(res.data.myStatuses.map(backendToFireStatus));
+          setContactStatuses(
+            res.data.contactStatuses.map((g) => {
+              const statuses = g.statuses.map(backendToFireStatus);
+              return {
+                userId: g.userId,
+                displayName: g.displayName ?? '',
+                userPhone: statuses[0]?.userPhone ?? null,
+                photoURL: null,
+                statuses,
+                hasUnviewed: g.hasUnviewed,
+                latestTimestamp: statuses.reduce(
+                  (max, s) => (s.createdAt > max ? s.createdAt : max),
+                  statuses[0]?.createdAt ?? new Date(0),
+                ),
+              };
+            }),
+          );
+        } else {
+          setError(String(res.error.code));
+        }
+        setLoading(false);
+      };
+      void socketClient.connect().then(load).catch(() => load());
+      const unsubs = [
+        socketClient.subscribe('status:update', () => void load()),
+        socketClient.subscribe('status:viewed', () => void load()),
+      ];
+      return () => { active = false; unsubs.forEach((u) => u()); };
+    }
 
     const fsDb = db as ReturnType<typeof firestore>;
 
@@ -116,7 +180,7 @@ export function useStatus(currentUserId: string | null) {
       );
 
     return () => unsubscribe();
-  }, [currentUserId]);
+  }, [currentUserId, backend]);
 
   const createStatus = useCallback(
     async (
@@ -126,6 +190,37 @@ export function useStatus(currentUserId: string | null) {
       userPhone: string | null = null, durationMs?: number,
     ): Promise<string> => {
       if (!currentUserId) throw new Error('User not authenticated');
+
+      if (backend) {
+        let finalDuration = durationMs;
+        if (!finalDuration) {
+          finalDuration = mediaType === 'image' ? IMAGE_STATUS_DURATION_MS
+            : mediaType === 'video' ? VIDEO_STATUS_DURATION_MS : TEXT_STATUS_DURATION_MS;
+        }
+        if (mediaType === 'video') finalDuration = Math.min(finalDuration, MAX_VIDEO_STATUS_MS);
+
+        // Upload status media to the object store, store the returned key.
+        let mediaObjectKey: string | null = null;
+        if (mediaUri && mediaType !== 'text') {
+          const { mediaService, fileSize } = await import('../services/mediaService');
+          const sizeBytes = await fileSize(mediaUri);
+          mediaObjectKey = await mediaService.upload(mediaUri, 'status', { sizeBytes });
+        }
+
+        const res = await endpoints.createStatus({
+          displayName,
+          userPhone,
+          mediaObjectKey,
+          mediaType,
+          caption,
+          backgroundColor,
+          textColor,
+          durationMs: finalDuration,
+          visibility: 'everyone',
+        });
+        if (!res.ok) throw new Error(`createStatus failed: ${res.error.message}`);
+        return res.data.statusId;
+      }
 
       let mediaUrl: string | null = null;
 
@@ -157,13 +252,17 @@ export function useStatus(currentUserId: string | null) {
 
       return statusRef.id;
     },
-    [currentUserId],
+    [currentUserId, backend],
   );
 
   const markAsViewed = useCallback(
     async (statusId: string) => {
       if (!currentUserId) return;
       try {
+        if (backend) {
+          await endpoints.viewStatus(statusId);
+          return;
+        }
         const fsDb = db as ReturnType<typeof firestore>;
         await fsDb.collection('statuses').doc(statusId).update({
           viewedBy: firestore.FieldValue.arrayUnion(currentUserId),
@@ -172,11 +271,16 @@ export function useStatus(currentUserId: string | null) {
         console.error('[useStatus] Mark viewed error:', err);
       }
     },
-    [currentUserId],
+    [currentUserId, backend],
   );
 
   const deleteStatus = useCallback(async (statusId: string, mediaUrl: string | null) => {
     try {
+      if (backend) {
+        // The server deletes the row and (in Slice 6) the media object.
+        await endpoints.deleteStatus(statusId);
+        return;
+      }
       if (mediaUrl) {
         try { await deleteFile(mediaUrl); } catch (e) { console.warn('[useStatus] Storage delete warning:', e); }
       }
@@ -185,7 +289,7 @@ export function useStatus(currentUserId: string | null) {
     } catch (err) {
       throw new Error('Failed to delete status');
     }
-  }, []);
+  }, [backend]);
 
   const deleteExpiredStatuses = useCallback(async () => {
     try {

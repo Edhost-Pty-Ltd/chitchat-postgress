@@ -5,7 +5,9 @@ import { useEffect } from 'react';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { useCallContext } from '../context/CallContext';
-import type { Call } from '../types/call';
+import type { Call, CallParticipant, CallType } from '../types/call';
+import { useBackend } from '../config/featureFlags';
+import { socketClient } from '../realtime/socket';
 
 function toDate(raw: any): Date {
   if (!raw) return new Date();
@@ -15,9 +17,23 @@ function toDate(raw: any): Date {
 
 export function useIncomingCalls(userId: string | null) {
   const { setIncomingCall } = useCallContext();
+  const backend = useBackend('calls');
 
   useEffect(() => {
     if (!userId) return;
+
+    if (backend) {
+      // Incoming calls arrive as 'call:incoming' socket events (Req 8.5).
+      void socketClient.connect();
+      const unsub = socketClient.subscribe('call:incoming', (payload) => {
+        const p = payload as { callId?: string; caller?: CallParticipant; type?: CallType };
+        if (!p?.callId || !p.caller || !p.type) return;
+        console.log('[useIncomingCalls] Incoming call (backend):', p.callId);
+        setIncomingCall({ callId: p.callId, caller: p.caller, type: p.type });
+      });
+      return () => unsub();
+    }
+
     console.log('[useIncomingCalls] Setting up listener for user:', userId);
 
     const fsDb = db as ReturnType<typeof firestore>;
@@ -91,5 +107,5 @@ export function useIncomingCalls(userId: string | null) {
       );
 
     return () => { console.log('[useIncomingCalls] Cleaning up'); unsubscribe(); };
-  }, [userId, setIncomingCall]);
+  }, [userId, setIncomingCall, backend]);
 }

@@ -9,6 +9,8 @@ import {
   registerChatReplyCategory,
   handleNotificationReply,
 } from './useNotificationReply';
+import { useBackend } from '../config/featureFlags';
+import { endpoints } from '../api/endpoints';
 
 let Notifications: any = null;
 try {
@@ -139,6 +141,15 @@ async function registerForPushNotificationsAsync(): Promise<string | null> {
 
 async function savePushToken(userId: string, token: string) {
   try {
+    if (useBackend('users')) {
+      const res = await endpoints.registerPushToken(token, Platform.OS);
+      if (!res.ok) {
+        console.error('[usePushNotifications] Backend token register failed:', res.error);
+      } else {
+        console.log('[usePushNotifications] Push token saved (backend)');
+      }
+      return;
+    }
     const fsDb = db as ReturnType<typeof firestore>;
     await fsDb.collection('users').doc(userId).set(
       { pushToken: token, pushTokenUpdatedAt: firestore.FieldValue.serverTimestamp(), platform: Platform.OS },
@@ -147,6 +158,16 @@ async function savePushToken(userId: string, token: string) {
     console.log('[usePushNotifications] Push token saved');
   } catch (error) {
     console.error('[usePushNotifications] Error saving push token:', error);
+  }
+}
+
+/** Remove this device's push token from the backend on sign-out (Req 4.8). */
+export async function removePushTokenFromBackend(token: string): Promise<void> {
+  if (!useBackend('users')) return;
+  try {
+    await endpoints.removePushToken(token);
+  } catch (error) {
+    console.error('[usePushNotifications] Error removing push token:', error);
   }
 }
 

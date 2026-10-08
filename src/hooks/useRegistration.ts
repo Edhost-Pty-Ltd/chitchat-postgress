@@ -6,6 +6,8 @@ import { useState, useRef, useCallback } from 'react';
 import { FirebaseAuthTypes, getAuth, signInWithPhoneNumber } from '@react-native-firebase/auth';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
+import { useBackend } from '../config/featureFlags';
+import { endpoints } from '../api/endpoints';
 
 export type RegistrationStep = 'form' | 'otp' | 'creating' | 'done' | 'error';
 
@@ -129,30 +131,55 @@ export function useRegistration(): UseRegistrationReturn {
         }
       }
 
-      console.log('[useRegistration] Creating Firestore document for uid:', uid);
-      const fsDb = db as ReturnType<typeof firestore>;
+      if (useBackend('users')) {
+        console.log('[useRegistration] Creating backend profile for uid:', uid);
+        try {
+          // The user row is created server-side on the first authenticated call
+          // (Auth_Verifier upsert). Set the phone and profile fields explicitly.
+          const phoneRes = await endpoints.updatePhone(phoneRef.current);
+          if (!phoneRes.ok && phoneRes.error.kind === 'api' && phoneRes.error.status === 409) {
+            throw new Error('That phone number is already registered.');
+          }
+          const res = await endpoints.updateMe({
+            displayName:      usernameRef.current,
+            avatarObjectKey:  photoURL,
+            email:            businessMetaRef.current.email            || null,
+            website:          businessMetaRef.current.website          || null,
+            catalog:          businessMetaRef.current.catalog          || null,
+            operationalHours: businessMetaRef.current.operationalHours || null,
+          });
+          if (!res.ok) throw new Error(`Database error: ${res.error.message}`);
+          console.log('[useRegistration] Backend profile created successfully');
+        } catch (backendErr: any) {
+          console.error('[useRegistration] Backend profile write failed:', backendErr);
+          throw backendErr;
+        }
+      } else {
+        console.log('[useRegistration] Creating Firestore document for uid:', uid);
+        const fsDb = db as ReturnType<typeof firestore>;
 
-      try {
-        await fsDb.collection('users').doc(uid).set(
-          {
-            uid,
-            displayName:       usernameRef.current,
-            phone:             phoneRef.current,
-            photoURL,
-            email:             businessMetaRef.current.email             || null,
-            website:           businessMetaRef.current.website           || null,
-            catalog:           businessMetaRef.current.catalog           || null,
-            operationalHours:  businessMetaRef.current.operationalHours  || null,
-            accountType:       'business',
-            createdAt:         firestore.FieldValue.serverTimestamp(),
-            lastSeen:          firestore.FieldValue.serverTimestamp(),
-          },
-          { merge: true },
-        );
-        console.log('[useRegistration] Firestore document created successfully');
-      } catch (firestoreErr: any) {
-        console.error('[useRegistration] Firestore write failed:', firestoreErr);
-        throw new Error(`Database error: ${firestoreErr.message}`);
+        try {
+          await fsDb.collection('users').doc(uid).set(
+            {
+              uid,
+              displayName:       usernameRef.current,
+              phone:             phoneRef.current,
+              photoURL,
+              email:             businessMetaRef.current.email             || null,
+              website:           businessMetaRef.current.website           || null,
+              catalog:           businessMetaRef.current.catalog           || null,
+              operationalHours:  businessMetaRef.current.operationalHours  || null,
+              accountType:       'business',
+              createdAt:         firestore.FieldValue.serverTimestamp(),
+              lastSeen:          firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true },
+          );
+          console.log('[useRegistration] Firestore document created successfully');
+        } catch (firestoreErr: any) {
+          console.error('[useRegistration] Firestore write failed:', firestoreErr);
+          throw new Error(`Database error: ${firestoreErr.message}`);
+        }
       }
 
       setRegistrationStep('done');
@@ -183,6 +210,12 @@ export function useRegistration(): UseRegistrationReturn {
 }
 
 async function uploadProfilePicture(uid: string, imageUri: string): Promise<string> {
+  if (useBackend('media')) {
+    // Upload the avatar to the object store; the returned key is stored as the
+    // profile's avatarObjectKey (resolved to a URL at render time, Req 10).
+    const { mediaService, fileSize } = await import('../services/mediaService');
+    return mediaService.upload(imageUri, 'avatar', { sizeBytes: await fileSize(imageUri) });
+  }
   const { uploadFile, generateFileName } = await import('../config/storage');
   const fileName = generateFileName('jpg');
   return uploadFile(imageUri, 'avatar', { userId: uid, fileName }, (p) => {

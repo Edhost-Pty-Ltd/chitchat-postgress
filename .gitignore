@@ -99,3 +99,7 @@ ChitChatBusiness_vs_Whats*.html
 .kiro/specs/user-registration/
 /.env.local
 /.env
+
+# Firebase Admin service account keys (SECRET — never commit)
+*firebase-adminsdk*.json
+chitchatbusiness-*-firebase-adminsdk-*.json

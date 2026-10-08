@@ -5,6 +5,9 @@
 import { useState, useEffect } from 'react';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
+import { useBackend } from '../config/featureFlags';
+import { endpoints } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
 
 export interface ChatPreview {
   chatId:       string;
@@ -22,6 +25,8 @@ export function useChats(userId: string | null) {
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
 
+  const backend = useBackend('messaging');
+
   useEffect(() => {
     if (!userId) {
       setChats([]);
@@ -30,6 +35,43 @@ export function useChats(userId: string | null) {
     }
 
     setLoading(true);
+
+    if (backend) {
+      let active = true;
+      const load = async () => {
+        const res = await endpoints.listChats();
+        if (!active) return;
+        if (res.ok) {
+          setChats(
+            res.data.chats.map((c) => ({
+              chatId: c.chatId,
+              type: c.type,
+              members: c.members,
+              groupName: c.groupName,
+              lastMessage: c.lastMessage ?? '',
+              lastSenderId: c.lastSenderId ?? '',
+              timestamp: c.lastMessageAt ? new Date(c.lastMessageAt) : null,
+              unreadCount: c.unreadCount,
+            })),
+          );
+        } else {
+          setError(String(res.error.code));
+        }
+        setLoading(false);
+      };
+
+      void socketClient.connect().then(load).catch(() => load());
+      // Refresh the list on any delivery/read/new-message/chat-update event.
+      const unsubs = [
+        socketClient.subscribe('message:new', () => void load()),
+        socketClient.subscribe('message:read', () => void load()),
+        socketClient.subscribe('chat:updated', () => void load()),
+      ];
+      return () => {
+        active = false;
+        unsubs.forEach((u) => u());
+      };
+    }
 
     console.log('[useChats] Subscribing for userId:', userId);
 
@@ -66,7 +108,7 @@ export function useChats(userId: string | null) {
       );
 
     return () => unsub();
-  }, [userId]);
+  }, [userId, backend]);
 
   return { chats, loading, error };
 }

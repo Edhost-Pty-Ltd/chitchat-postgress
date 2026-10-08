@@ -4,6 +4,9 @@
 import { useState, useEffect } from 'react';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
+import { useBackend } from '../config/featureFlags';
+import { endpoints } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
 
 function toDate(raw: any): Date | null {
   if (!raw) return null;
@@ -17,6 +20,7 @@ export function useLastSeen(
 ): { lastSeen: Date | null; loading: boolean } {
   const [lastSeen, setLastSeen] = useState<Date | null>(null);
   const [loading,  setLoading]  = useState(true);
+  const backend = useBackend('presence');
 
   useEffect(() => {
     if (!userId || !viewerId || userId === viewerId) {
@@ -24,6 +28,29 @@ export function useLastSeen(
     }
 
     setLoading(true);
+
+    if (backend) {
+      let active = true;
+      void endpoints.getPresence(userId).then((res) => {
+        if (!active) return;
+        if (res.ok) {
+          // Online users have no "last seen" timestamp to show.
+          setLastSeen(res.data.online ? null : res.data.lastSeen ? new Date(res.data.lastSeen) : null);
+        } else {
+          setLastSeen(null);
+        }
+        setLoading(false);
+      });
+
+      const unsub = socketClient.subscribe('presence', (payload) => {
+        const p = payload as { userId?: string; online?: boolean; lastSeen?: string | null };
+        if (p?.userId !== userId) return;
+        setLastSeen(p.online ? null : p.lastSeen ? new Date(p.lastSeen) : null);
+      });
+
+      return () => { active = false; unsub(); };
+    }
+
     const fsDb = db as ReturnType<typeof firestore>;
     let unsubFn: (() => void) | undefined;
 
@@ -57,7 +84,7 @@ export function useLastSeen(
     })();
 
     return () => { unsubFn?.(); };
-  }, [userId, viewerId]);
+  }, [userId, viewerId, backend]);
 
   return { lastSeen, loading };
 }

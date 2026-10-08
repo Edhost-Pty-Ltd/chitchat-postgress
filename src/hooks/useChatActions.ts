@@ -5,6 +5,8 @@ import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { uploadFile, generateFileName, getFileExtension } from '../config/storage';
 import { fetchUserPrivacySettings } from './usePrivacySettings';
+import { useBackend } from '../config/featureFlags';
+import { endpoints } from '../api/endpoints';
 
 const fsDb = () => db as ReturnType<typeof firestore>;
 
@@ -13,6 +15,12 @@ export async function getOrCreateDirectChat(
   currentUserId: string,
   otherUserId: string,
 ): Promise<string> {
+  if (useBackend('messaging')) {
+    const res = await endpoints.createChat({ type: 'direct', members: [otherUserId] });
+    if (!res.ok) throw new Error(`createChat failed: ${res.error.message}`);
+    return res.data.chatId;
+  }
+
   const sortedIds = [currentUserId, otherUserId].sort();
   console.log('[getOrCreateDirectChat] Looking for chat between:', sortedIds);
 
@@ -52,6 +60,18 @@ export async function createGroupChat(
   memberIds: string[],
   groupName: string,
 ): Promise<{ chatId: string; blockedByPrivacy: string[] }> {
+  if (useBackend('messaging')) {
+    // Server enforces group-privacy and membership; return no privacy-blocked
+    // list here (the server simply includes permitted members).
+    const res = await endpoints.createChat({
+      type: 'group',
+      members: memberIds,
+      groupName,
+    });
+    if (!res.ok) throw new Error(`createGroupChat failed: ${res.error.message}`);
+    return { chatId: res.data.chatId, blockedByPrivacy: [] };
+  }
+
   const requested = Array.from(new Set([currentUserId, ...memberIds]));
   const blockedByPrivacy: string[] = [];
   const allowed: string[] = [currentUserId];
@@ -91,6 +111,15 @@ export async function sendMessage(
   try {
     const trimmed = text.trim();
     if (!trimmed) return false;
+
+    if (useBackend('messaging')) {
+      const res = await endpoints.sendMessage(chatId, {
+        type: 'text',
+        text: trimmed,
+        clientId: `${senderId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      });
+      return res.ok;
+    }
 
     const chatRef  = fsDb().collection('chats').doc(chatId);
     const chatSnap = await chatRef.get();
@@ -136,6 +165,11 @@ export async function sendMessage(
 // ── Mark chat as read ─────────────────────────────────────────────────────────
 export async function markChatAsRead(chatId: string, userId: string): Promise<void> {
   try {
+    if (useBackend('messaging')) {
+      // Reading messages (via useMessages) sends the read ack over the socket,
+      // which clears the unread count server-side. Nothing to do here.
+      return;
+    }
     await fsDb().collection('chats').doc(chatId).update({
       [`unreadCounts.${userId}`]: 0,
     });
@@ -150,6 +184,25 @@ export async function sendVoiceMessage(
   durationMs: number,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
+    if (useBackend('messaging')) {
+      // `voiceUrl` is a local URI (the recorder output); upload it, then send.
+      let mediaObjectKey = voiceUrl;
+      if (useBackend('media') && /^file:|^content:|^\//.test(voiceUrl)) {
+        const { mediaService, fileSize } = await import('../services/mediaService');
+        mediaObjectKey = await mediaService.upload(voiceUrl, 'chat-voice', {
+          chatId,
+          sizeBytes: await fileSize(voiceUrl),
+        });
+      }
+      const res = await endpoints.sendMessage(chatId, {
+        type: 'voice',
+        mediaObjectKey,
+        durationMs,
+        clientId: `${senderId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      });
+      return { success: res.ok, messageId: res.ok ? res.data.message.id : '' };
+    }
+
     const chatRef  = fsDb().collection('chats').doc(chatId);
     const chatSnap = await chatRef.get();
     if (!chatSnap.exists) return { success: false, messageId: '' };
@@ -200,6 +253,20 @@ export async function sendImageMessage(
   onProgress?: (progress: number) => void,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
+    if (useBackend('messaging')) {
+      const { mediaService, fileSize } = await import('../services/mediaService');
+      const objectKey = await mediaService.upload(imageUri, 'chat-media', {
+        chatId,
+        sizeBytes: await fileSize(imageUri),
+      });
+      const res = await endpoints.sendMessage(chatId, {
+        type: 'image',
+        mediaObjectKey: objectKey,
+        clientId: `${senderId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      });
+      return { success: res.ok, messageId: res.ok ? res.data.message.id : '' };
+    }
+
     const fileName = generateFileName(getFileExtension(imageUri));
     const imageUrl = await uploadFile(imageUri, 'chatMedia', { chatId, fileName }, onProgress);
 
@@ -247,6 +314,28 @@ export async function sendVideoMessage(
   onProgress?: (progress: number) => void,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
+    if (useBackend('messaging')) {
+      const { mediaService, fileSize } = await import('../services/mediaService');
+      const objectKey = await mediaService.upload(videoUri, 'chat-media', {
+        chatId,
+        sizeBytes: await fileSize(videoUri),
+      });
+      let thumbKey: string | null = null;
+      if (thumbnailUri) {
+        thumbKey = await mediaService.upload(thumbnailUri, 'chat-media', {
+          chatId,
+          sizeBytes: await fileSize(thumbnailUri),
+        });
+      }
+      const res = await endpoints.sendMessage(chatId, {
+        type: 'video',
+        mediaObjectKey: objectKey,
+        thumbnailObjectKey: thumbKey,
+        clientId: `${senderId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      });
+      return { success: res.ok, messageId: res.ok ? res.data.message.id : '' };
+    }
+
     const videoUrl = await uploadFile(videoUri, 'chatMedia', {
       chatId, fileName: generateFileName(getFileExtension(videoUri)),
     }, onProgress);
@@ -304,6 +393,24 @@ export async function sendFileMessage(
   onProgress?: (progress: number) => void,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
+    if (useBackend('messaging')) {
+      const { mediaService } = await import('../services/mediaService');
+      const objectKey = await mediaService.upload(fileUri, 'chat-media', {
+        chatId,
+        sizeBytes: fileSize,
+        contentType: mimeType || 'application/octet-stream',
+      });
+      const res = await endpoints.sendMessage(chatId, {
+        type: 'file',
+        mediaObjectKey: objectKey,
+        fileName,
+        fileSize,
+        mimeType,
+        clientId: `${senderId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      });
+      return { success: res.ok, messageId: res.ok ? res.data.message.id : '' };
+    }
+
     // Pass the caller-supplied mimeType as an override so Android content URIs
     // (which have no file extension) get the correct Content-Type rather than
     // falling back to application/octet-stream which Firebase Storage may reject.

@@ -1,0 +1,72 @@
+# Dev_Stack for the ChitChatBusiness backend.
+# Start everything with: docker compose up -d
+# Services: PostgreSQL, Redis, MinIO (S3-compatible object store).
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: chitchat-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chitchat
+      POSTGRES_PASSWORD: chitchat
+      POSTGRES_DB: chitchat
+    ports:
+      - "5432:5432"
+    volumes:
+      - chitchat-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chitchat -d chitchat"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: chitchat-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - chitchat-redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: chitchat-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: chitchat
+      MINIO_ROOT_PASSWORD: chitchat-secret
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # Web console
+    volumes:
+      - chitchat-miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot init: creates the media bucket so the backend works without app code changes.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 chitchat chitchat-secret &&
+      mc mb --ignore-existing local/chitchat-media &&
+      echo 'MinIO bucket chitchat-media ready';
+      "
+
+volumes:
+  chitchat-pgdata:
+  chitchat-redisdata:
+  chitchat-miniodata:

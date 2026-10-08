@@ -7,6 +7,9 @@ import { db } from '../config/firebase';
 import { fetchUserPrivacySettings } from './usePrivacySettings';
 import { loadLocalMessages, mergeLocalMessages } from './useLocalMessages';
 import { CatalogItem } from '../types';
+import { useBackend } from '../config/featureFlags';
+import { endpoints, type BackendMessage } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
 
 export interface FireMessage {
   messageId:    string;
@@ -48,6 +51,64 @@ function toDate(raw: any): Date | null {
   return new Date(raw);
 }
 
+/**
+ * Map a backend message to the FireMessage shape the UI already consumes.
+ * Media fields carry object keys on the backend path; Slice 6 resolves them to
+ * presigned URLs via mediaService at render time.
+ */
+function backendToFireMessage(m: BackendMessage): FireMessage {
+  const mediaKey = m.mediaObjectKey;
+  return {
+    messageId:    m.id,
+    senderId:     m.senderId,
+    text:         m.text,
+    imageUrl:     m.type === 'image' ? mediaKey : null,
+    voiceUrl:     m.type === 'voice' ? mediaKey : null,
+    videoUrl:     m.type === 'video' ? mediaKey : null,
+    fileUrl:      m.type === 'file' ? mediaKey : null,
+    type:         m.type,
+    timestamp:    toDate(m.createdAt),
+    expiresAt:    toDate(m.expiresAt),
+    readBy:       m.readBy,
+    deliveredTo:  m.deliveredTo,
+    duration:     m.durationMs,
+    fileName:     m.fileName,
+    fileSize:     m.fileSize,
+    mimeType:     m.mimeType,
+    thumbnailUrl: m.thumbnailObjectKey,
+    blockedMessage: false,
+    catalogItem:  (m.catalogItem as CatalogItem) ?? null,
+    location:     (m.location as FireMessage['location']) ?? null,
+    isLiveLocation: false,
+    liveLocationExpiry: null,
+    replyTo:      (m.replyTo as FireMessage['replyTo']) ?? null,
+  };
+}
+
+/**
+ * Replace media object keys on messages with short-lived presigned download
+ * URLs so the UI can render/play them (Req 10.6). Mutates in place.
+ */
+async function resolveMessageMedia(messages: FireMessage[]): Promise<void> {
+  const keys = new Set<string>();
+  for (const m of messages) {
+    for (const url of [m.imageUrl, m.voiceUrl, m.videoUrl, m.fileUrl, m.thumbnailUrl]) {
+      if (url && !/^https?:/.test(url)) keys.add(url);
+    }
+  }
+  if (keys.size === 0) return;
+  const { mediaService } = await import('../services/mediaService');
+  const resolved = await mediaService.getDownloadUrls(Array.from(keys));
+  const map = (v: string | null) => (v && resolved[v] ? resolved[v] : v);
+  for (const m of messages) {
+    m.imageUrl = map(m.imageUrl);
+    m.voiceUrl = map(m.voiceUrl);
+    m.videoUrl = map(m.videoUrl);
+    m.fileUrl = map(m.fileUrl);
+    m.thumbnailUrl = map(m.thumbnailUrl ?? null);
+  }
+}
+
 export function useMessages(chatId: string | null, currentUserId: string | null) {
   const [messages, setMessages] = useState<FireMessage[]>([]);
   const [loading,  setLoading]  = useState(true);
@@ -61,10 +122,76 @@ export function useMessages(chatId: string | null, currentUserId: string | null)
     });
   }, [chatId]);
 
+  const backend = useBackend('messaging');
+  const mediaBackend = useBackend('media');
+
   // Real-time listener
   useEffect(() => {
     if (!chatId) return;
     setLoading(true);
+
+    if (backend) {
+      let active = true;
+
+      const applyAndAck = (list: FireMessage[]) => {
+        if (!active) return;
+        setMessages(list);
+        setLoading(false);
+        // Ack delivery + read for messages from others (Req 5.6, 5.7).
+        if (currentUserId) {
+          const incoming = list.filter((m) => m.senderId !== currentUserId);
+          incoming.forEach((m) =>
+            socketClient.emit('message:delivered', { chatId, messageId: m.messageId }),
+          );
+          const ids = incoming.map((m) => m.messageId);
+          if (ids.length > 0) socketClient.emit('message:read', { chatId, messageIds: ids });
+        }
+      };
+
+      const load = async () => {
+        const res = await endpoints.listMessages(chatId, { limit: 50 });
+        if (!res.ok) {
+          setError(String(res.error.code));
+          setLoading(false);
+          return;
+        }
+        // Backend returns newest-first; UI expects ascending.
+        const mapped = res.data.messages.map(backendToFireMessage).reverse();
+        // Resolve media object keys to short-lived download URLs (Req 10.6).
+        if (mediaBackend) {
+          await resolveMessageMedia(mapped);
+        }
+        applyAndAck(mapped);
+      };
+
+      void socketClient.connect().then(() => {
+        socketClient.joinChat(chatId);
+        return load();
+      }).catch(() => load());
+
+      const unsubs = [
+        socketClient.subscribe('message:new', (payload) => {
+          const p = payload as { message?: BackendMessage };
+          if (p?.message?.chatId === chatId) void load();
+        }),
+        socketClient.subscribe('message:read', (payload) => {
+          const p = payload as { chatId?: string };
+          if (p?.chatId === chatId) void load();
+        }),
+        socketClient.subscribe('message:deleted', (payload) => {
+          const p = payload as { chatId?: string };
+          if (p?.chatId === chatId) void load();
+        }),
+        // On reconnect, refetch to pick up messages missed while offline (Req 5.18).
+        socketClient.subscribe('client:reconnect', () => void load()),
+      ];
+
+      return () => {
+        active = false;
+        socketClient.leaveChat(chatId);
+        unsubs.forEach((u) => u());
+      };
+    }
 
     const fsDb = db as ReturnType<typeof firestore>;
     const unsub = fsDb
@@ -117,10 +244,21 @@ export function useMessages(chatId: string | null, currentUserId: string | null)
       );
 
     return () => unsub();
-  }, [chatId, currentUserId]);
+  }, [chatId, currentUserId, backend]);
 
   async function sendMessage(text: string): Promise<boolean> {
     if (!chatId || !currentUserId || !text.trim()) return false;
+
+    if (backend) {
+      const res = await endpoints.sendMessage(chatId, {
+        type: 'text',
+        text: text.trim(),
+        clientId: `${currentUserId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      });
+      if (!res.ok) { setError(res.error.message); return false; }
+      return true;
+    }
+
     try {
       const trimmed = text.trim();
       const fsDb = db as ReturnType<typeof firestore>;

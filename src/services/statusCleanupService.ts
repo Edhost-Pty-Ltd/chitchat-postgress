@@ -4,6 +4,7 @@
 
 import firestore from '@react-native-firebase/firestore';
 import { db, storage } from '../config/firebase';
+import { useBackend } from '../config/featureFlags';
 
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // Run every hour
 const BATCH_SIZE = 50;
@@ -80,6 +81,9 @@ let cleanupInterval: NodeJS.Timeout | null = null;
 let isRunning = false;
 
 export function startStatusCleanupService(): void {
+  // On the backend path, the server's scheduled job owns status cleanup, so the
+  // client-side best-effort sweep is unnecessary (Req 11.1).
+  if (useBackend('status')) { console.log('[StatusCleanup] Backend handles cleanup; client sweep disabled'); return; }
   if (isRunning) { console.log('[StatusCleanup] Service already running'); return; }
   console.log('[StatusCleanup] Starting cleanup service');
   isRunning = true;
