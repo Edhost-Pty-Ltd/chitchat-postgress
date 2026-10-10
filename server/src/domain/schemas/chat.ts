@@ -68,3 +68,9 @@ export const listMessagesQuerySchema = z
     after: z.string().uuid().optional(),
   })
   .strict();
+
+export const editMessageSchema = z
+  .object({
+    text: z.string().min(1).max(8192),
+  })
+  .strict();

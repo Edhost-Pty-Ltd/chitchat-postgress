@@ -7,8 +7,7 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../types';
 import { useFloatingCall } from '../context/FloatingCallContext';
 import { FloatingCallOverlay } from './FloatingCallOverlay';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList>;
 
@@ -40,16 +39,11 @@ export function FloatingCallManager() {
 
   const handleEndCall = async () => {
     try {
-      // End call in Firestore
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('calls').doc(floatingCall.callId).update({
-        status: 'ended',
-        endedAt: new Date(),
-      });
+      await endpoints.endCall(floatingCall.callId);
       endFloatingCall();
     } catch (error) {
       console.error('[FloatingCallManager] Failed to end call:', error);
-      // Still remove the floating call even if Firestore update fails
+      // Still remove the floating call even if the API call fails
       endFloatingCall();
     }
   };

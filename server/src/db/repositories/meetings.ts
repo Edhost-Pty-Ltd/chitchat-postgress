@@ -108,3 +108,87 @@ export async function addMeetingMessage(
   );
   return { id: res.rows[0].id, createdAt: res.rows[0].created_at.toISOString() };
 }
+
+export interface MeetingListItem {
+  id: string;
+  title: string;
+  organizerId: string;
+  isActive: boolean;
+  endedAt: string | null;
+  createdAt: string;
+  participantCount: number;
+}
+
+/** All meetings the user participates in, newest first. */
+export async function listMeetings(userId: string): Promise<MeetingListItem[]> {
+  const res = await query<{
+    id: string;
+    title: string;
+    organizer_id: string;
+    is_active: boolean;
+    ended_at: Date | null;
+    created_at: Date;
+    participant_count: string;
+  }>(
+    `SELECT m.id, m.title, m.organizer_id, m.is_active, m.ended_at, m.created_at,
+            COUNT(p2.user_id)::text AS participant_count
+       FROM meetings m
+       JOIN meeting_participants p ON p.meeting_id = m.id AND p.user_id = $1
+       JOIN meeting_participants p2 ON p2.meeting_id = m.id
+      GROUP BY m.id
+      ORDER BY m.created_at DESC`,
+    [userId],
+  );
+  return res.rows.map((r) => ({
+    id: r.id,
+    title: r.title,
+    organizerId: r.organizer_id,
+    isActive: r.is_active,
+    endedAt: r.ended_at ? r.ended_at.toISOString() : null,
+    createdAt: r.created_at.toISOString(),
+    participantCount: Number(r.participant_count),
+  }));
+}
+
+export interface MeetingMessage {
+  id: string;
+  meetingId: string;
+  senderId: string;
+  text: string | null;
+  mediaObjectKey: string | null;
+  createdAt: string;
+}
+
+/** All messages for a meeting in ascending order (oldest first). */
+export async function getMeetingMessages(meetingId: string): Promise<MeetingMessage[]> {
+  const res = await query<{
+    id: string;
+    meeting_id: string;
+    sender_id: string;
+    text: string | null;
+    media_object_key: string | null;
+    created_at: Date;
+  }>(
+    `SELECT id, meeting_id, sender_id, text, media_object_key, created_at
+       FROM meeting_messages
+      WHERE meeting_id = $1
+      ORDER BY created_at ASC`,
+    [meetingId],
+  );
+  return res.rows.map((r) => ({
+    id: r.id,
+    meetingId: r.meeting_id,
+    senderId: r.sender_id,
+    text: r.text,
+    mediaObjectKey: r.media_object_key,
+    createdAt: r.created_at.toISOString(),
+  }));
+}
+
+/** End a meeting — sets is_active=false and records ended_at. */
+export async function endMeetingById(meetingId: string): Promise<void> {
+  await query(
+    `UPDATE meetings SET is_active = false, ended_at = now() WHERE id = $1`,
+    [meetingId],
+  );
+}

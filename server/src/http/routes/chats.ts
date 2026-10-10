@@ -8,6 +8,7 @@ import {
   updateChatSchema,
   sendMessageSchema,
   deleteMessageSchema,
+  editMessageSchema,
   forwardSchema,
   listMessagesQuerySchema,
 } from '../../domain/schemas/chat.js';
@@ -26,6 +27,7 @@ import {
   listMessages,
   messagesAfter,
   deleteMessage,
+  editMessage,
   messageChatId,
   getMessageSender,
   type StoredMessage,
@@ -201,6 +203,27 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         emitToChat(chatId, 'message:deleted', { chatId, messageId: request.params.mid });
       }
       return { ok: true };
+    },
+  );
+
+  // PATCH /chats/:id/messages/:mid — edit the text of an own text message.
+  app.patch<{ Params: { id: string; mid: string } }>(
+    '/chats/:id/messages/:mid',
+    { preHandler: requireAuth },
+    async (request) => {
+      const userId = request.identity!.userId;
+      const chatId = request.params.id;
+      if (!(await isMember(chatId, userId))) {
+        throw Errors.forbidden('Not a member of this chat');
+      }
+      const { text } = parse(editMessageSchema, request.body);
+      const updated = await editMessage(request.params.mid, userId, text);
+      if (!updated) {
+        throw Errors.forbidden('Message not found or you are not the sender');
+      }
+      // Notify all chat members of the edit so they can update their local state.
+      emitToChat(chatId, 'message:edited', { chatId, message: updated });
+      return { message: updated };
     },
   );
 

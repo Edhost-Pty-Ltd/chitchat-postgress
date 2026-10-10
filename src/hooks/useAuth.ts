@@ -6,6 +6,7 @@ import { useState, useEffect } from 'react';
 import { FirebaseAuthTypes, getAuth, onAuthStateChanged, signInWithPhoneNumber, signOut as firebaseSignOut } from '@react-native-firebase/auth';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
+import { useBackend } from '../config/featureFlags';
 
 export type AuthStep = 'idle' | 'sending' | 'otpSent' | 'verifying' | 'done' | 'error';
 
@@ -58,7 +59,13 @@ export function useAuth() {
 
       if (result?.user) {
         try {
-          await upsertUserProfile(result.user);
+          // When the users feature is on the backend, the auth middleware
+          // (upsertUserOnFirstContact) already created the Postgres row when
+          // the Firebase ID token was verified on the first API call. Skip the
+          // Firestore write to avoid a stale legacy record being created.
+          if (!useBackend('users')) {
+            await upsertUserProfile(result.user);
+          }
         } catch (firestoreError: any) {
           console.warn('[useAuth] Non-critical Firestore error - continuing with sign-in:', firestoreError);
         }

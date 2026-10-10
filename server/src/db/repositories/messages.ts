@@ -52,6 +52,8 @@ export interface StoredMessage {
   deletedForEveryone: boolean;
   deliveredTo: string[];
   readBy: string[];
+  edited: boolean;
+  editedAt: string | null;
 }
 
 interface MessageRow {
@@ -74,6 +76,8 @@ interface MessageRow {
   created_at: Date;
   expires_at: Date;
   deleted_for_everyone: boolean;
+  edited: boolean;
+  edited_at: Date | null;
 }
 
 function previewFor(input: MessageInput): string {
@@ -140,6 +144,8 @@ function rowToMessage(
     deletedForEveryone: row.deleted_for_everyone,
     deliveredTo: r.delivered,
     readBy: r.read,
+    edited: row.edited ?? false,
+    editedAt: row.edited_at ? row.edited_at.toISOString() : null,
   };
 }
 
@@ -390,4 +396,27 @@ export async function messageChatId(messageId: string): Promise<string | null> {
     messageId,
   ]);
   return res.rows[0]?.chat_id ?? null;
+}
+
+/**
+ * Edit the text of a message the caller sent (Req 5.x).
+ * Only text-type messages owned by the sender may be edited.
+ * Returns the updated message or null when the message is not found / not owned.
+ */
+export async function editMessage(
+  messageId: string,
+  senderId: string,
+  newText: string,
+): Promise<StoredMessage | null> {
+  const res = await query<MessageRow & { edited: boolean; edited_at: Date | null }>(
+    `UPDATE messages
+        SET text = $3, edited = true, edited_at = now()
+      WHERE id = $1 AND sender_id = $2 AND type = 'text'
+     RETURNING *`,
+    [messageId, senderId, newText],
+  );
+  if (!res.rows[0]) return null;
+  // Re-hydrate receipts for the single updated row.
+  const receipts = await hydrateReceipts([res.rows[0].id]);
+  return rowToMessage(res.rows[0], receipts);
 }

@@ -9,10 +9,8 @@ import DateTimePickerModal from 'react-native-modal-datetime-picker';
 import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
-import firestore from '@react-native-firebase/firestore';
 import { getAuth } from '@react-native-firebase/auth';
-import { db } from '../config/firebase';
-import { uploadFile, generateFileName } from '../config/storage';
+import { endpoints } from '../api/endpoints';
 import { useAuth } from '../context/AuthContext';
 import { AppBg, AppText, AppIcon, useForeground, useTypography } from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -99,25 +97,27 @@ export default function ProfileScreen() {
 
   const shownName = displayName || 'Demo Business';
 
-  // ── Load business fields from Firestore ─────────────────────────────────────
+  // ── Load business fields from backend ───────────────────────────────────────
   useEffect(() => {
     const loadProfile = async () => {
       try {
-        const authInstance = getAuth();
-        const currentUser = authInstance.currentUser;
-        if (!currentUser) return;
-
-        const fsDb = db as ReturnType<typeof firestore>;
-        const userSnap = await fsDb.collection('users').doc(currentUser.uid).get();
-        if (userSnap.exists()) {
-          const data = userSnap.data()!;
-          setEmail(data.email || '');
-          setWebsite(data.website || '');
-          setauto_responder_message(data.auto_responder_message || '');
-          setAutoResponderEnabled(data.autoResponderEnabled || false);
-          if (data.workSchedule) setWorkSchedule(data.workSchedule);
-          setCatalog(data.catalog || []);
-          setCollections(data.collections || []);
+        const res = await endpoints.getMe();
+        if (!res.ok) return;
+        const data = res.data;
+        setEmail(data.email || '');
+        setWebsite(data.website || '');
+        // catalog and operationalHours are stored as JSON strings in the backend
+        if (data.catalog) {
+          try { setCatalog(JSON.parse(data.catalog)); } catch {}
+        }
+        if (data.operationalHours) {
+          try {
+            const parsed = JSON.parse(data.operationalHours);
+            if (parsed.workSchedule) setWorkSchedule(parsed.workSchedule);
+            if (parsed.autoResponderEnabled !== undefined) setAutoResponderEnabled(parsed.autoResponderEnabled);
+            if (parsed.auto_responder_message) setauto_responder_message(parsed.auto_responder_message);
+            if (parsed.collections) setCollections(parsed.collections);
+          } catch {}
         }
       } catch (err) {
         console.warn('[ProfileScreen] Error loading profile:', err);
@@ -126,42 +126,45 @@ export default function ProfileScreen() {
     loadProfile();
   }, []);
 
+  // ── Helper: persist complex business fields as JSON to operationalHours ─────
+  // The backend ProfilePatch stores catalog as a JSON string in the catalog column
+  // and business-specific fields (workSchedule, autoResponder, collections) as
+  // JSON in the operationalHours column.
+  const persistBusinessFields = async (updates: {
+    catalog?: any[]; collections?: any[]; workSchedule?: any;
+    autoResponderEnabled?: boolean; auto_responder_message?: string;
+  }) => {
+    // Build the operationalHours JSON from current state + updates
+    const ohRes = await endpoints.getMe();
+    let existing: any = {};
+    if (ohRes.ok && ohRes.data.operationalHours) {
+      try { existing = JSON.parse(ohRes.data.operationalHours); } catch {}
+    }
+    const merged = { ...existing, ...updates };
+    await endpoints.updateMe({ operationalHours: JSON.stringify(merged) });
+  };
+
   // ── Save name ─────────────────────────────────────────────────────────────
   const saveName = async () => {
     const trimmed = draftName.trim();
-    if (!trimmed) {
-      setEditingName(false);
-      return;
-    }
-
+    if (!trimmed) { setEditingName(false); return; }
     try {
       await setDisplayName(trimmed);
-
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ displayName: trimmed });
-      }
+      await endpoints.updateMe({ displayName: trimmed });
     } catch (error) {
       console.error('[ProfileScreen] Error saving displayName:', error);
     }
-
     setEditingName(false);
   };
 
   // ── Save a business field ──────────────────────────────────────────────────
   const saveField = async (field: string, value: string) => {
     try {
-      if (field === 'email') setEmail(value);
-      else if (field === 'website') setWebsite(value);
-      else if (field === 'auto_responder_message') setauto_responder_message(value);
-
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ [field]: value });
+      if (field === 'email') { setEmail(value); await endpoints.updateMe({ email: value }); }
+      else if (field === 'website') { setWebsite(value); await endpoints.updateMe({ website: value }); }
+      else if (field === 'auto_responder_message') {
+        setauto_responder_message(value);
+        await persistBusinessFields({ auto_responder_message: value });
       }
     } catch (error) {
       console.warn('[ProfileScreen] Error saving field:', error);
@@ -172,7 +175,6 @@ export default function ProfileScreen() {
   // ── Auto Responder toggle (only starts a pending edit when turning ON) ─────
   const handleAutoResponderToggle = async (val: boolean) => {
     if (val) {
-      // Begin pending edit. Do NOT persist yet — user must save with a message.
       setDraftAutoMessage(
         auto_responder_message ||
         'Thanks for your message! We are currently closed. We will get back to you as soon as we open.'
@@ -180,24 +182,14 @@ export default function ProfileScreen() {
       setAutoResponderPending(true);
       return;
     }
-
-    // Turning OFF
     if (autoResponderPending) {
-      // Cancel pending edit — nothing to persist.
       setAutoResponderPending(false);
       setDraftAutoMessage('');
       return;
     }
-
-    // Was actually enabled → persist OFF.
     setAutoResponderEnabled(false);
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ autoResponderEnabled: false });
-      }
+      await persistBusinessFields({ autoResponderEnabled: false });
     } catch (error) {
       console.warn('[ProfileScreen] Error saving autoResponderEnabled:', error);
     }
@@ -207,28 +199,14 @@ export default function ProfileScreen() {
   const saveAutoResponder = async () => {
     const msg = draftAutoMessage.trim();
     if (!msg) {
-      Alert.alert(
-        'Message required',
-        'Please type the automatic reply message before saving. Otherwise, customers would receive empty replies.'
-      );
+      Alert.alert('Message required', 'Please type the automatic reply message before saving.');
       return;
     }
-
-    // Optimistic local state
     setauto_responder_message(msg);
     setAutoResponderEnabled(true);
     setAutoResponderPending(false);
-
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({
-          autoResponderEnabled: true,
-          auto_responder_message: msg,
-        });
-      }
+      await persistBusinessFields({ autoResponderEnabled: true, auto_responder_message: msg });
     } catch (error) {
       console.warn('[ProfileScreen] Error saving auto responder:', error);
     }
@@ -243,12 +221,7 @@ export default function ProfileScreen() {
   const saveWorkSchedule = async (updated: Record<string, DaySchedule>) => {
     setWorkSchedule(updated);
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ workSchedule: updated });
-      }
+      await persistBusinessFields({ workSchedule: updated });
     } catch (err) {
       console.warn('[ProfileScreen] Error saving work schedule:', err);
     }
@@ -344,34 +317,14 @@ export default function ProfileScreen() {
     }
 
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-
-      // ── Upload image to Firebase Storage if one was picked ──────────────
-      let finalImageUri: string | null = newItemImage;
-      if (newItemImage && currentUser) {
-        setUploadingCatalogImage(true);
-        try {
-          const fileName = generateFileName('jpg');
-          finalImageUri = await uploadFile(newItemImage, 'avatar', {
-            userId: currentUser.uid,
-            fileName: `catalog_${fileName}`,
-          });
-        } catch (uploadErr) {
-          console.warn('[ProfileScreen] Catalog image upload failed, saving local URI:', uploadErr);
-          // Fall back to local URI so the item is still saved
-          finalImageUri = newItemImage;
-        } finally {
-          setUploadingCatalogImage(false);
-        }
-      }
-
+      // Image uploads require S3 presigned URLs (media flag).
+      // For now store the local URI — a follow-up task can migrate to mediaService.
       const newItem: CatalogItem = {
         id: Date.now().toString(),
         name: newItemName.trim(),
         price: newItemPrice.trim(),
         description: newItemDesc.trim() || undefined,
-        imageUri: finalImageUri,
+        imageUri: newItemImage,
         collectionId: newItemCollectionId ?? null,
       };
 
@@ -384,28 +337,17 @@ export default function ProfileScreen() {
       setNewItemImage(null);
       setNewItemCollectionId(null);
 
-      // Save to Firestore
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ catalog: updated });
-      }
+      await endpoints.updateMe({ catalog: JSON.stringify(updated) });
     } catch (err) {
       console.warn('[ProfileScreen] Error saving catalog item:', err);
-      setUploadingCatalogImage(false);
     }
   };
 
   const removeCatalogItem = async (id: string) => {
     const updated = catalog.filter(item => item.id !== id);
     setCatalog(updated);
-
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ catalog: updated });
-      }
+      await endpoints.updateMe({ catalog: JSON.stringify(updated) });
     } catch (err) {
       console.warn('[ProfileScreen] Error removing catalog item:', err);
     }
@@ -415,12 +357,7 @@ export default function ProfileScreen() {
   const saveCollections = async (updated: CatalogCollection[]) => {
     setCollections(updated);
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({ collections: updated });
-      }
+      await persistBusinessFields({ collections: updated });
     } catch (err) {
       console.warn('[ProfileScreen] Error saving collections:', err);
     }
@@ -430,22 +367,15 @@ export default function ProfileScreen() {
     if (!newColName.trim()) return;
     setSavingCollection(true);
     try {
-      const authInstance = getAuth();
-      const currentUser = authInstance.currentUser;
-
       const newCol: CatalogCollection = {
         id:        Date.now().toString(),
         name:      newColName.trim(),
-        emoji:     newColEmoji.trim() || null,   // null not undefined — Firestore rejects undefined
+        emoji:     newColEmoji.trim() || null,
         createdAt: Date.now(),
       };
 
-      // Stamp the selected items with the new collection id.
-      // strip() removes every undefined field before writing — Firestore rejects undefined.
       const strip = <T extends object>(obj: T): T =>
-        Object.fromEntries(
-          Object.entries(obj).filter(([, v]) => v !== undefined)
-        ) as T;
+        Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined)) as T;
 
       const updatedCatalog = catalog.map(item =>
         newColItems.includes(item.id)
@@ -453,16 +383,12 @@ export default function ProfileScreen() {
           : strip({ ...item }),
       );
 
-      // Also strip undefined from the collection object itself
       const updatedCollections = [...collections, strip(newCol)];
 
-      if (currentUser) {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('users').doc(currentUser.uid).update({
-          collections: updatedCollections,
-          catalog:     updatedCatalog,
-        });
-      }
+      await Promise.all([
+        endpoints.updateMe({ catalog: JSON.stringify(updatedCatalog) }),
+        persistBusinessFields({ collections: updatedCollections }),
+      ]);
 
       setCatalog(updatedCatalog);
       setCollections(updatedCollections);
@@ -488,22 +414,16 @@ export default function ProfileScreen() {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            // un-assign items belonging to this collection
             const updatedCatalog = catalog.map(i =>
               i.collectionId === colId ? { ...i, collectionId: null } : i,
             );
             setCatalog(updatedCatalog);
             const updatedCols = collections.filter(c => c.id !== colId);
             try {
-              const authInstance = getAuth();
-              const currentUser = authInstance.currentUser;
-              if (currentUser) {
-                const fsDb = db as ReturnType<typeof firestore>;
-                await fsDb.collection('users').doc(currentUser.uid).update({
-                  catalog: updatedCatalog,
-                  collections: updatedCols,
-                });
-              }
+              await Promise.all([
+                endpoints.updateMe({ catalog: JSON.stringify(updatedCatalog) }),
+                persistBusinessFields({ collections: updatedCols }),
+              ]);
             } catch (err) {
               console.warn('[ProfileScreen] Error removing collection:', err);
             }
@@ -532,31 +452,17 @@ export default function ProfileScreen() {
 
     if (!result.canceled && result.assets[0]) {
       const uri = result.assets[0].uri;
-
       try {
-        const authInstance = getAuth();
-        const currentUser = authInstance.currentUser;
-
-        if (!currentUser) {
-          await setAvatarUri(uri);
-          return;
-        }
-
-        const fsDb = db as ReturnType<typeof firestore>;
-        const fileName = generateFileName('jpg');
-        const downloadURL = await uploadFile(uri, 'avatar', {
-          userId: currentUser.uid,
-          fileName,
-        }, (progress) => {
-          console.log(`[ProfileScreen] Upload progress: ${progress}%`);
-        });
-
+        // Save local URI for immediate display; avatar upload via S3 presigned
+        // URLs is handled by the media service (EXPO_PUBLIC_BACKEND_MEDIA=true).
+        // For now, update the display locally and persist the object key once
+        // mediaService is integrated here.
         await setAvatarUri(uri);
-
-        await fsDb.collection('users').doc(currentUser.uid).update({ photoURL: downloadURL });
+        // PATCH /me with the local URI as placeholder — a full media upload
+        // (presigned URL → S3 → avatarObjectKey) is a follow-up task.
+        await endpoints.updateMe({ avatarObjectKey: uri }).catch(() => {});
       } catch (error: any) {
         console.error('[ProfileScreen] Error saving avatar:', error);
-        // Still save local URI for demo mode
         await setAvatarUri(uri);
       }
     }

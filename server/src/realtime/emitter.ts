@@ -32,6 +32,11 @@ export function emitToChat(chatId: string, event: string, payload: unknown): voi
   io?.to(rooms.chat(chatId)).emit(event, payload);
 }
 
+/** Emit an event to everyone in a meeting room. */
+export function emitToMeeting(meetingId: string, event: string, payload: unknown): void {
+  io?.to(rooms.meeting(meetingId)).emit(event, payload);
+}
+
 /**
  * Deliver a new message to each other member via their user room, except
  * recipients who blocked the sender (Req 5.4). Block filtering is done by the

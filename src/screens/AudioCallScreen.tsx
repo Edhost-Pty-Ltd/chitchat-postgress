@@ -15,8 +15,8 @@ import { useWebRTC } from '../hooks/useWebRTC';
 import { useAuth } from '../hooks/useAuth';
 import { useFloatingCall } from '../context/FloatingCallContext';
 import { useRingtone } from '../hooks/useRingtone';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
+import { SignalingService } from '../services/signalingService';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
 
 import { AppText, AppIcon, AppBg, useGlass } from '../context/ThemeContext';
@@ -109,77 +109,42 @@ export default function AudioCallScreen() {
   useEffect(() => {
     const setupCall = async () => {
       try {
-        // Load stored duration from Firestore if continuing call
-        const fsDb = db as ReturnType<typeof firestore>;
-        const callRef = fsDb.collection('calls').doc(callId);
-        const callSnapshot = await callRef.get();
-        const callData = callSnapshot.data();
-        
-        // Set duration from stored value if exists
-        if (callData?.lastDuration) {
-          setDuration(callData.lastDuration);
-        } else if (callData?.startedAt) {
-          const startTime = callData.startedAt.toDate().getTime();
-          const currentTime = Date.now();
-          const elapsedSeconds = Math.floor((currentTime - startTime) / 1000);
-          setDuration(elapsedSeconds);
-        }
+        // Duration is managed locally; the backend call record has startedAt
+        // from POST /calls. No separate read needed.
 
         // Initialize WebRTC peer connection for audio only
         await initializePeerConnection(false); // false for audio-only call
 
         if (isOutgoing) {
-          // Caller: Create offer
           console.log('[AudioCall] Creating offer as caller...');
           const offer = await createOffer(false);
-          
-          // Update call document with offer
-          await callRef.update({
-            offer: offer,
-            status: 'ringing',
-          });
+          await SignalingService.saveOffer(callId, offer);
 
-          // Listen for answer from callee
-          unsubscribeCallRef.current = callRef.onSnapshot((snapshot) => {
-            const data = snapshot.data();
+          // Listen for answer from callee via socket
+          unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, (data) => {
             if (data?.answer) {
-              console.log('[AudioCall] Received answer, setting remote description...');
               setRemoteAnswer(data.answer).catch(console.error);
             }
             if (data?.iceCandidates) {
               data.iceCandidates.forEach((candidate: any) => {
-                if (candidate.from !== otherParty.userId) return;
                 addIceCandidate(candidate).catch(console.error);
               });
             }
-            if (data?.status === 'ended') {
-              navigation.goBack();
-            }
+            if (data?.status === 'ended') navigation.goBack();
           });
         } else {
-          // Callee: Listen for offer and create answer
           console.log('[AudioCall] Waiting for offer as callee...');
-          
-          unsubscribeCallRef.current = callRef.onSnapshot(async (snapshot) => {
-            const data = snapshot.data();
+          unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, async (data) => {
             if (data?.offer) {
-              console.log('[AudioCall] Received offer, creating answer...');
               const answer = await createAnswer(data.offer);
-              
-              await callRef.update({
-                answer: answer,
-                status: 'active',
-              });
+              await SignalingService.saveAnswer(callId, answer);
             }
             if (data?.iceCandidates) {
               data.iceCandidates.forEach((candidate: any) => {
-                if (candidate.from === otherParty.userId) return;
                 addIceCandidate(candidate).catch(console.error);
               });
             }
-            if (data?.status === 'ended') {
-              navigation.goBack();
-            }
+            if (data?.status === 'ended') navigation.goBack();
           });
         }
 
@@ -234,16 +199,10 @@ export default function AudioCallScreen() {
   const hangUp = async () => {
     ringtone.stop();
     try {
-      // End call in Firestore
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('calls').doc(callId).update({
-        status: 'ended',
-        endedAt: new Date(),
-      });
+      await endpoints.endCall(callId);
     } catch (error) {
-      console.error('[AudioCall] Failed to update call status:', error);
+      console.error('[AudioCall] Failed to end call:', error);
     }
-    
     cleanupWebRTC();
     navigation.goBack();
   };
@@ -271,24 +230,9 @@ export default function AudioCallScreen() {
     }
   };
 
-  // Switch to video — save duration and cleanly transition
+  // Switch to video — cleanly transition while keeping the call alive
   const switchToVideo = async () => {
     if (timerRef.current) clearInterval(timerRef.current);
-    
-    // Save current duration to Firestore before switching
-    try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('calls').doc(callId).update({
-        lastDuration: duration,
-        videoUpgradeRequest: {
-          requestedBy: user?.uid || 'unknown',
-          timestamp: new Date(),
-        },
-      });
-    } catch (error) {
-      console.error('[AudioCall] Failed to save duration:', error);
-    }
-    
     cleanupWebRTC();
     navigation.replace('VideoCall', { callId, isOutgoing, otherParty });
   };

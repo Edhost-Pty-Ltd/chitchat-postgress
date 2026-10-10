@@ -8,8 +8,7 @@ import { COLORS } from '../types/theme';
 import { AppBg } from '../context/ThemeContext';
 
 import { getAuth, signOut as firebaseSignOut } from '@react-native-firebase/auth';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
 
 // ── Eager imports ─────────────────────────────────────────────────────────────
 import SplashScreen      from '../screens/SplashScreen';
@@ -104,11 +103,11 @@ export default function AppNavigator() {
 
     try {
       setProfileCheckError(false);
-      const fsDb = db as ReturnType<typeof firestore>;
-      const snap = await fsDb.collection('users').doc(currentUser.uid).get();
-      setProfileExists(snap.exists);
+      const res = await endpoints.getMe();
+      // Profile exists when the backend returns a row with a display name set.
+      setProfileExists(res.ok && !!res.data.displayName);
     } catch (err: any) {
-      if (err?.code === 'unavailable' || err?.message?.includes('offline') || err?.message === 'Timeout') {
+      if (err?.message?.includes('offline') || err?.message === 'Timeout') {
         setProfileExists(true); // optimistic offline
       } else {
         setProfileCheckError(true);

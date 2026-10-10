@@ -50,4 +50,24 @@ export async function registerMeRoutes(app: FastifyInstance): Promise<void> {
     const settings = parse(privacySettingsSchema, request.body);
     return savePrivacySettings(request.identity!.userId, settings);
   });
+
+  // GET /users/:userId — public profile lookup (display name, avatar, phone —
+  // privacy-filtered). Used by app screens that resolve sender/member names.
+  app.get<{ Params: { userId: string } }>(
+    '/users/:userId',
+    { preHandler: requireAuth },
+    async (request) => {
+      const { userId: targetId } = request.params;
+      const row = await getUserById(targetId);
+      if (!row) throw Errors.notFound('User not found');
+      // Return the public subset — omit private business fields.
+      return {
+        id: row.id,
+        phoneNumber: row.phone_number,
+        displayName: row.display_name,
+        avatarObjectKey: row.avatar_object_key,
+        accountType: row.account_type,
+      };
+    },
+  );
 }

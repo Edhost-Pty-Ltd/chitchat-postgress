@@ -16,6 +16,8 @@
 import firestore from '@react-native-firebase/firestore';
 import { getAuth } from '@react-native-firebase/auth';
 import { db } from '../config/firebase';
+import { useBackend } from '../config/featureFlags';
+import { endpoints } from '../api/endpoints';
 
 export const CHAT_CATEGORY_ID = 'chat_message';
 export const REPLY_ACTION_ID  = 'reply';
@@ -59,9 +61,9 @@ export async function registerChatReplyCategory(): Promise<void> {
   }
 }
 
-// ── Write a reply straight to Firestore ───────────────────────────────────────
-// Mirrors sendMessage() in useChatActions but is self-contained so it works
-// even when the app was woken only to process the action (no React context).
+// ── Write a reply straight to the backend or Firestore ───────────────────────
+// Self-contained so it works even when the app was woken only to process the
+// notification action (no React context available).
 async function writeReply(chatId: string, text: string): Promise<void> {
   const trimmed = text.trim();
   if (!trimmed) return;
@@ -71,6 +73,19 @@ async function writeReply(chatId: string, text: string): Promise<void> {
     console.warn('[NotificationReply] No authenticated user — cannot send reply');
     return;
   }
+
+  // ── Backend path ──────────────────────────────────────────────────────────
+  if (useBackend('messaging')) {
+    const res = await endpoints.sendMessage(chatId, { type: 'text', text: trimmed });
+    if (!res.ok) {
+      console.error('[NotificationReply] Backend sendMessage failed:', res.error.message);
+      throw new Error(res.error.message);
+    }
+    console.log('[NotificationReply] Reply sent via backend to chat', chatId);
+    return;
+  }
+
+  // ── Firestore fallback ────────────────────────────────────────────────────
   const senderId = currentUser.uid;
   const fsDb = db as ReturnType<typeof firestore>;
 
@@ -95,7 +110,7 @@ async function writeReply(chatId: string, text: string): Promise<void> {
     expiresAt,
     readBy:      [senderId],
     deliveredTo: [],
-    sentFrom:    'notification',   // trace flag — useful for debugging
+    sentFrom:    'notification',
   });
 
   const unreadUpdates = Object.fromEntries(
@@ -109,18 +124,31 @@ async function writeReply(chatId: string, text: string): Promise<void> {
   });
 
   await batch.commit();
-  console.log('[NotificationReply] Reply sent to chat', chatId);
+  console.log('[NotificationReply] Reply sent via Firestore to chat', chatId);
 }
 
 // ── Mark a chat as read from the notification ─────────────────────────────────
 async function markChatRead(chatId: string): Promise<void> {
   const currentUser = getAuth().currentUser;
   if (!currentUser) return;
+
+  // ── Backend path ──────────────────────────────────────────────────────────
+  if (useBackend('messaging')) {
+    // The backend tracks read state via message receipts on the socket; there
+    // is no standalone "mark read" REST endpoint. Emit a read receipt via the
+    // REST delete-unread path if one lands, or simply do nothing — the chat
+    // list will refresh on the next message:read socket event. For now just
+    // log so we can trace it.
+    console.log('[NotificationReply] Chat mark-read skipped on backend path (handled by socket receipts)', chatId);
+    return;
+  }
+
+  // ── Firestore fallback ────────────────────────────────────────────────────
   const fsDb = db as ReturnType<typeof firestore>;
   await fsDb.collection('chats').doc(chatId).update({
     [`unreadCounts.${currentUser.uid}`]: 0,
   });
-  console.log('[NotificationReply] Chat marked read', chatId);
+  console.log('[NotificationReply] Chat marked read via Firestore', chatId);
 }
 
 // ── Entry point called from the response listener ─────────────────────────────

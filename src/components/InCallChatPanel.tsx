@@ -1,19 +1,20 @@
 // ─── InCallChatPanel ─────────────────────────────────────────────────────────
 // Slide-in panel used inside the Audio/Video call screen.
-// Shows the full 1:1 message history from Firestore and lets either side send
-// new messages while the call is ongoing.
+// Shows the full 1:1 message history from the Postgres backend and lets either
+// side send new messages while the call is ongoing via the REST API + socket.
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, FlatList, TouchableOpacity, StyleSheet, TextInput,
   KeyboardAvoidingView, Platform, ActivityIndicator, Modal,
-  Animated, Easing, Image, Keyboard,
+  Animated, Easing, Image,
 } from 'react-native';
-import firestore from '@react-native-firebase/firestore';
 import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
+import { endpoints, type BackendMessage } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
 
 interface Props {
   visible: boolean;
@@ -24,22 +25,9 @@ interface Props {
   otherPhoto?: string | null;
 }
 
-interface ChatMessage {
-  id: string;
-  senderId: string;
-  text?: string;
-  type?: string;
-  imageUrl?: string;
-  voiceUrl?: string;
-  fileName?: string;
-  duration?: number;
-  timestamp: any;
-}
-
-const fmtTime = (ts: any): string => {
-  if (!ts) return '';
-  const d = ts.toDate ? ts.toDate() : new Date(ts);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const fmtTime = (iso: string | null | undefined): string => {
+  if (!iso) return '';
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
 export function InCallChatPanel({
@@ -50,12 +38,12 @@ export function InCallChatPanel({
   const { bevel } = useGlass();
 
   const [chatId, setChatId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<BackendMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
 
-  const listRef = useRef<FlatList<ChatMessage>>(null);
+  const listRef = useRef<FlatList<BackendMessage>>(null);
   const slide = useRef(new Animated.Value(0)).current;
 
   // ── Slide animation ─────────────────────────────────────────────
@@ -84,53 +72,59 @@ export function InCallChatPanel({
     return () => { cancelled = true; };
   }, [visible, userId, otherUserId]);
 
-  // ── Stream all messages ─────────────────────────────────────────
+  // ── Load history + subscribe to live messages ────────────────────
   useEffect(() => {
     if (!chatId) return;
+
+    let active = true;
     setLoading(true);
-    const unsub = firestore()
-      .collection('chats').doc(chatId).collection('messages')
-      .orderBy('timestamp', 'asc')
-      .onSnapshot(
-        snap => {
-          const list: ChatMessage[] = snap.docs.map(d => ({
-            id: d.id,
-            ...(d.data() as Omit<ChatMessage, 'id'>),
-          }));
-          setMessages(list);
-          setLoading(false);
-          requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
-        },
-        err => {
-          console.error('[InCallChat] messages subscription error:', err);
-          setLoading(false);
-        }
-      );
-    return () => unsub();
+
+    // 1. Load existing messages via REST (newest-first → reverse for display)
+    endpoints.listMessages(chatId).then((res) => {
+      if (!active) return;
+      if (res.ok) {
+        // listMessages returns descending; reverse to show oldest at top
+        setMessages([...res.data.messages].reverse());
+        requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+      }
+      setLoading(false);
+    }).catch(() => { if (active) setLoading(false); });
+
+    // 2. Subscribe to new messages via socket
+    void socketClient.connect();
+    const unsub = socketClient.subscribe('message:new', (payload) => {
+      if (!active) return;
+      const p = payload as { message?: BackendMessage };
+      const msg = p?.message;
+      if (!msg || msg.chatId !== chatId) return;
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === msg.id)) return prev;
+        return [...prev, msg];
+      });
+      requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
+    });
+
+    return () => {
+      active = false;
+      unsub();
+    };
   }, [chatId]);
 
-  // ── Send a message ──────────────────────────────────────────────
+  // ── Send ─────────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
     const text = input.trim();
     if (!text || !chatId || !userId) return;
     setInput('');
     setSending(true);
     try {
-      const fsDb = firestore();
-      const now = firestore.FieldValue.serverTimestamp();
-      await fsDb.collection('chats').doc(chatId).collection('messages').add({
-        senderId: userId,
-        text,
-        type: 'text',
-        timestamp: now,
-        readBy: [userId],
-        deliveredTo: [],
-      });
-      await fsDb.collection('chats').doc(chatId).update({
-        'lastMessage.text': text,
-        'lastMessage.senderId': userId,
-        'lastMessage.timestamp': now,
-      });
+      const res = await endpoints.sendMessage(chatId, { type: 'text', text });
+      if (res.ok) {
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === res.data.message.id)) return prev;
+          return [...prev, res.data.message];
+        });
+        requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
+      }
     } catch (e) {
       console.error('[InCallChat] send failed:', e);
     } finally {
@@ -139,7 +133,7 @@ export function InCallChatPanel({
   }, [input, chatId, userId]);
 
   // ── Render a single bubble ──────────────────────────────────────
-  const renderItem = useCallback(({ item }: { item: ChatMessage }) => {
+  const renderItem = useCallback(({ item }: { item: BackendMessage }) => {
     const isMine = item.senderId === userId;
     const isSystem = item.type === 'system';
 
@@ -173,7 +167,7 @@ export function InCallChatPanel({
             styles.bubbleTime,
             { color: isMine ? 'rgba(255,255,255,0.75)' : FG.secondary },
           ]}>
-            {fmtTime(item.timestamp)}
+            {fmtTime(item.createdAt)}
           </AppText>
         </View>
       </View>
@@ -209,7 +203,7 @@ export function InCallChatPanel({
                 <Image source={{ uri: otherPhoto }} style={styles.headerAvatar} />
               ) : (
                 <View style={[styles.headerAvatar, { backgroundColor: COLORS.blue, alignItems: 'center', justifyContent: 'center' }]}>
-                  <AppText fixedColor style={{ color: '#fff', fontWeight: '700' }}>{otherName.slice(0,2).toUpperCase()}</AppText>
+                  <AppText fixedColor style={{ color: '#fff', fontWeight: '700' }}>{otherName.slice(0, 2).toUpperCase()}</AppText>
                 </View>
               )}
               <View>

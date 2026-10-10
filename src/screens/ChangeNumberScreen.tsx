@@ -14,10 +14,9 @@ import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import firestore from '@react-native-firebase/firestore';
 import { getAuth } from '@react-native-firebase/auth';
-import { db } from '../config/firebase';
 import { useAuth } from '../context/AuthContext';
+import { endpoints } from '../api/endpoints';
 import { sendNumberChangeNotification } from '../hooks/useChatActions';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
@@ -137,17 +136,17 @@ export default function ChangeNumberScreen() {
       if (ok) {
         // Update phone number in AuthContext
         await signIn(fullNumber);
-        
-        // Update phone number in Firestore user document
-        const authInstance = getAuth();
-        const currentUser = authInstance.currentUser;
-        if (currentUser) {
-          const fsDb = db as ReturnType<typeof firestore>;
-          await fsDb.collection('users').doc(currentUser.uid).update({ phone: fullNumber });
-          console.log('[ChangeNumberScreen] Updated phone number in Firestore');
+
+        // Update phone number in the backend (PUT /me/phone)
+        const res = await endpoints.updatePhone(fullNumber);
+        if (res.ok) {
+          console.log('[ChangeNumberScreen] Updated phone number in backend');
+        } else {
+          console.warn('[ChangeNumberScreen] Backend phone update failed:', res.error.message);
         }
-        
+
         // Send number change notification to all chats
+        const currentUser = getAuth().currentUser;
         const { success, count } = await sendNumberChangeNotification(
           currentUser?.uid || '',
           currentPhone || 'unknown',

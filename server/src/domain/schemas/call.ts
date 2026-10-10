@@ -29,3 +29,10 @@ export const createMeetingSchema = z
     participants: z.array(z.string().min(1).max(128)).max(100).optional(),
   })
   .strict();
+
+export const sendMeetingMessageSchema = z
+  .object({
+    text: z.string().min(1).max(8192).optional(),
+    mediaObjectKey: z.string().max(512).nullable().optional(),
+  })
+  .strict();

@@ -24,6 +24,14 @@ export interface MeResponse {
   accountType: string;
 }
 
+export interface PublicUserProfile {
+  id: string;
+  phoneNumber: string | null;
+  displayName: string | null;
+  avatarObjectKey: string | null;
+  accountType: string;
+}
+
 export interface ProfilePatch {
   displayName?: string | null;
   about?: string | null;
@@ -71,6 +79,8 @@ export function createEndpoints(client: ApiClient = apiClient) {
     updateMe: (patch: ProfilePatch): Promise<ApiResult<MeResponse>> => client.patch('/me', patch),
     updatePhone: (phoneNumber: string): Promise<ApiResult<{ phoneNumber: string }>> =>
       client.put('/me/phone', { phoneNumber }),
+    getUser: (userId: string): Promise<ApiResult<PublicUserProfile>> =>
+      client.get(`/users/${encodeURIComponent(userId)}`),
 
     // ── Privacy (Req 4.9, 4.10) ──
     getPrivacy: (): Promise<ApiResult<PrivacySettings>> => client.get('/me/privacy'),
@@ -119,6 +129,12 @@ export function createEndpoints(client: ApiClient = apiClient) {
       scope: 'everyone' | 'me',
     ): Promise<ApiResult<{ ok: true }>> =>
       client.post(`/chats/${chatId}/messages/${messageId}/delete`, { scope }),
+    editMessage: (
+      chatId: string,
+      messageId: string,
+      text: string,
+    ): Promise<ApiResult<{ message: BackendMessage }>> =>
+      client.patch(`/chats/${chatId}/messages/${messageId}`, { text }),
     forwardMessage: (
       messageId: string,
       targetChatIds: string[],
@@ -138,6 +154,8 @@ export function createEndpoints(client: ApiClient = apiClient) {
       type: 'audio' | 'video',
     ): Promise<ApiResult<{ callId: string }>> =>
       client.post('/calls', { callId, calleeId, callerInfo, calleeInfo, type }),
+    endCall: (callId: string): Promise<ApiResult<{ ok: true }>> =>
+      client.post(`/calls/${encodeURIComponent(callId)}/end`),
     callHistory: (
       opts: { cursor?: string; limit?: number } = {},
     ): Promise<ApiResult<{ items: CallHistoryDTO[]; nextCursor: string | null }>> =>
@@ -150,6 +168,17 @@ export function createEndpoints(client: ApiClient = apiClient) {
       client.post('/meetings', { title, participants }),
     getMeeting: (meetingId: string): Promise<ApiResult<{ state: unknown }>> =>
       client.get(`/meetings/${meetingId}`),
+    listMeetings: (): Promise<ApiResult<{ meetings: MeetingListItem[] }>> =>
+      client.get('/meetings'),
+    getMeetingMessages: (meetingId: string): Promise<ApiResult<{ messages: MeetingMessage[] }>> =>
+      client.get(`/meetings/${encodeURIComponent(meetingId)}/messages`),
+    sendMeetingMessage: (
+      meetingId: string,
+      body: { text?: string; mediaObjectKey?: string | null },
+    ): Promise<ApiResult<{ message: { id: string; createdAt: string } }>> =>
+      client.post(`/meetings/${encodeURIComponent(meetingId)}/messages`, body),
+    endMeeting: (meetingId: string): Promise<ApiResult<{ ok: true }>> =>
+      client.post(`/meetings/${encodeURIComponent(meetingId)}/end`),
 
     // ── Status & broadcasts (Req 9) ──
     listStatuses: (): Promise<ApiResult<{ myStatuses: BackendStatus[]; contactStatuses: StatusGroupDTO[] }>> =>
@@ -295,6 +324,8 @@ export interface BackendMessage {
   deletedForEveryone: boolean;
   deliveredTo: string[];
   readBy: string[];
+  edited: boolean;
+  editedAt: string | null;
 }
 
 export interface SendMessageInput {
@@ -311,6 +342,25 @@ export interface SendMessageInput {
   catalogItem?: unknown;
   replyTo?: unknown;
   subtype?: string | null;
+}
+
+export interface MeetingListItem {
+  id: string;
+  title: string;
+  organizerId: string;
+  isActive: boolean;
+  endedAt: string | null;
+  createdAt: string;
+  participantCount: number;
+}
+
+export interface MeetingMessage {
+  id: string;
+  meetingId: string;
+  senderId: string;
+  text: string | null;
+  mediaObjectKey: string | null;
+  createdAt: string;
 }
 
 export const endpoints = createEndpoints();

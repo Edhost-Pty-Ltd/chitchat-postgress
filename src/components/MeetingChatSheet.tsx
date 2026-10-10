@@ -1,7 +1,7 @@
 // ─── MeetingChatSheet ────────────────────────────────────────────────────────
-// Small chat sheet used inside a meeting. Messages broadcast to all joined
-// participants via meetings/{meetingId}/messages. System messages (recaps,
-// auto-generated minutes) also flow through the same collection.
+// Small chat sheet used inside a meeting. Messages are stored on the Postgres
+// backend via POST /meetings/:id/messages and delivered in real-time through
+// the meeting:message Socket.IO event.
 
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
@@ -9,10 +9,11 @@ import {
   KeyboardAvoidingView, Platform, ActivityIndicator, Modal,
   Animated, Easing,
 } from 'react-native';
-import firestore from '@react-native-firebase/firestore';
 import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
+import { endpoints, type MeetingMessage } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
 
 interface Props {
   visible: boolean;
@@ -22,19 +23,9 @@ interface Props {
   onClose: () => void;
 }
 
-interface ChatMsg {
-  id: string;
-  senderId: string;
-  senderName: string;
-  text: string;
-  timestamp: any;
-  isSystem?: boolean;
-}
-
-const fmtTime = (ts: any) => {
-  if (!ts) return '';
-  const d = ts.toDate ? ts.toDate() : new Date(ts);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const fmtTime = (iso: string | null | undefined): string => {
+  if (!iso) return '';
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
 export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, onClose }: Props) {
@@ -42,13 +33,14 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
   const { FG }        = useForeground();
   const { bevel }     = useGlass();
 
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const [messages, setMessages] = useState<MeetingMessage[]>([]);
   const [loading, setLoading]   = useState(true);
   const [input, setInput]       = useState('');
   const [sending, setSending]   = useState(false);
-  const listRef = useRef<FlatList<ChatMsg>>(null);
+  const listRef = useRef<FlatList<MeetingMessage>>(null);
   const slide   = useRef(new Animated.Value(0)).current;
 
+  // ── Slide animation ─────────────────────────────────────────────
   useEffect(() => {
     Animated.timing(slide, {
       toValue: visible ? 1 : 0,
@@ -58,58 +50,93 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
     }).start();
   }, [visible, slide]);
 
+  // ── Load history + subscribe to live messages ────────────────────
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || !meetingId) return;
+
+    let active = true;
     setLoading(true);
-    const unsub = firestore()
-      .collection('meetings').doc(meetingId).collection('messages')
-      .orderBy('timestamp', 'asc')
-      .onSnapshot(
-        snap => {
-          setMessages(
-            snap.docs.map(d => {
-              const data = d.data();
-              return {
-                id: d.id,
-                senderId: data.senderId ?? '',
-                senderName: data.senderName ?? 'Unknown',
-                text: data.text ?? '',
-                timestamp: data.timestamp,
-                isSystem: !!data.isSystem,
-              };
-            })
-          );
-          setLoading(false);
-          requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
-        },
-        err => {
-          console.error('[MeetingChatSheet] snapshot error:', err);
-          setLoading(false);
-        }
-      );
-    return () => unsub();
+
+    // 1. Load existing messages via REST
+    endpoints.getMeetingMessages(meetingId).then((res) => {
+      if (!active) return;
+      if (res.ok) {
+        setMessages(res.data.messages);
+        requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+      }
+      setLoading(false);
+    }).catch(() => { if (active) setLoading(false); });
+
+    // 2. Subscribe to new messages via Socket.IO meeting:message event
+    void socketClient.connect();
+    const unsub = socketClient.subscribe('meeting:message', (payload) => {
+      const p = payload as {
+        id?: string; meetingId?: string; senderId?: string;
+        text?: string | null; mediaObjectKey?: string | null; createdAt?: string;
+      };
+      if (!active || p?.meetingId !== meetingId) return;
+      const msg: MeetingMessage = {
+        id:             p.id ?? '',
+        meetingId:      p.meetingId ?? meetingId,
+        senderId:       p.senderId ?? '',
+        text:           p.text ?? null,
+        mediaObjectKey: p.mediaObjectKey ?? null,
+        createdAt:      p.createdAt ?? new Date().toISOString(),
+      };
+      setMessages((prev) => {
+        // Deduplicate — the sender already sees their own optimistic message
+        if (prev.some((m) => m.id === msg.id)) return prev;
+        return [...prev, msg];
+      });
+      requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
+    });
+
+    return () => {
+      active = false;
+      unsub();
+    };
   }, [visible, meetingId]);
 
+  // ── Send ─────────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
     const text = input.trim();
     if (!text || !userId) return;
     setInput('');
     setSending(true);
+
+    // Optimistic — add locally before the server echo arrives
+    const tempId = `temp-${Date.now()}`;
+    const optimistic: MeetingMessage = {
+      id: tempId,
+      meetingId,
+      senderId: userId,
+      text,
+      mediaObjectKey: null,
+      createdAt: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimistic]);
+    requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
+
     try {
-      await firestore()
-        .collection('meetings').doc(meetingId).collection('messages')
-        .add({
-          senderId: userId,
-          senderName: userDisplayName,
-          text,
-          timestamp: firestore.FieldValue.serverTimestamp(),
-        });
+      const res = await endpoints.sendMeetingMessage(meetingId, { text });
+      if (res.ok) {
+        // Replace the optimistic entry with the confirmed one from the server
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === tempId
+              ? { ...m, id: res.data.message.id, createdAt: res.data.message.createdAt }
+              : m,
+          ),
+        );
+      }
     } catch (e) {
       console.error('[MeetingChatSheet] send failed:', e);
+      // Remove optimistic message on failure so the user knows it didn't send
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
     } finally {
       setSending(false);
     }
-  }, [input, userId, userDisplayName, meetingId]);
+  }, [input, userId, meetingId]);
 
   if (!visible) return null;
 
@@ -167,7 +194,7 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
                   onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
                   renderItem={({ item }) => {
                     const mine = item.senderId === userId;
-                    const isSystem = !!item.isSystem || item.senderId === 'system';
+                    const isSystem = item.senderId === 'system';
 
                     if (isSystem) {
                       return (
@@ -175,8 +202,8 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
                           <View style={styles.systemCard}>
                             <View style={styles.systemHeader}>
                               <AppIcon name="sparkles-outline" size={13} color={COLORS.blue} />
-                              <AppText style={styles.systemName}>{item.senderName}</AppText>
-                              <AppText style={styles.systemTime}>{fmtTime(item.timestamp)}</AppText>
+                              <AppText style={styles.systemName}>Meeting Recap</AppText>
+                              <AppText style={styles.systemTime}>{fmtTime(item.createdAt)}</AppText>
                             </View>
                             <AppText style={styles.systemText}>{item.text}</AppText>
                           </View>
@@ -188,7 +215,7 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
                       <View style={[styles.row, mine ? styles.rowMine : styles.rowOther]}>
                         {!mine && (
                           <AppText style={[styles.senderName, { color: COLORS.blue }]} numberOfLines={1}>
-                            {item.senderName}
+                            {item.senderId}
                           </AppText>
                         )}
                         <View style={[
@@ -202,7 +229,7 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
                             styles.bubbleTime,
                             { color: mine ? 'rgba(255,255,255,0.75)' : FG.secondary },
                           ]}>
-                            {fmtTime(item.timestamp)}
+                            {fmtTime(item.createdAt)}
                           </AppText>
                         </View>
                       </View>

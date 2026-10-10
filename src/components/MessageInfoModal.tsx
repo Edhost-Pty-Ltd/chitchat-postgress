@@ -10,8 +10,7 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
 import { Avatar } from './index';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 import { COLORS, RADIUS, SHADOW } from '../types/theme';
@@ -81,17 +80,13 @@ export function MessageInfoModal({
 
         for (const userId of readBy) {
           if (userId === currentUserId) continue;
-
           try {
-            const fsDb = db as ReturnType<typeof firestore>;
-            const userSnap = await fsDb.collection('users').doc(userId).get();
-
-            if (userSnap.exists) {
-              const userData = userSnap.data()!;
+            const res = await endpoints.getUser(userId);
+            if (res.ok) {
               recipientsList.push({
                 userId,
-                displayName: userData.displayName || userData.phone || 'Unknown',
-                photoURL: userData.photoURL || null,
+                displayName: res.data.displayName ?? res.data.phoneNumber ?? 'Unknown',
+                photoURL: res.data.avatarObjectKey,
                 status: 'read',
                 timestamp: messageTimestamp || new Date(),
               });

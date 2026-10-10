@@ -1,11 +1,14 @@
 // ─── useNotificationSync Hook ─────────────────────────────────────────────────
-// Syncs real-time Firestore events to the notification system.
+// Syncs real-time events to the in-app notification system.
+// When backend flags are on, listens to socket events instead of Firestore.
 
 import { useEffect, useRef } from 'react';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import type { AppNotification } from '../context/NotificationContext';
 import { resolveNotificationName } from '../utils/resolveNotificationName';
+import { useBackend } from '../config/featureFlags';
+import { socketClient } from '../realtime/socket';
 
 interface LastMessageTimestamp { [chatId: string]: Date; }
 type PushNotificationFn = (n: Omit<AppNotification, 'id' | 'time' | 'read'>) => void;
@@ -31,9 +34,90 @@ export function useNotificationSync(userId: string | null, pushNotification: Pus
 
     console.log('[useNotificationSync] Setting up listeners for userId:', userId);
 
+    // ── Backend path ────────────────────────────────────────────────────────
+    if (useBackend('messaging')) {
+      // New messages arrive via socket; fetch sender display name from the
+      // backend user profile when needed.
+      void socketClient.connect();
+
+      const unsubMessage = socketClient.subscribe('message:new', async (payload) => {
+        const p = payload as {
+          message?: {
+            chatId?: string;
+            senderId?: string;
+            text?: string | null;
+            type?: string;
+          };
+          chat?: { type?: string; groupName?: string | null };
+        };
+
+        const msg  = p?.message;
+        const chat = p?.chat;
+        if (!msg?.chatId || !msg.senderId || msg.senderId === userId) return;
+
+        try {
+          // The socket payload doesn't carry the sender's display name.
+          // We use the sender's user ID as the notification title for now.
+          // A GET /users/:id endpoint can be added later to resolve the name.
+          const senderName = msg.senderId;
+          const chatName   = chat?.type === 'group' && chat.groupName ? chat.groupName : senderName;
+
+          await pushNotificationRef.current({
+            type:      'message',
+            title:     chatName,
+            body:      chat?.type === 'group'
+              ? `${senderName}: ${msg.text || 'Sent a media file'}`
+              : (msg.text || 'Sent a media file'),
+            contactId: chat?.type === 'direct' ? msg.senderId : undefined,
+          });
+        } catch (err) {
+          console.error('[useNotificationSync] Error processing message:new event:', err);
+        }
+      });
+
+      unsubscribers.current.push(unsubMessage);
+
+      if (useBackend('calls')) {
+        // Missed/rejected calls arrive via call:missed socket event.
+        const unsubCalls = socketClient.subscribe('call:missed', async (payload) => {
+          const p = payload as {
+            callId?: string;
+            callerId?: string;
+            type?: string;
+          };
+
+          try {
+            const callType = p?.type === 'video' ? 'Video Call' : 'Call';
+            // Caller display name is not in the socket payload; use the ID as
+            // fallback until a GET /users/:id endpoint is available.
+            const callerName = p?.callerId ?? 'Unknown';
+
+            pushNotificationRef.current({
+              type:      'call',
+              title:     `Missed ${callType}`,
+              body:      `${callerName} tried to ${p?.type === 'video' ? 'video ' : ''}call you`,
+              contactId: p?.callerId,
+            });
+          } catch (err) {
+            console.error('[useNotificationSync] Error processing call:missed event:', err);
+          }
+        });
+
+        unsubscribers.current.push(unsubCalls);
+      }
+
+      console.log('[useNotificationSync] Backend listeners set up successfully');
+      return () => {
+        console.log('[useNotificationSync] Cleaning up backend listeners');
+        unsubscribers.current.forEach((u) => u());
+        unsubscribers.current = [];
+      };
+    }
+
+    // ── Firestore fallback ──────────────────────────────────────────────────
     const fsDb = db as ReturnType<typeof firestore>;
 
-    // ── 1. New messages ───────────────────────────────────────────
+    // ── 1. New messages ─────────────────────────────────────────────────────
     const unsubChats = fsDb
       .collection('chats')
       .where('members', 'array-contains', userId)
@@ -97,7 +181,7 @@ export function useNotificationSync(userId: string | null, pushNotification: Pus
 
     unsubscribers.current.push(unsubChats);
 
-    // ── 2. Missed / rejected calls ────────────────────────────────
+    // ── 2. Missed / rejected calls ──────────────────────────────────────────
     try {
       const lastCallCheck = new Date();
       console.log('[useNotificationSync] Setting up call history listener, will notify for calls after:', lastCallCheck);

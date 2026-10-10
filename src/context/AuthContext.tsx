@@ -9,11 +9,10 @@ import React, {
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getAuth, onAuthStateChanged, signOut as fbSignOut } from '@react-native-firebase/auth';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
 import { startStatusCleanupService, stopStatusCleanupService } from '../services/statusCleanupService';
 import { writePresence } from '../hooks/usePresence';
 import { socketClient } from '../realtime/socket';
+import { endpoints } from '../api/endpoints';
 import { FirebaseAuthTypes } from '@react-native-firebase/auth'; // Add this import at the top
 const WEB_SESSION_TIMEOUT_MS = 4 * 60 * 60 * 1000; // 4 hours
 
@@ -202,15 +201,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setPhone(phoneNumber);
     setIsSignedIn(true);
 
-    // Fire-and-forget: fetch displayName/avatar in background — does NOT block navigation
+    // Fire-and-forget: fetch displayName/avatar from the backend in background
+    // — does NOT block navigation.
     const currentUser = getAuth().currentUser;
     if (currentUser) {
-      const fsDb = db as ReturnType<typeof firestore>;
-      fsDb.collection('users').doc(currentUser.uid).get().then((snap) => {
-        if (!snap.exists) return;
-        const data = snap.data()!;
-        const name  = data.displayName || '';
-        const photo = data.photoURL    || null;
+      endpoints.getMe().then((res) => {
+        if (!res.ok) return;
+        const name  = res.data.displayName || '';
+        const photo = res.data.avatarObjectKey || null;
         if (name)  { setDisplayNameState(name);  AsyncStorage.setItem(KEYS.displayName, name); }
         if (photo) { setAvatarUriState(photo);   AsyncStorage.setItem(KEYS.avatarUri, photo); }
       }).catch(() => {});

@@ -1,9 +1,11 @@
 // ─── useUnreadCount Hook ──────────────────────────────────────────────────────
-// Real-time listener for total unread message count across all chats.
+// Real-time unread message counts via the backend REST + socket path.
+// Fetches totals from GET /chats on mount and refreshes on any message or read
+// socket event, matching the shape previously sourced from Firestore.
 
-import { useState, useEffect } from 'react';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { useState, useEffect, useRef } from 'react';
+import { endpoints } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
 
 export function useUnreadCount(userId: string | null): {
   totalUnread: number;
@@ -13,8 +15,11 @@ export function useUnreadCount(userId: string | null): {
   const [totalUnread,  setTotalUnread]  = useState(0);
   const [unreadByChat, setUnreadByChat] = useState<Map<string, number>>(new Map());
   const [loading,      setLoading]      = useState(true);
+  const activeRef = useRef(true);
 
   useEffect(() => {
+    activeRef.current = true;
+
     if (!userId) {
       setTotalUnread(0);
       setUnreadByChat(new Map());
@@ -22,34 +27,39 @@ export function useUnreadCount(userId: string | null): {
       return;
     }
 
-    setLoading(true);
-    const fsDb = db as ReturnType<typeof firestore>;
+    async function load() {
+      const res = await endpoints.listChats();
+      if (!activeRef.current) return;
 
-    const unsub = fsDb
-      .collection('chats')
-      .where('members', 'array-contains', userId)
-      .onSnapshot(
-        (snapshot) => {
-          let total = 0;
-          const chatMap = new Map<string, number>();
+      if (!res.ok) {
+        setLoading(false);
+        return;
+      }
 
-          snapshot.docs.forEach((doc) => {
-            const unreadCounts = doc.data().unreadCounts || {};
-            const count = unreadCounts[userId] || 0;
-            if (count > 0) { chatMap.set(doc.id, count); total += count; }
-          });
+      const map = new Map<string, number>();
+      let total = res.data.totalUnread;
+      for (const chat of res.data.chats) {
+        const count = chat.unreadCount ?? 0;
+        if (count > 0) map.set(chat.chatId, count);
+      }
+      setUnreadByChat(map);
+      setTotalUnread(total);
+      setLoading(false);
+    }
 
-          setUnreadByChat(chatMap);
-          setTotalUnread(total);
-          setLoading(false);
-        },
-        (error) => {
-          console.error('[useUnreadCount] Error:', error);
-          setLoading(false);
-        },
-      );
+    void socketClient.connect().then(load).catch(() => { if (activeRef.current) setLoading(false); });
 
-    return () => unsub();
+    // Refresh on any delivery/read/new-message event.
+    const unsubs = [
+      socketClient.subscribe('message:new',  () => void load()),
+      socketClient.subscribe('message:read', () => void load()),
+      socketClient.subscribe('message:delivered', () => void load()),
+    ];
+
+    return () => {
+      activeRef.current = false;
+      unsubs.forEach((u) => u());
+    };
   }, [userId]);
 
   return { totalUnread, unreadByChat, loading };

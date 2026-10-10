@@ -25,9 +25,9 @@ import { useAuth } from '../hooks/useAuth';
 import { useFloatingCall } from '../context/FloatingCallContext';
 import { useContacts } from '../hooks/useContacts';
 import { useMeetingRoom } from '../hooks/useMeetingRoom';
-import firestore from '@react-native-firebase/firestore';
-import storage from '@react-native-firebase/storage';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
+import { SignalingService } from '../services/signalingService';
+import { socketClient } from '../realtime/socket';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
 import { useAudioRecorder, AudioModule, RecordingPresets, setAudioModeAsync } from 'expo-audio';
 import { documentDirectory, copyAsync, readAsStringAsync, EncodingType } from 'expo-file-system/legacy';
@@ -309,28 +309,30 @@ export default function VideoCallScreen() {
   // ── Fetch meeting schedule (end time for countdown) ─────────────
   useEffect(() => {
     if (!isMeeting || !meetingId) return;
-    const unsub = firestore().collection('meetings').doc(meetingId).onSnapshot(doc => {
-      const data = doc.data();
-      if (!data) return;
-      if (data.endDate) setMeetingEndTime(data.endDate.toDate());
-      if (data.date)    setMeetingStartTime(data.date.toDate());
-
-      // Meeting ended for all — navigate everyone (including non-organizers) away
-      if (data.endedAt && data.isActive === false) {
-        if (isOrganizer) {
-          // Organizer sees the report
-          if (!reportOpen) buildAndShowReport(data).catch(() => {});
-        } else {
-          // Participants get a brief alert then go back to Calendar
-          Alert.alert(
-            'Meeting ended',
-            'The organizer has ended this meeting.',
-            [{ text: 'OK', onPress: () => navigation.goBack() }],
-            { cancelable: false }
-          );
+    // Poll via REST on mount, then refresh on socket meeting:updated events.
+    const fetchMeeting = async () => {
+      try {
+        const res = await endpoints.getMeeting(meetingId);
+        if (!res.ok) return;
+        const data = res.data.state as any;
+        if (data?.endDate) setMeetingEndTime(new Date(data.endDate));
+        if (data?.date)    setMeetingStartTime(new Date(data.date));
+        if (data?.endedAt && data?.isActive === false) {
+          if (isOrganizer) {
+            if (!reportOpen) buildAndShowReport(data).catch(() => {});
+          } else {
+            Alert.alert(
+              'Meeting ended',
+              'The organizer has ended this meeting.',
+              [{ text: 'OK', onPress: () => navigation.goBack() }],
+              { cancelable: false }
+            );
+          }
         }
-      }
-    });
+      } catch {}
+    };
+    void fetchMeeting();
+    const unsub = socketClient.subscribe('meeting:updated', fetchMeeting);
     return () => unsub();
   }, [isMeeting, meetingId, isOrganizer]); // eslint-disable-line
 
@@ -366,17 +368,12 @@ export default function VideoCallScreen() {
     if (prev.length > 0) {
       const newlyJoined = current.filter(id => !prev.includes(id) && id !== user?.uid);
       if (newlyJoined.length > 0 && minutesText) {
-        // Broadcast a recap to room chat so newcomers see prior context
-        firestore()
-          .collection('meetings').doc(meetingId).collection('messages')
-          .add({
-            senderId: 'system',
-            senderName: 'Meeting Recap',
-            text: `📋 Recap of what was discussed before you joined:\n\n${minutesText}`,
-            isSystem: true,
-            timestamp: firestore.FieldValue.serverTimestamp(),
-          })
-          .catch(err => console.warn('[VideoCall] recap post failed:', err));
+        // Broadcast a recap via socket meeting:message so newcomers see prior context
+        socketClient.emit('meeting:message', {
+          meetingId,
+          text: `📋 Recap of what was discussed before you joined:\n\n${minutesText}`,
+          isSystem: true,
+        });
       }
     }
     prevJoinedRef.current = current;
@@ -416,58 +413,31 @@ export default function VideoCallScreen() {
           return;
         }
 
-        const fsDb = db as ReturnType<typeof firestore>;
-        const callRef = fsDb.collection('calls').doc(callId);
-        const callSnapshot = await callRef.get();
-        const callData = callSnapshot.data();
-
-        if (callData?.lastDuration) setDuration(callData.lastDuration);
-        else if (callData?.startedAt) {
-          const startTime = callData.startedAt.toDate().getTime();
-          setDuration(Math.max(0, Math.floor((Date.now() - startTime) / 1000)));
-        }
-
-        if (callData?.localIsMain === true) {
-          setParticipants([
-            { id: 'local', contact: LOCAL_CONTACT, isLocal: true },
-            { id: `remote-${otherParty.userId}`, contact: otherContact, isLocal: false },
-          ]);
-        }
-
+        // Duration is tracked locally. Use SignalingService for WebRTC signaling.
         if (isOutgoing) {
           const offer = await createOffer(true);
-          await callRef.update({ offer, status: 'ringing' });
-          unsubscribeCallRef.current = callRef.onSnapshot((snapshot) => {
-            const data = snapshot.data();
+          await SignalingService.saveOffer(callId, offer);
+          unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, (data) => {
             if (data?.answer && !remoteStreamRef.current) {
               setRemoteAnswer(data.answer).catch(console.error);
             }
             if (data?.iceCandidates) {
               data.iceCandidates.forEach((candidate: any) => {
-                if (candidate.from !== otherParty.userId) return;
                 addIceCandidate(candidate).catch(console.error);
               });
-            }
-            if (data?.videoUpgradeRequest && data.videoUpgradeRequest.requestedBy !== user?.uid) {
-              setShowCameraToggle(true);
             }
             if (data?.status === 'ended') navigation.goBack();
           });
         } else {
-          unsubscribeCallRef.current = callRef.onSnapshot(async (snapshot) => {
-            const data = snapshot.data();
+          unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, async (data) => {
             if (data?.offer && !remoteStreamRef.current) {
               const answer = await createAnswer(data.offer);
-              await callRef.update({ answer, status: 'active' });
+              await SignalingService.saveAnswer(callId, answer);
             }
             if (data?.iceCandidates) {
               data.iceCandidates.forEach((candidate: any) => {
-                if (candidate.from !== otherParty.userId) return;
                 addIceCandidate(candidate).catch(console.error);
               });
-            }
-            if (data?.videoUpgradeRequest && data.videoUpgradeRequest.requestedBy !== user?.uid) {
-              setShowCameraToggle(true);
             }
             if (data?.status === 'ended') navigation.goBack();
           });
@@ -507,11 +477,7 @@ export default function VideoCallScreen() {
   useEffect(() => {
     const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
       const isLocalMain = participants[0]?.isLocal || false;
-      const fsDbMinimize = db as ReturnType<typeof firestore>;
-      fsDbMinimize.collection('calls').doc(callId)
-        .update({ localIsMain: isLocalMain })
-        .catch(() => {});
-
+      // localIsMain is a UI hint — no persistence needed on backend path.
       minimizeCall({
         callId,
         displayName: otherParty.displayName,
@@ -710,15 +676,12 @@ export default function VideoCallScreen() {
           const newPath = `${documentDirectory}Meeting_${meetingId ?? callId}_${Date.now()}.m4a`;
           await copyAsync({ from: uri, to: newPath });
           try {
-            const filename = newPath.split('/').pop() ?? `recording_${Date.now()}.m4a`;
-            const storageRef = storage().ref(`meetings/${meetingId ?? callId}/${filename}`);
-            await storageRef.putFile(newPath);
-            const url = await storageRef.getDownloadURL();
+            // Recording upload via S3 presigned URLs (media service follow-up task).
+            const url = newPath; // local URI until media upload is wired
             await addRecording({ url, durationMs: recordingMs });
             lastRecordingUrlRef.current = url;
           } catch (upErr) {
-            console.warn('[VideoCall] Upload failed, saving local only:', upErr);
-            Alert.alert('Saved Locally', `Recording saved locally but not uploaded.`);
+            console.warn('[VideoCall] Recording registration failed:', upErr);
           }
           transcribeRecording(newPath).catch(() => {});
         }
@@ -977,39 +940,24 @@ export default function VideoCallScreen() {
 
   // ── Actions ─────────────────────────────────────────────────────
   const doHangUp = useCallback(async (endForAll: boolean) => {
-    // Only update the calls document for 1:1 calls — meeting joins don't have one
     if (!isMeeting) {
       try {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('calls').doc(callId).update({
-          status: 'ended', endedAt: new Date(),
-        });
+        await endpoints.endCall(callId);
       } catch (err) {
         console.warn('[VideoCall] end call update failed:', err);
       }
     }
 
     if (isMeeting && meetingId) {
-      // Mark local user left
       const me = user?.uid && attendanceRef.current.get(user.uid);
       if (me) me.leftAt = new Date();
 
       if (endForAll && isOrganizer) {
         try {
           await endMeeting();
-          await firestore().collection('meetings').doc(meetingId).update({
-            isActive: false,
-            endedAt: firestore.FieldValue.serverTimestamp(),
-          });
         } catch (e) {
-          console.warn('[VideoCall] endMeeting update failed:', e);
+          console.warn('[VideoCall] endMeeting failed:', e);
         }
-      } else {
-        try {
-          await firestore().collection('meetings').doc(meetingId).update({
-            isActive: true,
-          });
-        } catch {}
       }
     }
 
@@ -1025,15 +973,15 @@ export default function VideoCallScreen() {
           await copyAsync({ from: uri, to: newPath });
           let uploadedUrl: string | null = null;
           try {
-            const filename = newPath.split('/').pop() ?? `recording_${Date.now()}.m4a`;
-            const storageRef = storage().ref(`meetings/${meetingId ?? callId}/${filename}`);
-            await storageRef.putFile(newPath);
-            uploadedUrl = await storageRef.getDownloadURL();
+            // Recording upload uses the S3 media service (presigned URL path).
+            // The `mediaService` will be wired here in the media follow-up task.
+            // For now, local URI is passed to addRecording and transcribeRecording.
+            uploadedUrl = newPath;
             const elapsed = recordingMs;
             await addRecording({ url: uploadedUrl, durationMs: elapsed });
             lastRecordingUrlRef.current = uploadedUrl;
           } catch (upErr) {
-            console.warn('[VideoCall] upload on hangup failed:', upErr);
+            console.warn('[VideoCall] recording registration failed:', upErr);
           }
           // Auto-generate minutes from the recording — don't await so we don't
           // block navigation; transcribeRecording sets isSummarizing and saves
@@ -1086,12 +1034,7 @@ export default function VideoCallScreen() {
 
   const switchToAudio = async () => {
     if (timerRef.current) clearInterval(timerRef.current);
-    if (!isMeeting) {
-      try {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('calls').doc(callId).update({ lastDuration: duration });
-      } catch {}
-    }
+    // Duration is tracked locally; no persistence needed on backend path.
     cleanupWebRTC();
     navigation.replace('AudioCall', { callId, isOutgoing, otherParty, meetingId: meetingId ?? undefined });
   };

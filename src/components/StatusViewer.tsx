@@ -22,8 +22,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useEventListener } from 'expo';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
 import { resolveNotificationName } from '../utils/resolveNotificationName';
 import type { FireStatus } from '../types';
 import { COLORS, SHADOW } from '../types/theme';
@@ -141,15 +140,16 @@ export function StatusViewer({
 
     setViewersLoading(true);
     try {
-      const fsDb = db as ReturnType<typeof firestore>;
       const rows = await Promise.all(
         ids.map(async (uid): Promise<ViewerInfo> => {
           try {
-            const snap = await fsDb.collection('users').doc(uid).get();
-            const data = snap.data();
-            const phone = data?.phone ?? '';
-            const name  = phone ? await resolveNotificationName(phone) : 'Unknown';
-            return { userId: uid, name, photoURL: data?.photoURL ?? null };
+            const res = await endpoints.getUser(uid);
+            if (res.ok) {
+              const name = res.data.displayName
+                ?? (res.data.phoneNumber ? await resolveNotificationName(res.data.phoneNumber) : 'Unknown');
+              return { userId: uid, name, photoURL: res.data.avatarObjectKey ?? null };
+            }
+            return { userId: uid, name: 'Unknown', photoURL: null };
           } catch {
             return { userId: uid, name: 'Unknown', photoURL: null };
           }

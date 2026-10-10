@@ -101,6 +101,10 @@ export function stopStatusCleanupService(): void {
 export function isCleanupServiceRunning(): boolean { return isRunning; }
 
 export async function triggerManualCleanup(): Promise<number> {
+  if (useBackend('status')) {
+    console.log('[StatusCleanup] Backend handles cleanup; manual trigger is a no-op on backend path');
+    return 0;
+  }
   console.log('[StatusCleanup] Manual cleanup triggered');
   return cleanupExpiredStatuses();
 }
