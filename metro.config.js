@@ -10,10 +10,9 @@ const config = getDefaultConfig(__dirname);
 // ─── Web Shims ───────────────────────────────────────────────────────────────
 // Redirect native-only packages to lightweight web-compatible shims on web.
 const webShims = {
-  '@livekit/react-native-webrtc':     path.resolve(__dirname, 'src/shims/livekit-react-native-webrtc.web.ts'),
-  '@react-native-firebase/app':       path.resolve(__dirname, 'src/shims/react-native-firebase-app.web.ts'),
-  '@react-native-firebase/auth':      path.resolve(__dirname, 'src/shims/react-native-firebase-auth.web.ts'),
-  '@react-native-firebase/functions': path.resolve(__dirname, 'src/shims/react-native-firebase-functions.web.ts'),
+  '@livekit/react-native-webrtc': path.resolve(__dirname, 'src/shims/livekit-react-native-webrtc.web.ts'),
+  '@react-native-firebase/app':   path.resolve(__dirname, 'src/shims/react-native-firebase-app.web.ts'),
+  '@react-native-firebase/auth':  path.resolve(__dirname, 'src/shims/react-native-firebase-auth.web.ts'),
 };
 
 // ─── Native Stubs ────────────────────────────────────────────────────────────

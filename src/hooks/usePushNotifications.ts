@@ -1,15 +1,7 @@
 // ─── usePushNotifications Hook ────────────────────────────────────────────────
-// Handles expo-notifications setup, permissions, and push token registration.
-
 import { useState, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
-import {
-  registerChatReplyCategory,
-  handleNotificationReply,
-} from './useNotificationReply';
-import { useBackend } from '../config/featureFlags';
+import { registerChatReplyCategory, handleNotificationReply } from './useNotificationReply';
 import { endpoints } from '../api/endpoints';
 
 let Notifications: any = null;
@@ -17,86 +9,55 @@ try {
   Notifications = require('expo-notifications');
   Notifications.setNotificationHandler({
     handleNotification: async () => ({
-      shouldShowAlert: true,
-      shouldPlaySound: true,
-      shouldSetBadge: true,
-      shouldShowBanner: true,
-      shouldShowList: true,
+      shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: true,
+      shouldShowBanner: true, shouldShowList: true,
     }),
   });
 } catch {
-  console.warn('[usePushNotifications] expo-notifications not available. Push notifications disabled.');
+  console.warn('[usePushNotifications] expo-notifications not available.');
 }
 
-// ── Safe unsubscribe helper ───────────────────────────────────────────────────
-// `Notifications.removeNotificationSubscription` was removed from expo-notifications.
-// The subscription objects returned by addNotification*Listener now expose a
-// `.remove()` method (EventSubscription). Older SDKs returned a plain function.
-// Handle both, and never call undefined().
 function removeSubscription(sub: any) {
   if (!sub) return;
   try {
-    if (typeof sub.remove === 'function') {
-      sub.remove();
-      return;
-    }
-    if (typeof sub === 'function') {
-      sub();
-    }
-  } catch (err) {
-    console.warn('[usePushNotifications] Error removing subscription (ignored):', err);
-  }
+    if (typeof sub.remove === 'function') { sub.remove(); return; }
+    if (typeof sub === 'function') sub();
+  } catch {}
 }
 
 export function usePushNotifications(userId: string | null) {
   const [expoPushToken, setExpoPushToken] = useState<string | null>(null);
-  const [notification, setNotification] = useState<any | null>(null);
+  const [notification,  setNotification]  = useState<any | null>(null);
   const notificationListener = useRef<any>(null);
-  const responseListener = useRef<any>(null);
+  const responseListener     = useRef<any>(null);
 
   useEffect(() => {
     if (!userId || !Notifications) return;
 
-    // Register the inline quick-reply category so chat notifications show a
-    // "Reply" text field and a "Mark as read" button in the shade.
     registerChatReplyCategory();
 
     registerForPushNotificationsAsync().then((token) => {
-      if (token) {
-        setExpoPushToken(token);
-        savePushToken(userId, token);
-      }
+      if (token) { setExpoPushToken(token); savePushToken(userId, token); }
     });
 
     notificationListener.current = Notifications.addNotificationReceivedListener((notif: any) => {
-      console.log('[usePushNotifications] Notification received:', notif);
       setNotification(notif);
     });
 
     responseListener.current = Notifications.addNotificationResponseReceivedListener(async (response: any) => {
-      console.log('[usePushNotifications] Notification response:', response);
-      // First, try to handle an inline reply / mark-as-read action. If it was
-      // one of those, we're done — don't also run the open-chat navigation.
       const handled = await handleNotificationReply(response);
-      if (!handled) {
-        handleNotificationResponse(response);
-      }
+      if (!handled) handleNotificationResponse(response);
     });
 
-    // Cold-start / wake case: if the app was launched by tapping a notification
-    // action (e.g. the Reply field), the live listener above can miss it.
-    // getLastNotificationResponseAsync returns that initial response once.
     if (Notifications.getLastNotificationResponseAsync) {
       Notifications.getLastNotificationResponseAsync()
-        .then((response: any) => {
-          if (response) handleNotificationReply(response);
-        })
+        .then((response: any) => { if (response) handleNotificationReply(response); })
         .catch(() => {});
     }
 
     return () => {
-      if (notificationListener.current) removeSubscription(notificationListener.current);
-      if (responseListener.current)     removeSubscription(responseListener.current);
+      removeSubscription(notificationListener.current);
+      removeSubscription(responseListener.current);
     };
   }, [userId]);
 
@@ -119,67 +80,38 @@ async function registerForPushNotificationsAsync(): Promise<string | null> {
 
   const { status: existingStatus } = await Notifications.getPermissionsAsync();
   let finalStatus = existingStatus;
-
   if (existingStatus !== 'granted') {
     const { status } = await Notifications.requestPermissionsAsync();
     finalStatus = status;
   }
-
   if (finalStatus !== 'granted') return null;
 
   try {
     const token = (await Notifications.getExpoPushTokenAsync({
       projectId: 'e68eeca5-8ee9-4c30-b23f-8cd3616b7c21',
     })).data;
-    console.log('[usePushNotifications] Push token:', token);
     return token;
-  } catch (error) {
-    console.error('[usePushNotifications] Error getting push token:', error);
+  } catch {
     return null;
   }
 }
 
 async function savePushToken(userId: string, token: string) {
   try {
-    if (useBackend('users')) {
-      const res = await endpoints.registerPushToken(token, Platform.OS);
-      if (!res.ok) {
-        console.error('[usePushNotifications] Backend token register failed:', res.error);
-      } else {
-        console.log('[usePushNotifications] Push token saved (backend)');
-      }
-      return;
-    }
-    const fsDb = db as ReturnType<typeof firestore>;
-    await fsDb.collection('users').doc(userId).set(
-      { pushToken: token, pushTokenUpdatedAt: firestore.FieldValue.serverTimestamp(), platform: Platform.OS },
-      { merge: true },
-    );
-    console.log('[usePushNotifications] Push token saved');
+    const res = await endpoints.registerPushToken(token, Platform.OS);
+    if (!res.ok) console.error('[usePushNotifications] Backend token register failed:', res.error);
   } catch (error) {
     console.error('[usePushNotifications] Error saving push token:', error);
   }
 }
 
-/** Remove this device's push token from the backend on sign-out (Req 4.8). */
 export async function removePushTokenFromBackend(token: string): Promise<void> {
-  if (!useBackend('users')) return;
-  try {
-    await endpoints.removePushToken(token);
-  } catch (error) {
-    console.error('[usePushNotifications] Error removing push token:', error);
-  }
+  try { await endpoints.removePushToken(token); } catch {}
 }
 
-function handleNotificationResponse(response: any) {
-  const data = response.notification.request.content.data;
-  console.log('[usePushNotifications] Notification data:', data);
-}
+function handleNotificationResponse(_response: any) {}
 
 export async function sendLocalNotification(title: string, body: string, data?: any) {
   if (!Notifications) return;
-  await Notifications.scheduleNotificationAsync({
-    content: { title, body, data },
-    trigger: null,
-  });
+  await Notifications.scheduleNotificationAsync({ content: { title, body, data }, trigger: null });
 }

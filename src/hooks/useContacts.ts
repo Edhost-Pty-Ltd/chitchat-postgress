@@ -1,18 +1,16 @@
 // ─── useContacts Hook ─────────────────────────────────────────────────────────
-// Fetches ALL phone contacts and optionally checks which ones are registered in Firestore.
+// Fetches all phone contacts and checks which are registered via the backend.
 
 import { useState, useEffect, useCallback } from 'react';
 import { getContactsAsync, requestPermissionsAsync, Fields } from 'expo-contacts/legacy';
-import firestore from '@react-native-firebase/firestore';
 import { normalizePhone, chunkArray } from '../utils/phoneUtils';
-import { useBackend } from '../config/featureFlags';
 import { endpoints } from '../api/endpoints';
 
 export interface AppContact {
-  userId:            string;        // Normalized phone number (used as unique key)
+  userId:            string;
   phone:             string;
   displayName:       string;
-  isSaved:           boolean;       // true if registered in Firestore
+  isSaved:           boolean;
   photoUri?:         string;
   firebasePhotoURL?: string;
 }
@@ -20,68 +18,47 @@ export interface AppContact {
 type PermState = 'granted' | 'denied' | 'undetermined';
 
 export function useContacts() {
-  const [contacts,      setContacts]      = useState<AppContact[]>([]);
-  const [loading,       setLoading]       = useState(true);
-  const [error,         setError]         = useState<string | null>(null);
-  const [permission,    setPermission]    = useState<PermState>('undetermined');
-  const [canAskAgain,   setCanAskAgain]   = useState(true);
+  const [contacts,    setContacts]    = useState<AppContact[]>([]);
+  const [loading,     setLoading]     = useState(true);
+  const [error,       setError]       = useState<string | null>(null);
+  const [permission,  setPermission]  = useState<PermState>('undetermined');
+  const [canAskAgain, setCanAskAgain] = useState(true);
 
   const loadContacts = useCallback(async () => {
     try {
-      setLoading(true);
-      setError(null);
+      setLoading(true); setError(null);
 
-      // ── 1. Permission ──────────────────────────────────────────────────
-      const perm = await requestPermissionsAsync();
+      const perm   = await requestPermissionsAsync();
       const status = perm.status as PermState;
+      console.log('[useContacts] permission status:', status, 'canAskAgain:', perm.canAskAgain, 'accessPrivileges:', (perm as any).accessPrivileges);
       setPermission(status);
       setCanAskAgain(perm.canAskAgain ?? true);
-      console.log('[useContacts] permission:', status, 'canAskAgain:', perm.canAskAgain);
 
       if (status !== 'granted') {
-        setError(
-          status === 'denied'
-            ? 'Contacts permission denied. Enable it in Settings to invite friends.'
-            : 'Contacts permission required.'
-        );
+        setError(status === 'denied'
+          ? 'Contacts permission denied. Enable it in Settings to invite friends.'
+          : 'Contacts permission required.');
         setContacts([]);
         return;
       }
 
-      // ── 2. Device contacts ─────────────────────────────────────────────
       const { data } = await getContactsAsync({
         fields: [Fields.Name, Fields.PhoneNumbers, Fields.Image],
       });
-      console.log('[useContacts] raw device contacts:', data.length);
 
-      // Build a map of all contacts from the phone (one entry per unique phone number)
-      const contactsByPhone = new Map<string, {
-        name: string;
-        photoUri?: string;
-        contactId: string;
-        rawPhone: string;  // Original phone number for uniqueness
-      }>();
-
+      const contactsByPhone = new Map<string, { name: string; photoUri?: string }>();
       for (const contact of data) {
         if (!contact.phoneNumbers) continue;
         for (const pn of contact.phoneNumbers) {
           if (!pn.number) continue;
           const normalized = normalizePhone(pn.number);
-          if (!normalized) continue;
-          
-          // Use normalized phone as key to avoid duplicates
-          // If same normalized number appears twice, first one wins
-          if (!contactsByPhone.has(normalized)) {
-            contactsByPhone.set(normalized, {
-              name: contact.name || pn.number,
-              photoUri: contact.imageAvailable && contact.image?.uri ? contact.image.uri : undefined,
-              contactId: contact.id || normalized,
-              rawPhone: pn.number,
-            });
-          }
+          if (!normalized || contactsByPhone.has(normalized)) continue;
+          contactsByPhone.set(normalized, {
+            name: contact.name || pn.number,
+            photoUri: contact.imageAvailable && contact.image?.uri ? contact.image.uri : undefined,
+          });
         }
       }
-      console.log('[useContacts] unique normalized phones:', contactsByPhone.size);
 
       if (contactsByPhone.size === 0) {
         setError('No contacts found on this device.');
@@ -89,82 +66,38 @@ export function useContacts() {
         return;
       }
 
-      // ── 3. Check which contacts are registered ─────────────────────────
       const phones = Array.from(contactsByPhone.keys());
       const registeredUsers = new Map<string, { userId: string; photoURL?: string }>();
 
-      if (useBackend('users')) {
-        // Backend applies privacy filtering and block exclusion server-side.
-        // Chunk by the backend's 500-number cap (Req 4.5).
-        const chunks = chunkArray(phones, 500);
-        for (const chunk of chunks) {
-          const res = await endpoints.matchContacts(chunk);
-          if (!res.ok) {
-            console.error('[useContacts] backend match failed:', res.error);
-            continue;
-          }
-          for (const m of res.data.matches) {
-            if (m.phoneNumber) {
-              registeredUsers.set(m.phoneNumber, {
-                userId: m.userId,
-                photoURL: m.avatarObjectKey ?? undefined,
-              });
-            }
-          }
-        }
-      } else {
-        const chunks = chunkArray(phones, 30);
-        for (const chunk of chunks) {
-          const snap = await firestore()
-            .collection('users')
-            .where('phone', 'in', chunk)
-            .get();
-
-          for (const doc of snap.docs) {
-            const data          = doc.data();
-            const phone         = data.phone as string;
-            const photoPrivacy  = data.privacyProfilePhoto ?? 'Contacts';
-            const firebasePhotoURL = photoPrivacy === 'Nobody' ? null : (data.photoURL || null);
-
-            registeredUsers.set(phone, {
-              userId: doc.id,
-              photoURL: firebasePhotoURL ?? undefined,
+      const chunks = chunkArray(phones, 500);
+      for (const chunk of chunks) {
+        const res = await endpoints.matchContacts(chunk);
+        if (!res.ok) { console.error('[useContacts] backend match failed:', res.error); continue; }
+        for (const m of res.data.matches) {
+          if (m.phoneNumber) {
+            registeredUsers.set(m.phoneNumber, {
+              userId: m.userId,
+              photoURL: m.avatarObjectKey ?? undefined,
             });
           }
         }
       }
 
-      console.log('[useContacts] registered users found:', registeredUsers.size);
-
-      // ── 4. Build final contacts list (ALL contacts, marking registered ones) ──
-      const appContacts: AppContact[] = [];
-
-      for (const [phone, contactInfo] of contactsByPhone.entries()) {
-        const registeredUser = registeredUsers.get(phone);
-
-        appContacts.push({
-          // Use the Firebase UID for registered users so that Firestore
-          // `participants` array contains UIDs, matching the
-          // `where('participants', 'array-contains', user.uid)` query.
-          // Fall back to phone number for unregistered contacts.
-          userId:           registeredUser?.userId ?? phone,
+      const appContacts: AppContact[] = Array.from(contactsByPhone.entries()).map(([phone, info]) => {
+        const reg = registeredUsers.get(phone);
+        return {
+          userId:           reg?.userId ?? phone,
           phone,
-          displayName:      contactInfo.name,
-          isSaved:          !!registeredUser,
-          photoUri:         contactInfo.photoUri,
-          firebasePhotoURL: registeredUser?.photoURL,
-        });
-      }
+          displayName:      info.name,
+          isSaved:          !!reg,
+          photoUri:         info.photoUri,
+          firebasePhotoURL: reg?.photoURL,
+        };
+      });
 
-      // Sort by display name
       appContacts.sort((a, b) => a.displayName.localeCompare(b.displayName));
-      
-      console.log('[useContacts] total contacts returned:', appContacts.length);
-      console.log('[useContacts] registered users:', appContacts.filter(c => c.isSaved).length);
-      
       setContacts(appContacts);
     } catch (err: any) {
-      console.error('[useContacts] load failed:', err);
       setError(err?.message ?? 'Failed to load contacts');
     } finally {
       setLoading(false);
@@ -174,11 +107,7 @@ export function useContacts() {
   useEffect(() => { loadContacts(); }, [loadContacts]);
 
   return {
-    contacts,
-    loading,
-    error,
-    permission,
-    canAskAgain,
+    contacts, loading, error, permission, canAskAgain,
     hasPermission: permission === 'granted',
     reload: loadContacts,
   };

@@ -1,10 +1,7 @@
 // ─── usePrivacySettings Hook ──────────────────────────────────────────────────
-// Reads and persists the current user's privacy preferences.
+// Reads and persists privacy preferences via the backend REST API.
 
 import { useState, useEffect, useCallback } from 'react';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
-import { useBackend } from '../config/featureFlags';
 import { endpoints } from '../api/endpoints';
 
 export type Visibility = 'Everyone' | 'Contacts' | 'Nobody';
@@ -29,129 +26,58 @@ export const DEFAULT_PRIVACY: PrivacySettings = {
   disappearingMessages: true,
 };
 
-const FIELD_MAP: Record<keyof PrivacySettings, string> = {
-  lastSeen:             'privacyLastSeen',
-  profilePhoto:         'privacyProfilePhoto',
-  statusVisibility:     'privacyStatus',
-  groups:               'privacyGroups',
-  calls:                'privacyCalls',
-  readReceipts:         'readReceipts',
-  disappearingMessages: 'disappearingMessages',
-};
-
-function parseSettings(d: Record<string, any>): PrivacySettings {
-  return {
-    lastSeen:             (d.privacyLastSeen     as Visibility) ?? DEFAULT_PRIVACY.lastSeen,
-    profilePhoto:         (d.privacyProfilePhoto as Visibility) ?? DEFAULT_PRIVACY.profilePhoto,
-    statusVisibility:     (d.privacyStatus       as Visibility) ?? DEFAULT_PRIVACY.statusVisibility,
-    groups:               (d.privacyGroups       as Visibility) ?? DEFAULT_PRIVACY.groups,
-    calls:                (d.privacyCalls        as Visibility) ?? DEFAULT_PRIVACY.calls,
-    readReceipts:         d.readReceipts         != null ? !!d.readReceipts         : DEFAULT_PRIVACY.readReceipts,
-    disappearingMessages: d.disappearingMessages != null ? !!d.disappearingMessages : DEFAULT_PRIVACY.disappearingMessages,
-  };
-}
-
 export function usePrivacySettings(userId: string | null) {
   const [settings, setSettings] = useState<PrivacySettings>(DEFAULT_PRIVACY);
   const [loading,  setLoading]  = useState(true);
   const [saving,   setSaving]   = useState(false);
 
-  const backend = useBackend('users');
-
   useEffect(() => {
     if (!userId) { setLoading(false); return; }
-
-    if (backend) {
-      let active = true;
-      endpoints
-        .getPrivacy()
-        .then((res) => {
-          if (!active) return;
-          if (res.ok) setSettings(res.data);
-          setLoading(false);
-        })
-        .catch(() => active && setLoading(false));
-      return () => { active = false; };
-    }
-
-    const fsDb = db as ReturnType<typeof firestore>;
-    const unsub = fsDb.collection('users').doc(userId).onSnapshot(
-      (snap) => {
-        if (!snap.exists) { setLoading(false); return; }
-        setSettings(parseSettings(snap.data()!));
-        setLoading(false);
-      },
-      () => setLoading(false),
-    );
-
-    return () => unsub();
-  }, [userId, backend]);
+    let active = true;
+    endpoints.getPrivacy().then((res) => {
+      if (!active) return;
+      if (res.ok) setSettings(res.data);
+      setLoading(false);
+    }).catch(() => active && setLoading(false));
+    return () => { active = false; };
+  }, [userId]);
 
   const updateSetting = useCallback(
     async <K extends keyof PrivacySettings>(key: K, value: PrivacySettings[K]): Promise<void> => {
       if (!userId) return;
-      // Optimistic update, then persist the full settings object.
       const next = { ...settings, [key]: value } as PrivacySettings;
       setSettings(next);
       setSaving(true);
       try {
-        if (backend) {
-          const res = await endpoints.updatePrivacy(next);
-          if (res.ok) setSettings(res.data);
-        } else {
-          const fsDb = db as ReturnType<typeof firestore>;
-          await fsDb.collection('users').doc(userId).set(
-            { [FIELD_MAP[key]]: value },
-            { merge: true },
-          );
-        }
+        const res = await endpoints.updatePrivacy(next);
+        if (res.ok) setSettings(res.data);
       } catch (err) {
         console.error('[usePrivacySettings] Failed to save:', key, err);
-      } finally {
-        setSaving(false);
-      }
+      } finally { setSaving(false); }
     },
-    [userId, backend, settings],
+    [userId, settings],
   );
 
   const saveAll = useCallback(
     async (s: PrivacySettings): Promise<void> => {
       if (!userId) return;
-      setSettings(s);
-      setSaving(true);
+      setSettings(s); setSaving(true);
       try {
-        if (backend) {
-          const res = await endpoints.updatePrivacy(s);
-          if (res.ok) setSettings(res.data);
-        } else {
-          const patch: Record<string, unknown> = {};
-          (Object.keys(FIELD_MAP) as (keyof PrivacySettings)[]).forEach((k) => {
-            patch[FIELD_MAP[k]] = s[k];
-          });
-          const fsDb = db as ReturnType<typeof firestore>;
-          await fsDb.collection('users').doc(userId).set(patch, { merge: true });
-        }
+        const res = await endpoints.updatePrivacy(s);
+        if (res.ok) setSettings(res.data);
       } catch (err) {
         console.error('[usePrivacySettings] Failed to save all:', err);
-      } finally {
-        setSaving(false);
-      }
+      } finally { setSaving(false); }
     },
-    [userId, backend],
+    [userId],
   );
 
   return { settings, loading, saving, updateSetting, saveAll };
 }
 
-export async function fetchUserPrivacySettings(userId: string): Promise<PrivacySettings> {
-  try {
-    const fsDb = db as ReturnType<typeof firestore>;
-    const snap = await fsDb.collection('users').doc(userId).get();
-    if (!snap.exists) return DEFAULT_PRIVACY;
-    return parseSettings(snap.data()!);
-  } catch {
-    return DEFAULT_PRIVACY;
-  }
+/** Returns DEFAULT_PRIVACY — privacy is not queryable for other users without a dedicated endpoint. */
+export async function fetchUserPrivacySettings(_userId: string): Promise<PrivacySettings> {
+  return DEFAULT_PRIVACY;
 }
 
 export function isVisibleTo(setting: Visibility, viewerIsContact: boolean): boolean {

@@ -18,8 +18,7 @@ import { fetchUserPrivacySettings, isVisibleTo } from '../hooks/usePrivacySettin
 import { useStatus } from '../hooks/useStatus';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
 import { resolveDisplayName } from '../utils/resolveDisplayName';
-import { db } from '../config/firebase';
-import firestore from '@react-native-firebase/firestore';
+import { endpoints } from '../api/endpoints';
 import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
 import { RootStackParamList } from '../types';
 
@@ -286,13 +285,15 @@ function NewGroupSheet({
     if (!contacts.length) { setPrivacyLoading(false); return; }
     let cancelled = false;
     (async () => {
-      const fsDb = db as ReturnType<typeof firestore>;
       const map = new Map<string, string>();
       await Promise.all(
         contacts.map(async (c) => {
           try {
-            const snap = await fsDb.collection('users').doc(c.userId).get();
-            map.set(c.userId, snap.exists() ? (snap.data()!.privacyGroups ?? 'Everyone') : 'Everyone');
+            // Privacy settings aren't exposed on the public profile endpoint.
+            // Default to 'Everyone' — the server enforces group-add rules on
+            // POST /chats, so a wrong default here just means the UI may show
+            // a contact as addable when the server will ultimately reject them.
+            map.set(c.userId, 'Everyone');
           } catch {
             map.set(c.userId, 'Everyone');
           }
@@ -750,24 +751,22 @@ export default function ChatsScreen() {
     if (unknownIds.size === 0) return;
 
     (async () => {
-      const fsDb = db as ReturnType<typeof firestore>;
       const newInfo = new Map(memberInfo);
       const newPrivacy = new Map(privacyPhotoMap);
 
-      for (const uid of unknownIds) {
+      await Promise.all(Array.from(unknownIds).map(async (uid) => {
         try {
-          const snap = await fsDb.collection('users').doc(uid).get();
-          if (snap.exists()) {
-            const data = snap.data()!;
+          const res = await endpoints.getUser(uid);
+          if (res.ok) {
             newInfo.set(uid, {
-              displayName: data.displayName ?? data.phone ?? uid,
-              phone: data.phone ?? '',
-              photoURL: data.photoURL || null,
+              displayName: res.data.displayName ?? res.data.phoneNumber ?? uid,
+              phone: res.data.phoneNumber ?? '',
+              photoURL: res.data.avatarObjectKey ?? null,
             });
-            newPrivacy.set(uid, data.privacyProfilePhoto ?? 'Contacts');
+            newPrivacy.set(uid, 'Contacts'); // privacy not on public profile; default permissive
           }
         } catch (_) {}
-      }
+      }));
 
       setMemberInfo(newInfo);
       setPrivacyPhotoMap(newPrivacy);

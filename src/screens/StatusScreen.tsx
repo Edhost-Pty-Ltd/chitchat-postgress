@@ -2,9 +2,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { View, FlatList, TouchableOpacity, StyleSheet, Platform, ActivityIndicator, Image } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
 import { UserAvatar, StatusViewer, CreateStatusModal } from '../components';
+import { endpoints } from '../api/endpoints';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { useAuth } from '../hooks/useAuth';
 import { useStatus, type StatusGroup } from '../hooks/useStatus';
@@ -120,14 +119,14 @@ export default function StatusScreen() {
       await Promise.all(
         allMissing.map(async (uid) => {
           try {
-            const fsDb = db as ReturnType<typeof firestore>;
-            const snap = await fsDb.collection('users').doc(uid).get();
-            if (snap.exists) {
-              const data = snap.data()!;
-              const phone = data.phone ?? '';
-              if (phone && !phoneMap.has(uid)) phoneUpdates.set(uid, phone);
-              privacyUpdates.set(uid, data.privacyProfilePhoto ?? 'Contacts');
-              visibilityUpdates.set(uid, data.privacyStatus ?? 'Everyone');
+            const res = await endpoints.getUser(uid);
+            if (res.ok) {
+              const { phoneNumber, avatarObjectKey: _photo } = res.data;
+              if (phoneNumber && !phoneMap.has(uid)) phoneUpdates.set(uid, phoneNumber);
+              // Privacy fields aren't on the public profile — default to permissive
+              // values so status posters' photos show unless explicitly hidden
+              privacyUpdates.set(uid, 'Contacts');
+              visibilityUpdates.set(uid, 'Everyone');
             }
           } catch { /* ignore */ }
         })

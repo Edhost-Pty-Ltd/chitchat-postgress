@@ -10,8 +10,9 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import DateTimePickerModal from 'react-native-modal-datetime-picker';
-import firestore from '@react-native-firebase/firestore';
 import * as Notifications from 'expo-notifications';
+import { endpoints } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
 import * as Contacts from 'expo-contacts';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import * as Print from 'expo-print';
@@ -305,22 +306,11 @@ function NewMeetingSheet({
     setCreating(true);
     const allParticipants = Array.from(new Set([userId, ...participantIds]));
     try {
-      const meetingRef = await firestore().collection('meetings').add({
-        title,
-        date: firestore.Timestamp.fromDate(startTime),
-        endDate: firestore.Timestamp.fromDate(endTime),
-        duration,
-        participants: allParticipants,
-        organizerId: userId,
-        type: 'online',
-        reminders: REMINDER_MILESTONES,
-        joinedMembers: [],
-        mutedUsers: [],
-        kickedUsers: [],
-        isActive: true,
-        createdAt: firestore.FieldValue.serverTimestamp(),
-      });
+      // Create meeting on the backend
+      const res = await endpoints.createMeeting(title, allParticipants);
+      if (!res.ok) throw new Error(res.error.message);
 
+      // Schedule local notifications for the organizer's device
       const now = new Date();
       const scheduledIds: string[] = [];
 
@@ -363,19 +353,7 @@ function NewMeetingSheet({
         }
       }
 
-      // Persist IDs so CalendarScreen can cancel them if the meeting is ended early
-      if (scheduledIds.length > 0) {
-        await meetingRef.update({ notificationIds: scheduledIds });
-      }
-
-      // Notify each invited participant (local push — they see it on their device)
       const invitees = allParticipants.filter(uid => uid !== userId);
-      for (const _ of invitees) {
-        // We can only schedule local notifications for the current device.
-        // For remote pushes to other devices a Cloud Function with FCM is required.
-        // This immediate notification is for the organizer's own device as a confirmation.
-      }
-      // Send an immediate local invite notification so the organizer sees confirmation
       if (invitees.length > 0) {
         await Notifications.scheduleNotificationAsync({
           content: {
@@ -383,7 +361,7 @@ function NewMeetingSheet({
             body: `${invitees.length} participant${invitees.length > 1 ? 's' : ''} invited to "${title}".`,
             sound: false,
           },
-          trigger: null, // immediate
+          trigger: null,
         });
       }
 
@@ -749,16 +727,17 @@ function MeetingDetailSheet({
   useEffect(() => {
     if (!visible || !meeting) { setSubRecordings([]); setGeneratedMinutes(null); return; }
     setRecLoading(true);
-    firestore()
-      .collection('meetings').doc(meeting.id).collection('recordings')
-      .orderBy('createdAt', 'asc')
-      .get()
-      .then(snap => {
-        setSubRecordings(snap.docs.map(d => ({
-          id: d.id,
-          url: d.data().url ?? '',
-          durationMs: d.data().durationMs ?? 0,
-        })));
+    endpoints.getMeeting(meeting.id)
+      .then((res) => {
+        if (res.ok) {
+          const state = res.data.state as any;
+          if (state?.minutes) setGeneratedMinutes(state.minutes);
+        }
+        // Recordings are stored locally (S3 upload not yet wired); fall back to
+        // the meeting object's own recordings array.
+        setSubRecordings(
+          meeting.recordings.map((r, i) => ({ id: String(i), url: r.url, durationMs: r.durationMs }))
+        );
       })
       .catch(() => {
         setSubRecordings(
@@ -1097,58 +1076,46 @@ export default function CalendarScreen() {
   };
   const handleParticipantClose = () => setParticipantPickerOpen(false);
 
-  // ── Firestore ──────────────────────────────────────────────────────────────
+  // ── Load meetings from backend + refresh on socket events ─────────────────
   useEffect(() => {
     if (!user?.uid) return;
-    const unsub = firestore()
-      .collection('meetings')
-      .where('participants', 'array-contains', user.uid)
-      .orderBy('date', 'asc')
-      .onSnapshot(
-        (snap) => {
-          if (!snap) return;
+    let active = true;
 
-          // Cancel scheduled notifications for any meeting that just became inactive
-          snap.docChanges().forEach(change => {
-            if (change.type === 'modified') {
-              const d = change.doc.data();
-              if (d.isActive === false && Array.isArray(d.notificationIds)) {
-                d.notificationIds.forEach((id: string) => {
-                  Notifications.cancelScheduledNotificationAsync(id).catch(() => {});
-                });
-                // Clear the stored IDs so we don't try to cancel again
-                change.doc.ref.update({ notificationIds: [] }).catch(() => {});
-              }
-            }
-          });
+    const load = async () => {
+      const res = await endpoints.listMeetings();
+      if (!active || !res.ok) { if (active) setLoading(false); return; }
 
-          setMeetings(snap.docs.map(doc => {
-            const d = doc.data();
-            const start = d.date ? d.date.toDate() : new Date();
-            return {
-              id: doc.id,
-              title: d.title || 'Untitled',
-              date: start,
-              endDate: d.endDate ? d.endDate.toDate() : null,
-              duration: d.duration || '1h',
-              participants: d.participants || [],
-              organizerId: d.organizerId || '',
-              type: d.type || 'online',
-              reminders: d.reminders || [],
-              minutes: d.minutes ?? null,
-              hasRecordings: Array.isArray(d.recordings) ? d.recordings.length > 0 : false,
-              recordings: Array.isArray(d.recordings)
-                ? d.recordings.map((r: any) => ({ url: r.url ?? '', durationMs: r.durationMs ?? 0 }))
-                : [],
-              attendance: Array.isArray(d.joinedMembers) ? d.joinedMembers : [],
-              isActive: d.isActive !== false,
-            } as Meeting;
-          }));
-          setLoading(false);
-        },
-        (err) => { console.error('Firestore Error:', err); setLoading(false); }
-      );
-    return () => unsub();
+      setMeetings(res.data.meetings.map((m) => ({
+        id: m.id,
+        title: m.title,
+        date: new Date(m.createdAt),   // use createdAt as proxy until start/end are in the API
+        endDate: null,
+        duration: '1h',
+        participants: Array(m.participantCount).fill(''),
+        organizerId: m.organizerId,
+        type: 'online' as const,
+        reminders: [],
+        minutes: null,
+        hasRecordings: false,
+        recordings: [],
+        attendance: m.isActive ? [] : Array(m.participantCount).fill(''),
+        isActive: m.isActive,
+      })));
+      setLoading(false);
+    };
+
+    void socketClient.connect().then(load).catch(() => { if (active) setLoading(false); });
+
+    // Refresh when a meeting is created, updated, or ended
+    const unsubs = [
+      socketClient.subscribe('meeting:updated', () => void load()),
+      socketClient.subscribe('meeting:ended',   () => void load()),
+    ];
+
+    return () => {
+      active = false;
+      unsubs.forEach((u) => u());
+    };
   }, [user?.uid]);
 
   const nowDate = useMemo(() => new Date(now), [now]);

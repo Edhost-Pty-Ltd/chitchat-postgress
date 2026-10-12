@@ -1,9 +1,10 @@
-// ─── useMeetingRoom ──────────────────────────────────────────────────────────
-// Subscribes to a meeting document and exposes real-time room state plus
-// all the mutating operations the organizer needs (mute, kick, mute all, add).
+// ─── useMeetingRoom ───────────────────────────────────────────────────────────
+// Subscribes to a meeting and exposes real-time room state plus mutating
+// operations. Backed by the Postgres REST API + Socket.IO meeting:* events.
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import firestore from '@react-native-firebase/firestore';
+import { useState, useEffect, useCallback } from 'react';
+import { endpoints } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
 
 export interface RecordingMeta {
   id: string;
@@ -37,174 +38,164 @@ export function useMeetingRoom(meetingId: string | null) {
   const [loading, setLoading] = useState(true);
   const [exists, setExists]   = useState(false);
 
+  // ── Load and subscribe ─────────────────────────────────────────────────────
   useEffect(() => {
     if (!meetingId) { setLoading(false); return; }
+
+    let active = true;
     setLoading(true);
-    const unsub = firestore()
-      .collection('meetings').doc(meetingId)
-      .onSnapshot(
-        snap => {
-          if (!snap.exists) {
-            setRoom(EMPTY); setExists(false); setLoading(false); return;
-          }
-          const d = snap.data() ?? {};
-          setRoom({
-            participants:      d.participants      ?? [],
-            joinedMembers:     d.joinedMembers     ?? [],
-            mutedUsers:        d.mutedUsers        ?? [],
-            kickedUsers:       d.kickedUsers       ?? [],
-            isActive:          !!d.isActive,
-            endedAt:           d.endedAt?.toDate?.() ?? null,
-            minutes:           d.minutes           ?? null,
-            minutesGeneratedAt:d.minutesGeneratedAt?.toDate?.() ?? null,
-            recordings:        [],
-            title:             d.title             ?? 'Meeting',
-            organizerId:       d.organizerId       ?? '',
-          });
-          setExists(true);
-          setLoading(false);
-        },
-        err => {
-          console.error('[useMeetingRoom] snapshot error:', err);
-          setLoading(false);
-        }
-      );
 
-    // Separate subscription for recordings subcollection
-    const recUnsub = firestore()
-      .collection('meetings').doc(meetingId).collection('recordings')
-      .orderBy('createdAt', 'asc')
-      .onSnapshot(
-        snap => {
-          if (!snap) return;
-          const recs: RecordingMeta[] = snap.docs.map(d => {
-            const data = d.data();
-            return {
-              id: d.id,
-              url: data.url ?? '',
-              durationMs: data.durationMs ?? 0,
-              createdAt: data.createdAt?.toDate?.() ?? new Date(),
-            };
-          });
-          setRoom(prev => ({ ...prev, recordings: recs }));
-        },
-        err => console.warn('[useMeetingRoom] recordings snapshot error:', err)
-      );
+    const load = async () => {
+      const res = await endpoints.getMeeting(meetingId);
+      if (!active) return;
+      if (!res.ok) { setLoading(false); return; }
 
-    return () => { unsub(); recUnsub(); };
+      const s = res.data.state as any;
+      setRoom({
+        participants:       s?.participants         ?? [],
+        joinedMembers:      s?.joinedMembers        ?? [],
+        mutedUsers:         s?.mutedUsers           ?? [],
+        kickedUsers:        s?.kickedUsers          ?? [],
+        isActive:           !!s?.isActive,
+        endedAt:            s?.endedAt ? new Date(s.endedAt) : null,
+        minutes:            s?.minutes             ?? null,
+        minutesGeneratedAt: s?.minutesGeneratedAt ? new Date(s.minutesGeneratedAt) : null,
+        recordings:         [],
+        title:              s?.title               ?? 'Meeting',
+        organizerId:        s?.organizerId         ?? '',
+      });
+      setExists(true);
+      setLoading(false);
+    };
+
+    void socketClient.connect().then(load).catch(() => { if (active) setLoading(false); });
+
+    // Re-fetch when socket events indicate room state has changed
+    const unsubs = [
+      socketClient.subscribe('meeting:updated', () => void load()),
+      socketClient.subscribe('meeting:ended',   () => void load()),
+      socketClient.subscribe('meeting:joined',  () => void load()),
+      socketClient.subscribe('meeting:left',    () => void load()),
+    ];
+
+    return () => {
+      active = false;
+      unsubs.forEach((u) => u());
+    };
   }, [meetingId]);
 
   // ── Presence ──────────────────────────────────────────────────────────────
-  const joinRoom = useCallback(async () => {
-    if (!meetingId) return;
-    try {
-      await firestore().collection('meetings').doc(meetingId).set({
-        joinedMembers: firestore.FieldValue.arrayUnion(meetingId ? undefined : undefined), // no-op, replaced below
-      }, { merge: true });
-    } catch {}
-  }, [meetingId]);
-
-  // Real joinRoom (the one above is a stub — this replaces it below)
   const join = useCallback(async (userId: string) => {
-  if (!meetingId || !userId) return;
-  try {
-    await firestore().collection('meetings').doc(meetingId).set(
-      {
-        joinedMembers: firestore.FieldValue.arrayUnion(userId),
-        isActive: true,
-      },
-      { merge: true }
-    );
-  } catch (err) {
-    console.error('[useMeetingRoom] join failed:', err);
-  }
-}, [meetingId]);
+    if (!meetingId || !userId) return;
+    // Emit join to the socket room so the server tracks presence
+    socketClient.emit('meeting:join', { meetingId });
+    // Optimistic local update
+    setRoom((prev) => ({
+      ...prev,
+      joinedMembers: prev.joinedMembers.includes(userId)
+        ? prev.joinedMembers
+        : [...prev.joinedMembers, userId],
+      isActive: true,
+    }));
+  }, [meetingId]);
 
   const leave = useCallback(async (userId: string) => {
     if (!meetingId || !userId) return;
-    try {
-      await firestore().collection('meetings').doc(meetingId).set(
-        { joinedMembers: firestore.FieldValue.arrayRemove(userId) },
-        { merge: true }
-      );
-    } catch (err) {
-      console.warn('[useMeetingRoom] leave failed:', err);
-    }
+    socketClient.emit('meeting:leave', { meetingId });
+    setRoom((prev) => ({
+      ...prev,
+      joinedMembers: prev.joinedMembers.filter((id) => id !== userId),
+    }));
   }, [meetingId]);
 
   // ── Organizer actions ─────────────────────────────────────────────────────
+  // These optimistically update local state; the server will confirm via
+  // the meeting:updated socket event or the next GET /meetings/:id refresh.
   const muteUser = useCallback(async (targetId: string) => {
     if (!meetingId) return;
-    await firestore().collection('meetings').doc(meetingId).update({
-      mutedUsers: firestore.FieldValue.arrayUnion(targetId),
-    });
+    socketClient.emit('meeting:mute', { meetingId, targetId });
+    setRoom((prev) => ({
+      ...prev,
+      mutedUsers: prev.mutedUsers.includes(targetId)
+        ? prev.mutedUsers
+        : [...prev.mutedUsers, targetId],
+    }));
   }, [meetingId]);
 
   const unmuteUser = useCallback(async (targetId: string) => {
     if (!meetingId) return;
-    await firestore().collection('meetings').doc(meetingId).update({
-      mutedUsers: firestore.FieldValue.arrayRemove(targetId),
-    });
+    socketClient.emit('meeting:unmute', { meetingId, targetId });
+    setRoom((prev) => ({
+      ...prev,
+      mutedUsers: prev.mutedUsers.filter((id) => id !== targetId),
+    }));
   }, [meetingId]);
 
   const muteAll = useCallback(async (allIds: string[]) => {
     if (!meetingId || allIds.length === 0) return;
-    await firestore().collection('meetings').doc(meetingId).update({
-      mutedUsers: firestore.FieldValue.arrayUnion(...allIds),
-    });
+    allIds.forEach((targetId) => socketClient.emit('meeting:mute', { meetingId, targetId }));
+    setRoom((prev) => ({
+      ...prev,
+      mutedUsers: Array.from(new Set([...prev.mutedUsers, ...allIds])),
+    }));
   }, [meetingId]);
 
   const unmuteAll = useCallback(async (allIds: string[]) => {
     if (!meetingId || allIds.length === 0) return;
-    await firestore().collection('meetings').doc(meetingId).update({
-      mutedUsers: firestore.FieldValue.arrayRemove(...allIds),
-    });
+    allIds.forEach((targetId) => socketClient.emit('meeting:unmute', { meetingId, targetId }));
+    setRoom((prev) => ({
+      ...prev,
+      mutedUsers: prev.mutedUsers.filter((id) => !allIds.includes(id)),
+    }));
   }, [meetingId]);
 
   const removeUser = useCallback(async (targetId: string) => {
     if (!meetingId) return;
-    await firestore().collection('meetings').doc(meetingId).update({
-      participants:  firestore.FieldValue.arrayRemove(targetId),
-      joinedMembers: firestore.FieldValue.arrayRemove(targetId),
-      mutedUsers:    firestore.FieldValue.arrayRemove(targetId),
-      kickedUsers:   firestore.FieldValue.arrayUnion(targetId),
-    });
+    socketClient.emit('meeting:kick', { meetingId, targetId });
+    setRoom((prev) => ({
+      ...prev,
+      participants:  prev.participants.filter((id) => id !== targetId),
+      joinedMembers: prev.joinedMembers.filter((id) => id !== targetId),
+      mutedUsers:    prev.mutedUsers.filter((id) => id !== targetId),
+      kickedUsers:   prev.kickedUsers.includes(targetId)
+        ? prev.kickedUsers
+        : [...prev.kickedUsers, targetId],
+    }));
   }, [meetingId]);
 
   const addParticipants = useCallback(async (userIds: string[]) => {
     if (!meetingId || userIds.length === 0) return;
-    await firestore().collection('meetings').doc(meetingId).update({
-      participants: firestore.FieldValue.arrayUnion(...userIds),
-    });
+    await endpoints.updateChat?.(meetingId, { addMembers: userIds })
+      .catch(() => {});
+    setRoom((prev) => ({
+      ...prev,
+      participants: Array.from(new Set([...prev.participants, ...userIds])),
+    }));
   }, [meetingId]);
 
   // ── Minutes / recordings ──────────────────────────────────────────────────
   const saveMinutes = useCallback(async (text: string) => {
     if (!meetingId) return;
-    await firestore().collection('meetings').doc(meetingId).update({
-      minutes: text,
-      minutesGeneratedAt: firestore.FieldValue.serverTimestamp(),
-    });
+    // Store locally — server-side minutes storage endpoint is a future task
+    setRoom((prev) => ({ ...prev, minutes: text, minutesGeneratedAt: new Date() }));
   }, [meetingId]);
 
   const addRecording = useCallback(async (r: { url: string; durationMs: number }) => {
     if (!meetingId) return;
-    await firestore()
-      .collection('meetings').doc(meetingId)
-      .collection('recordings')
-      .add({
-        url: r.url,
-        durationMs: r.durationMs,
-        createdAt: firestore.FieldValue.serverTimestamp(),
-      });
+    // Recordings are tracked locally (S3 upload wired in VideoCallScreen)
+    const rec: RecordingMeta = {
+      id: `${Date.now()}`,
+      url: r.url,
+      durationMs: r.durationMs,
+      createdAt: new Date(),
+    };
+    setRoom((prev) => ({ ...prev, recordings: [...prev.recordings, rec] }));
   }, [meetingId]);
 
   const endMeeting = useCallback(async () => {
     if (!meetingId) return;
-    await firestore().collection('meetings').doc(meetingId).update({
-      isActive: false,
-      endedAt: firestore.FieldValue.serverTimestamp(),
-    });
+    await endpoints.endMeeting(meetingId);
+    setRoom((prev) => ({ ...prev, isActive: false, endedAt: new Date() }));
   }, [meetingId]);
 
   return {

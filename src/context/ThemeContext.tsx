@@ -19,7 +19,7 @@ export interface GradientPreset {
 }
 
 export const GRADIENT_PRESETS: GradientPreset[] = [
-  { id: 'sky',       label: 'Default Light', colors: ['#FFFFFF', '#FFFFFF', '#FFFFFF'] },
+  { id: 'sky',       label: 'Default Light', colors: ['#F2F2F7', '#F2F2F7', '#FFFFFF'] },
   { id: 'ocean',     label: 'Ocean',     colors: ['#0f2027', '#203a43', '#2c5364'] },
   { id: 'sunset',    label: 'Sunset',    colors: ['#f7971e', '#ffd200', '#f7971e'] },
   { id: 'rose',      label: 'Rose',      colors: ['#f953c6', '#b91d73', '#f953c6'] },
@@ -190,8 +190,8 @@ export interface AppBackground {
 }
 
 const DEFAULT_BG: AppBackground   = { type: 'gradient', gradientId: 'sky' };
-const STORAGE_KEY_BG   = 'app_background';
-const STORAGE_KEY_TYPO = 'app_typography';
+const STORAGE_KEY_BG   = 'app_background_v2';
+const STORAGE_KEY_TYPO = 'app_typography_v2';
 
 // ─── Context ──────────────────────────────────────────────────────────────────
 

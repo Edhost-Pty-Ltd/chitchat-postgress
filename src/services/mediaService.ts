@@ -11,7 +11,7 @@
 
 import { Platform } from 'react-native';
 import { apiClient, type ApiClient } from '../api/client';
-import { getMimeType } from '../config/storage';
+import { getMimeType } from '../utils/fileUtils';
 
 export type MediaCategory =
   | 'avatar'

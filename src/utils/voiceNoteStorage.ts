@@ -1,4 +1,6 @@
-import { storage } from '../config/firebase';
+// ─── Voice Note Storage ───────────────────────────────────────────────────────
+// Uploads voice notes to Firebase Storage via the REST API (XHR + IdToken).
+// No Firebase Storage SDK import needed — auth token is obtained directly.
 
 export interface UploadProgress {
   bytesTransferred: number;

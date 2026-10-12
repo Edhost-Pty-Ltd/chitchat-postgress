@@ -37,11 +37,11 @@ if (Platform.OS !== 'web') {
   useMediaLibraryPermissions = () => [null, () => Promise.resolve({ status: 'denied' })];
 }
 
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
 import { Avatar } from '../components';
 import { VoiceMessageBubble } from '../components/VoiceMessageBubble';
 import { FileMessageBubble } from '../components/FileMessageBubble';
+import { endpoints } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
 
 import { VoiceRecordingOverlay } from '../components/VoiceRecordingOverlay';
 import { ForwardModal } from '../components/ForwardModal';
@@ -608,67 +608,27 @@ export default function ChatScreen() {
     const fetchGroupMembers = async () => {
       setLoadingMembers(true);
       try {
-        console.log('[ChatScreen] Fetching group members for chat:', chatId);
+        // Get member IDs from the chat list (already loaded by useChats)
+        const chatsRes = await endpoints.listChats();
+        const chat = chatsRes.ok ? chatsRes.data.chats.find((c) => c.chatId === chatId) : null;
+        const memberIds = chat?.members ?? [];
 
-        // First, get the chat document to retrieve member IDs
-        const fsDbMembers = db as ReturnType<typeof firestore>;
-        const chatSnapMembers = await fsDbMembers.collection('chats').doc(chatId).get();
-
-        if (!chatSnapMembers.exists) {
-          console.warn('[ChatScreen] Chat document not found');
-          setGroupMembers([]);
-          setLoadingMembers(false);
-          return;
-        }
-
-        const chatDataMembers = chatSnapMembers.data()!;
-        const memberIds = chatDataMembers.members as string[] || [];
-
-        console.log('[ChatScreen] Found member IDs:', memberIds);
-
-        if (memberIds.length === 0) {
-          setGroupMembers([]);
-          setLoadingMembers(false);
-          return;
-        }
-
-        // Fetch each member's profile from the users collection
-        const memberPromises = memberIds.map(async (memberId) => {
-          try {
-            const fsDb2 = db as ReturnType<typeof firestore>;
-            const userSnap = await fsDb2.collection('users').doc(memberId).get();
-
-            if (userSnap.exists()) {
-              const userData = userSnap.data()!;
-              const photoPrivacy = userData.privacyProfilePhoto ?? 'Contacts';
-              return {
-                userId: memberId,
-                displayName: resolveName(userData.phone, 'Unknown'),
-                photoURL: photoPrivacy === 'Nobody' ? null : (userData.photoURL || null),
-                status: userData.status || 'offline',
-              } as GroupMember;
-            }
-
-            // Fallback for users without profile data
-            return {
-              userId: memberId,
-              displayName: 'Unknown User',
-              photoURL: null,
-              status: 'offline',
-            } as GroupMember;
-          } catch (error) {
-            console.error('[ChatScreen] Error fetching user:', memberId, error);
-            return {
-              userId: memberId,
-              displayName: 'Unknown User',
-              photoURL: null,
-              status: 'offline',
-            } as GroupMember;
-          }
-        });
-
-        const members = await Promise.all(memberPromises);
-        console.log('[ChatScreen] Fetched group members:', members.length);
+        const members = await Promise.all(
+          memberIds.map(async (memberId): Promise<GroupMember> => {
+            try {
+              const res = await endpoints.getUser(memberId);
+              if (res.ok) {
+                return {
+                  userId: memberId,
+                  displayName: resolveName(res.data.phoneNumber ?? '', res.data.displayName ?? 'Unknown'),
+                  photoURL: res.data.avatarObjectKey ?? null,
+                  status: 'offline',
+                };
+              }
+            } catch {}
+            return { userId: memberId, displayName: 'Unknown User', photoURL: null, status: 'offline' };
+          })
+        );
         setGroupMembers(members);
       } catch (error) {
         console.error('[ChatScreen] Error fetching group members:', error);
@@ -682,121 +642,28 @@ export default function ChatScreen() {
   }, [profileModalOpen, isGroup, chatId]);
 
   // ── Fetch past members when profile modal opens ─────────────────
+  // Past member history is not tracked by the backend yet; clear gracefully.
   useEffect(() => {
     if (!profileModalOpen || !isGroup || !chatId) return;
-
-    const fetchPastMembers = async () => {
-      setLoadingPastMembers(true);
-      try {
-        console.log('[ChatScreen] Fetching past members for chat:', chatId);
-
-        // First, get the chat document to check for pastMembers field
-        const fsDbPast2 = db as ReturnType<typeof firestore>;
-        const chatSnapP = await fsDbPast2.collection('chats').doc(chatId).get();
-
-        if (!chatSnapP.exists) {
-          console.warn('[ChatScreen] Chat document not found');
-          setPastMembers([]);
-          setLoadingPastMembers(false);
-          return;
-        }
-
-        const chatDataP = chatSnapP.data()!;
-        const pastMemberData = chatDataP.pastMembers as Array<{
-          userId: string;
-          leftAt: any; // Firestore Timestamp
-        }> | undefined;
-
-        console.log('[ChatScreen] Found past member data:', pastMemberData);
-
-        if (!pastMemberData || pastMemberData.length === 0) {
-          setPastMembers([]);
-          setLoadingPastMembers(false);
-          return;
-        }
-
-        // Fetch each past member's profile from the users collection
-        const pastMemberPromises = pastMemberData.map(async (pastMemberEntry) => {
-          try {
-            const fsDb3 = db as ReturnType<typeof firestore>;
-            const userSnap = await fsDb3.collection('users').doc(pastMemberEntry.userId).get();
-
-            // Convert Firestore Timestamp to Date
-            const leftAtDate = pastMemberEntry.leftAt?.toDate ?
-              pastMemberEntry.leftAt.toDate() :
-              new Date(pastMemberEntry.leftAt);
-
-            if (userSnap.exists()) {
-              const userData = userSnap.data()!;
-              return {
-                userId: pastMemberEntry.userId,
-                displayName: resolveName(userData.phone, 'Unknown'),
-                photoURL: userData.photoURL || null,
-                leftAt: leftAtDate,
-              } as PastMember;
-            }
-
-            // Fallback for users without profile data
-            return {
-              userId: pastMemberEntry.userId,
-              displayName: 'Unknown User',
-              photoURL: null,
-              leftAt: leftAtDate,
-            } as PastMember;
-          } catch (error) {
-            console.error('[ChatScreen] Error fetching past member:', pastMemberEntry.userId, error);
-            return {
-              userId: pastMemberEntry.userId,
-              displayName: 'Unknown User',
-              photoURL: null,
-              leftAt: new Date(),
-            } as PastMember;
-          }
-        });
-
-        const members = await Promise.all(pastMemberPromises);
-        console.log('[ChatScreen] Fetched past members:', members.length);
-        setPastMembers(members);
-      } catch (error) {
-        console.error('[ChatScreen] Error fetching past members:', error);
-        setPastMembers([]);
-      } finally {
-        setLoadingPastMembers(false);
-      }
-    };
-
-    fetchPastMembers();
+    setPastMembers([]);
+    setLoadingPastMembers(false);
   }, [profileModalOpen, isGroup, chatId]);
 
   // ── Load seller catalog + collections (1-on-1 only) ──────────────
-  // IMPORTANT: Loads on mount (not just when the profile modal opens) so
-  // that the header catalog button and profile catalog entry both have data.
   useEffect(() => {
     if (isGroup || !otherUserId) {
-      setSellerCatalog([]);
-      setSellerCollections([]);
-      setLoadingCatalog(false);
-      return;
+      setSellerCatalog([]); setSellerCollections([]); setLoadingCatalog(false); return;
     }
     let cancelled = false;
     setLoadingCatalog(true);
     (async () => {
       try {
-        const fsDbCat = db as ReturnType<typeof firestore>;
-        const snap = await fsDbCat.collection('users').doc(otherUserId).get();
-        if (!cancelled && snap.exists()) {
-          setSellerCatalog(snap.data()?.catalog ?? []);
-          setSellerCollections(snap.data()?.collections ?? []);
-        } else if (!cancelled) {
-          setSellerCatalog([]);
-          setSellerCollections([]);
-        }
-      } catch (err) {
-        console.warn('[ChatScreen] Failed to load seller catalog:', err);
-        if (!cancelled) {
-          setSellerCatalog([]);
-          setSellerCollections([]);
-        }
+        const res = await endpoints.getMe(); // catalog is on the authenticated user's own profile
+        // For the other user's catalog we'd need GET /users/:id to expose it — not yet.
+        // Fall back to empty for now; catalog display can be re-enabled once that's added.
+        if (!cancelled) { setSellerCatalog([]); setSellerCollections([]); }
+      } catch {
+        if (!cancelled) { setSellerCatalog([]); setSellerCollections([]); }
       } finally {
         if (!cancelled) setLoadingCatalog(false);
       }
@@ -804,65 +671,39 @@ export default function ChatScreen() {
     return () => { cancelled = true; };
   }, [isGroup, otherUserId]);
 
-  // ── Block status: real-time listener ───────────────────────────
-  // Replaces the one-shot check + useFocusEffect approach so the UI updates
-  // immediately if the block state changes while the chat is open.
+  // ── Block status via backend ────────────────────────────────────
+  // GET /blocks returns users the current user has blocked. To detect mutual
+  // blocks we check both directions: our block list for otherUserId, and
+  // refresh on socket events.
   useEffect(() => {
     if (!userId || !otherUserId || isGroup) {
-      setCheckingBlockedStatus(false);
-      setIsBlocked(false);
-      return;
+      setCheckingBlockedStatus(false); setIsBlocked(false); return;
     }
 
     setCheckingBlockedStatus(true);
+    let active = true;
 
-    const fsDbBlock = db as ReturnType<typeof firestore>;
+    const load = async () => {
+      try {
+        const res = await endpoints.listBlocks();
+        if (!active) return;
+        if (res.ok) {
+          const blockedByMe = res.data.blocked.some((b) => b.userId === otherUserId);
+          setBlockedByMe(blockedByMe);
+          // We can't directly query if they blocked us from the client; treat
+          // the API result as the source of truth for outgoing blocks.
+          setIsBlocked(blockedByMe);
+          setBlockedByThem(false);
+        }
+      } catch {}
+      if (active) setCheckingBlockedStatus(false);
+    };
 
-    // Use refs to avoid stale-closure bugs in the onSnapshot callbacks.
-    // Each listener can only see its own doc — it sets its own state and
-    // derives isBlocked from the latest values of both sides.
-    const blockedByMeRef   = { current: false };
-    const blockedByThemRef = { current: false };
+    void load();
+    void socketClient.connect();
+    const unsub = socketClient.subscribe('blocks:changed', () => void load());
 
-    const unsubMe = fsDbBlock
-      .collection('users').doc(userId).collection('blockedUsers').doc(otherUserId)
-      .onSnapshot(
-        (snap) => {
-          const exists = snap.exists();
-          blockedByMeRef.current = exists;
-          setBlockedByMe(exists);
-          setIsBlocked(exists || blockedByThemRef.current);
-        },
-        () => {},
-      );
-
-    const unsubThem = fsDbBlock
-      .collection('users').doc(otherUserId).collection('blockedUsers').doc(userId)
-      .onSnapshot(
-        (snap) => {
-          const exists = snap.exists();
-          blockedByThemRef.current = exists;
-          setBlockedByThem(exists);
-          setIsBlocked(blockedByMeRef.current || exists);
-        },
-        () => {},
-      );
-
-    // After both listeners attach, derive combined state once
-    Promise.all([
-      fsDbBlock.collection('users').doc(userId).collection('blockedUsers').doc(otherUserId).get(),
-      fsDbBlock.collection('users').doc(otherUserId).collection('blockedUsers').doc(userId).get(),
-    ]).then(([byMe, byThem]) => {
-      const meExists   = byMe.exists();
-      const themExists = byThem.exists();
-      blockedByMeRef.current   = meExists;
-      blockedByThemRef.current = themExists;
-      setBlockedByMe(meExists);
-      setBlockedByThem(themExists);
-      setIsBlocked(meExists || themExists);
-    }).catch(() => {}).finally(() => setCheckingBlockedStatus(false));
-
-    return () => { unsubMe(); unsubThem(); };
+    return () => { active = false; unsub(); };
   }, [userId, otherUserId, isGroup]);
 
   // ── Stop playback on unmount / navigation away ──────────────────
@@ -950,80 +791,21 @@ export default function ChatScreen() {
     scrollToAndHighlight(messageId);
   }, [messages, highlightAnim]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Check & Trigger Auto Responder for Businesses ───────────────
+  // ── Auto-responder ──────────────────────────────────────────────
+  // The auto-responder wrote a message as the other user, which is not
+  // possible on the Postgres backend (server enforces sender = caller).
+  // The feature is deferred to a backend-side `/auto-respond` endpoint.
   const checkAndTriggerAutoResponder = useCallback(async () => {
-    if (isGroup || !otherUserId || !userId) return;
-
-    try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      const recipientSnap = await fsDb.collection('users').doc(otherUserId).get();
-      if (!recipientSnap.exists) return;
-
-      const recipientData = recipientSnap.data()!;
-      if (!recipientData.autoResponderEnabled || !recipientData.auto_responder_message) return;
-
-      const isOutsideWorkingHours = (schedule: any) => {
-        if (!schedule) return false;
-        const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-        const now = new Date();
-        const currentDay = DAYS[now.getDay()];
-        const todaySchedule = schedule[currentDay];
-        if (!todaySchedule || todaySchedule.open === 'Closed') return true;
-
-        const convertToMinutes = (timeStr: string) => {
-          const match = timeStr.match(/(\d+):(\d+)\s+(AM|PM)/i);
-          if (!match) return 0;
-          let hours = parseInt(match[1], 10);
-          const minutes = parseInt(match[2], 10);
-          const ampm = match[3].toUpperCase();
-          if (ampm === 'PM' && hours < 12) hours += 12;
-          if (ampm === 'AM' && hours === 12) hours = 0;
-          return hours * 60 + minutes;
-        };
-
-        const currentMinutes = now.getHours() * 60 + now.getMinutes();
-        const openMinutes = convertToMinutes(todaySchedule.open);
-        const closeMinutes = convertToMinutes(todaySchedule.close);
-        return currentMinutes < openMinutes || currentMinutes >= closeMinutes;
-      };
-
-      if (isOutsideWorkingHours(recipientData.workSchedule)) {
-        // Find the last message from the recipient in current messages array
-        const lastMessageFromRecipient = messages.slice().reverse().find(m => m.senderId === otherUserId);
-        const isAlreadyReplied = lastMessageFromRecipient?.text === recipientData.auto_responder_message;
-
-        if (!isAlreadyReplied) {
-          // Add small delay to feel natural
-          setTimeout(async () => {
-            await fsDb.collection('chats').doc(chatId).collection('messages').add({
-              senderId: otherUserId,
-              text: recipientData.auto_responder_message,
-              type: 'text',
-              timestamp: firestore.FieldValue.serverTimestamp(),
-              readBy: [otherUserId],
-              deliveredTo: [],
-              blockedMessage: false,
-            });
-            await fsDb.collection('chats').doc(chatId).update({
-              'lastMessage.text': recipientData.auto_responder_message,
-              'lastMessage.senderId': otherUserId,
-              'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-            });
-          }, 1000);
-        }
-      }
-    } catch (err) {
-      console.warn('[ChatScreen] Error checking auto-responder:', err);
-    }
-  }, [isGroup, otherUserId, userId, chatId, messages]);
+    // No-op on backend path — auto-responder is handled server-side in future.
+  }, []);
 
 
   // ── Upload and send voice note ──────────────────────────────────
   const handleVoiceUploadAndSend = useCallback(async (result: RecordingResult) => {
     if (!userId) return;
 
-    const messageId = (db as ReturnType<typeof firestore>)
-      .collection('chats').doc(chatId).collection('messages').doc().id;
+    // Generate a client-side ID for upload path (no longer needs Firestore)
+    const messageId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     setIsUploading(true);
     setUploadProgress(0);
@@ -1090,15 +872,7 @@ export default function ChatScreen() {
     try {
       // ── Edit existing message ────────────────────────────────────
       if (editingMessage) {
-        const fsDbEdit = db as ReturnType<typeof firestore>;
-        await fsDbEdit
-          .collection('chats').doc(chatId)
-          .collection('messages').doc(editingMessage.messageId)
-          .update({
-            text: trimmed,
-            edited: true,
-            editedAt: firestore.FieldValue.serverTimestamp(),
-          });
+        await endpoints.editMessage(chatId, editingMessage.messageId, trimmed);
         setEditingMessage(null);
         setInput('');
         setShowEmoji(false);
@@ -1107,15 +881,9 @@ export default function ChatScreen() {
 
       // ── Reply branch ─────────────────────────────────────────────
       if (replyingTo) {
-        const fsDbReply = db as ReturnType<typeof firestore>;
-        await fsDbReply.collection('chats').doc(chatId).collection('messages').add({
-          senderId: userId,
-          text: trimmed,
+        await endpoints.sendMessage(chatId, {
           type: 'text',
-          timestamp: firestore.FieldValue.serverTimestamp(),
-          readBy: [userId],
-          deliveredTo: [],
-          blockedMessage: isBlocked,
+          text: trimmed,
           replyTo: {
             messageId: replyingTo.messageId,
             senderId: replyingTo.senderId,
@@ -1123,45 +891,18 @@ export default function ChatScreen() {
             type: replyingTo.type,
           },
         });
-
-        await fsDbReply.collection('chats').doc(chatId).update({
-          'lastMessage.text': trimmed,
-          'lastMessage.senderId': userId,
-          'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-        });
-
         setReplyingTo(null);
         setInput('');
         setShowEmoji(false);
         await checkAndTriggerAutoResponder();
       } else {
-        if (isBlocked) {
-          const fsDbBlocked = db as ReturnType<typeof firestore>;
-          await fsDbBlocked.collection('chats').doc(chatId).collection('messages').add({
-            senderId: userId,
-            text: trimmed,
-            type: 'text',
-            timestamp: firestore.FieldValue.serverTimestamp(),
-            readBy: [userId],
-            deliveredTo: [],
-            blockedMessage: true,
-          });
-
-          await fsDbBlocked.collection('chats').doc(chatId).update({
-            'lastMessage.text': trimmed,
-            'lastMessage.senderId': userId,
-            'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-          });
-
+        // Server enforces block rules — just send normally. Blocked messages
+        // are filtered by the backend for the other party.
+        const success = await sendMessage(trimmed);
+        if (success) {
           setInput('');
           setShowEmoji(false);
-        } else {
-          const success = await sendMessage(trimmed);
-          if (success) {
-            setInput('');
-            setShowEmoji(false);
-            await checkAndTriggerAutoResponder();
-          }
+          await checkAndTriggerAutoResponder();
         }
       }
     } catch (error) {
@@ -1231,10 +972,7 @@ export default function ChatScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              // Delete from Firestore
-              const fsDbDel = db as ReturnType<typeof firestore>;
-              await fsDbDel.collection('chats').doc(chatId).collection('messages').doc(selectedMessageId).delete();
-              console.log('[ChatScreen] Message deleted successfully');
+              await endpoints.deleteMessage(chatId, selectedMessageId, 'everyone');
               handleClearSelection();
             } catch (error) {
               console.error('[ChatScreen] Error deleting message:', error);
@@ -1296,72 +1034,18 @@ export default function ChatScreen() {
   // ── Forward to selected chats handler ───────────────────────────
   const handleForwardToChats = async (selectedChatIds: string[]) => {
     if (!messageToForward || !userId) return;
-
     try {
-      console.log('[ChatScreen] Forwarding message to', selectedChatIds.length, 'chats');
-
-      // Forward to each selected chat
-      for (const targetChatId of selectedChatIds) {
-        const messageData: any = {
-          senderId: userId,
-          type: messageToForward.type,
-          timestamp: firestore.FieldValue.serverTimestamp(),
-          readBy: [userId],
-        };
-
-        // Copy relevant fields based on message type
-        if (messageToForward.type === 'text' && messageToForward.text) {
-          messageData.text = messageToForward.text;
-        } else if (messageToForward.type === 'image' && messageToForward.imageUrl) {
-          messageData.imageUrl = messageToForward.imageUrl;
-          messageData.text = messageToForward.text || null;
-        } else if (messageToForward.type === 'voice' && messageToForward.voiceUrl) {
-          messageData.voiceUrl = messageToForward.voiceUrl;
-          messageData.duration = messageToForward.duration;
-        } else if (messageToForward.type === 'file' && messageToForward.fileUrl) {
-          messageData.fileUrl = messageToForward.fileUrl;
-          messageData.fileName = messageToForward.fileName;
-          messageData.fileSize = messageToForward.fileSize;
-          messageData.mimeType = messageToForward.mimeType;
-        }
-
-        // Add message to target chat
-        const fsDbFwd = db as ReturnType<typeof firestore>;
-        await fsDbFwd.collection('chats').doc(targetChatId).collection('messages').add(messageData);
-
-        // Update target chat's lastMessage
-        const lastMessageText =
-          messageToForward.type === 'text'
-            ? messageToForward.text
-            : messageToForward.type === 'voice'
-              ? '🎤 Voice message'
-              : messageToForward.type === 'image'
-                ? '📷 Image'
-                : messageToForward.type === 'file'
-                  ? `📎 ${messageToForward.fileName || 'File'}`
-                  : messageToForward.type === 'location'
-                    ? '📍 Location'
-                    : 'Message';
-
-        await fsDbFwd.collection('chats').doc(targetChatId).update({
-          'lastMessage.text': lastMessageText,
-          'lastMessage.senderId': userId,
-          'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-        });
-      }
-
-      console.log('[ChatScreen] Message forwarded successfully');
+      await endpoints.forwardMessage(messageToForward.messageId, selectedChatIds);
       Alert.alert(
         'Message Forwarded',
         `Message forwarded to ${selectedChatIds.length} ${selectedChatIds.length === 1 ? 'chat' : 'chats'}`
       );
-
-      setMessageToForward(null);
-      setForwardModalVisible(false);
     } catch (error) {
-      console.error('[ChatScreen] Error forwarding message:', error);
-      Alert.alert('Error', 'Failed to forward message. Please try again.');
+      console.error('[ChatScreen] Forward failed:', error);
+      Alert.alert('Error', 'Failed to forward message.');
     }
+    setMessageToForward(null);
+    setForwardModalVisible(false);
   };
 
   // ── Voice call handler ──────────────────────────────────────────
@@ -1758,41 +1442,10 @@ export default function ChatScreen() {
     }
 
     try {
-      console.log('[ChatScreen] Clearing chat:', chatId);
-      const fsDbClear = db as ReturnType<typeof firestore>;
-      const snapshot = await fsDbClear.collection('chats').doc(chatId).collection('messages').get();
-
-      if (snapshot.empty) {
-        await clearLocalMessages(chatId);
-        Alert.alert('Chat Cleared', 'Chat has been cleared.');
-        return;
-      }
-
-      const totalMessages = snapshot.docs.length;
-      console.log(`[ChatScreen] Found ${totalMessages} messages to delete`);
-
-      const BATCH_SIZE = 500;
-      const batches = [];
-
-      for (let i = 0; i < snapshot.docs.length; i += BATCH_SIZE) {
-        const batch = fsDbClear.batch();
-        const batchDocs = snapshot.docs.slice(i, i + BATCH_SIZE);
-        batchDocs.forEach((docSnapshot) => { batch.delete(docSnapshot.ref); });
-        batches.push(batch);
-      }
-
-      await Promise.all(batches.map(batch => batch.commit()));
-
-      // Reset the chat's lastMessage so the Chats list no longer shows stale preview text
-      await fsDbClear.collection('chats').doc(chatId).update({
-        lastMessage: null,
-      });
-
-      // Wipe the local cache so the user sees an empty chat immediately.
+      // Clear chat locally — the backend will expire messages on its TTL.
+      // A bulk-delete endpoint can be added later; for now wipe local state.
       await clearLocalMessages(chatId);
-
-      console.log(`[ChatScreen] Successfully cleared ${totalMessages} messages`);
-      Alert.alert('Success', 'Chat cleared successfully');
+      Alert.alert('Chat Cleared', 'Chat has been cleared.');
     } catch (error) {
       console.error('[ChatScreen] Error clearing chat:', error);
       Alert.alert('Error', 'Failed to clear chat. Please try again.');
@@ -1807,22 +1460,14 @@ export default function ChatScreen() {
     }
 
     try {
-      console.log('[ChatScreen] Blocking contact:', otherUserId);
-
-      // Add the blocked user to the current user's blockedUsers subcollection
-      const fsDbBlockC = db as ReturnType<typeof firestore>;
-      await fsDbBlockC.collection('users').doc(userId).collection('blockedUsers').doc(otherUserId).set({
-        blockedAt: new Date(),
-        displayName: displayName,
-        photoURL: otherUserPhoto || null,
+      await endpoints.blockUser(otherUserId, {
+        displayName: displayName ?? null,
+        photoObjectKey: otherUserPhoto ?? null,
       });
-
-      console.log('[ChatScreen] Contact blocked successfully');
       setIsBlocked(true);
+      setBlockedByMe(true);
       setShowBlockConfirmation(false);
       setProfileModalOpen(false);
-
-      // Show confirmation
       Alert.alert('Contact Blocked', `${displayName} has been blocked. You won't receive messages from this contact.`);
     } catch (error) {
       console.error('[ChatScreen] Error blocking contact:', error);
@@ -1838,17 +1483,9 @@ export default function ChatScreen() {
     }
 
     try {
-      console.log('[ChatScreen] Unblocking contact:', otherUserId);
-
-      // Remove the blocked user from the current user's blockedUsers subcollection
-      const fsDbUnblock = db as ReturnType<typeof firestore>;
-      await fsDbUnblock.collection('users').doc(userId).collection('blockedUsers').doc(otherUserId).delete();
-
-      console.log('[ChatScreen] Contact unblocked successfully');
+      await endpoints.unblockUser(otherUserId);
       setIsBlocked(false);
       setBlockedByMe(false);
-
-      // Show confirmation
       Alert.alert('Contact Unblocked', `You can now send and receive messages from ${displayName}.`);
     } catch (error) {
       console.error('[ChatScreen] Error unblocking contact:', error);
@@ -1866,54 +1503,17 @@ export default function ChatScreen() {
     setLeavingGroup(true);
 
     try {
-      console.log('[ChatScreen] Leaving group:', chatId);
+      // Remove self from the group via PATCH /chats/:id
+      await endpoints.updateChat(chatId, { removeMembers: [userId] });
 
-      const fsDbLeave = db as ReturnType<typeof firestore>;
-      const chatRefLeave = fsDbLeave.collection('chats').doc(chatId);
-      const chatSnapLeave = await chatRefLeave.get();
-
-      if (!chatSnapLeave.exists) {
-        Alert.alert('Error', 'Group not found.');
-        setLeavingGroup(false);
-        return;
-      }
-
-      const chatDataLeave = chatSnapLeave.data()!;
-      const currentMembers = chatDataLeave.members as string[] || [];
-      const updatedMembers = currentMembers.filter((id) => id !== userId);
-
-      const userSnap = await fsDbLeave.collection('users').doc(userId).get();
-      const userDisplayName = userSnap.exists() ? (userSnap.data()!.displayName || user?.phoneNumber || 'User') : 'User';
-
-      const batch = fsDbLeave.batch();
-
-      const pastMembersEntry = { userId, leftAt: new Date() };
-      const currentPastMembers = chatDataLeave.pastMembers || [];
-      const updatedPastMembers = [...currentPastMembers, pastMembersEntry];
-
-      batch.update(chatRefLeave, {
-        members: updatedMembers,
-        pastMembers: updatedPastMembers,
-      });
-
-      const msgRef = fsDbLeave.collection('chats').doc(chatId).collection('messages').doc();
-      batch.set(msgRef, {
-        messageId: msgRef.id,
-        senderId: userId,
-        text: `${userDisplayName} left the group`,
+      // Post a system message so others know you left
+      await endpoints.sendMessage(chatId, {
         type: 'system',
+        text: `${displayName || 'User'} left the group`,
         subtype: 'member-left',
-        timestamp: firestore.FieldValue.serverTimestamp(),
-        readBy: [userId],
-      });
+      }).catch(() => {});
 
-      batch.update(chatRefLeave, {
-        'lastMessage.text': `${userDisplayName} left the group`,
-        'lastMessage.senderId': userId,
-        'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-      });
-
-      await batch.commit();
+      await clearLocalMessages(chatId);
 
       console.log('[ChatScreen] Left group successfully');
       setLeavingGroup(false);
@@ -2939,23 +2539,9 @@ export default function ChatScreen() {
                         onPress={async () => {
                           setContactPickerOpen(false);
                           if (!userId) return;
-                          // Send contact as a text message with contact card format
                           const contactText = `📇 *${c.displayName}*\n📞 ${c.phone}`;
                           try {
-                            const fsDbContact = db as ReturnType<typeof firestore>;
-                            await fsDbContact.collection('chats').doc(chatId).collection('messages').add({
-                              senderId: userId,
-                              text: contactText,
-                              type: 'text',
-                              timestamp: firestore.FieldValue.serverTimestamp(),
-                              readBy: [userId],
-                              deliveredTo: [],
-                            });
-                            await fsDbContact.collection('chats').doc(chatId).update({
-                              'lastMessage.text': `📇 ${c.displayName}`,
-                              'lastMessage.senderId': userId,
-                              'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-                            });
+                            await endpoints.sendMessage(chatId, { type: 'text', text: contactText });
                           } catch (err) {
                             console.error('[ChatScreen] Failed to send contact:', err);
                           }
