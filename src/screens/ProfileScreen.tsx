@@ -1634,11 +1634,11 @@ export default function ProfileScreen() {
                           )}
                         </View>
                       </View>
-                    </View>
                   );
                 })}
               </ScrollView>
             </>
+            )}
           </View>
         </View>
       </Modal>

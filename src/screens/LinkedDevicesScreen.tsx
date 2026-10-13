@@ -38,6 +38,7 @@ import {
 } from '../context/ThemeContext';
 import { useAuth }      from '../context/AuthContext';
 import { useTeamInbox } from '../context/TeamInboxContext';
+import { usePhoneBook } from '../hooks/usePhoneBook';
 import { useInboxConversations } from '../hooks/useTeamInbox';
 import { addAgent, removeAgent, updateAgentRole } from '../hooks/useTeamAgents';
 import {
@@ -101,17 +102,21 @@ function formatRelative(d: Date): string {
   return d.toLocaleDateString([], { day: 'numeric', month: 'short' });
 }
 
-const memberCache = new Map<string, { displayName: string; photoURL: string | null }>();
+const memberCache = new Map<string, { displayName: string; photoURL: string | null; phone: string | null }>();
 async function fetchMemberInfo(uid: string) {
   if (memberCache.has(uid)) return memberCache.get(uid)!;
   try {
     const snap = await (db as ReturnType<typeof firestore>).collection('users').doc(uid).get();
     const info = snap.exists()
-      ? { displayName: snap.data()!.displayName ?? uid, photoURL: snap.data()!.photoURL ?? null }
-      : { displayName: uid, photoURL: null };
+      ? {
+          displayName: snap.data()!.displayName ?? uid,
+          photoURL: snap.data()!.photoURL ?? null,
+          phone: snap.data()!.phone ?? snap.data()!.phoneNumber ?? null,
+        }
+      : { displayName: uid, photoURL: null, phone: null };
     memberCache.set(uid, info);
     return info;
-  } catch { return { displayName: uid, photoURL: null }; }
+  } catch { return { displayName: uid, photoURL: null, phone: null }; }
 }
 
 // ─── DeviceCard — supports a `readOnly` variant for companions ───────────────
@@ -182,24 +187,25 @@ interface AgentCardProps {
   onRoleChange: (a: TeamAgent, r: AgentRole) => void;
   textColor: string; fontFamily: string;
   readOnly?: boolean;
+  displayName: string;
 }
 const AgentCard = memo(function AgentCard({
-  agent, isAdmin, ownerUid, onRemove, onRoleChange, textColor, fontFamily, readOnly,
+  agent, isAdmin, ownerUid, onRemove, onRoleChange, textColor, fontFamily, readOnly, displayName,
 }: AgentCardProps) {
   const { bevel } = useGlass();
-  const color = stringToColor(agent.displayName);
+  const color = stringToColor(displayName);
   const [menuOpen, setMenuOpen] = useState(false);
   return (
     <View style={[S.card, bevel, readOnly && S.cardReadOnly]}>
       <View style={[S.agentAvatar, { backgroundColor: readOnly ? COLORS.sub : color }]}>
         {agent.photoURL
           ? <Image source={{ uri: agent.photoURL }} style={S.agentAvatarImg} />
-          : <AppText style={S.agentAvatarTxt} fixedColor>{getInitials(agent.displayName)}</AppText>}
+          : <AppText style={S.agentAvatarTxt} fixedColor>{getInitials(displayName)}</AppText>}
       </View>
       <View style={S.deviceInfo}>
         <View style={S.deviceNameRow}>
           <AppText style={[S.deviceName, { color: readOnly ? COLORS.sub : textColor, fontFamily }]} numberOfLines={1}>
-            {agent.displayName}
+            {displayName}
           </AppText>
           <View style={[S.rolePill, agent.role === 'admin' ? S.roleAdmin : S.roleAgent]}>
             <AppText style={[S.roleTxt, agent.role === 'admin' ? S.roleTxtAdmin : S.roleTxtAgent]} fixedColor>
@@ -229,7 +235,7 @@ const AgentCard = memo(function AgentCard({
         <Modal visible transparent animationType="fade" onRequestClose={() => setMenuOpen(false)}>
           <TouchableOpacity style={S.menuBackdrop} activeOpacity={1} onPress={() => setMenuOpen(false)} />
           <View style={[S.agentMenuCard, bevel]}>
-            <AppText style={S.agentMenuName} numberOfLines={1}>{agent.displayName}</AppText>
+            <AppText style={S.agentMenuName} numberOfLines={1}>{displayName}</AppText>
             <View style={S.agentMenuDivider} />
             <TouchableOpacity style={S.agentMenuItem} onPress={() => { setMenuOpen(false); onRoleChange(agent, agent.role === 'admin' ? 'agent' : 'admin'); }}>
               <View style={S.agentMenuIcon}><Ionicons name={agent.role === 'admin' ? 'person-outline' : 'shield-outline'} size={18} color={COLORS.blue} /></View>
@@ -250,16 +256,19 @@ const AgentCard = memo(function AgentCard({
 interface InboxRowProps {
   item: InboxConversation; ownerUid: string; onPress: () => void;
   bevel: object; textColor: string; fontFamily: string;
+  resolveName: (phone?: string | null, fallback?: string) => string;
 }
-const InboxRow = memo(function InboxRow({ item, ownerUid, onPress, bevel, textColor, fontFamily }: InboxRowProps) {
-  const [info, setInfo] = useState<{ displayName: string; photoURL: string | null } | null>(null);
+const InboxRow = memo(function InboxRow({ item, ownerUid, onPress, bevel, textColor, fontFamily, resolveName }: InboxRowProps) {
+  const [info, setInfo] = useState<{ displayName: string; photoURL: string | null; phone: string | null } | null>(null);
   React.useEffect(() => {
     if (item.type === 'direct') {
       const other = item.members.find((m) => m !== ownerUid);
       if (other) fetchMemberInfo(other).then(setInfo);
     }
   }, [item.members, item.type, ownerUid]);
-  const name = item.type === 'group' ? (item.groupName || 'Group') : (info?.displayName ?? '…');
+  const name = item.type === 'group'
+    ? (item.groupName || 'Group')
+    : (info ? resolveName(info.phone, info.displayName) : '…');
   const photoURL = item.type === 'direct' ? info?.photoURL ?? null : null;
   const color = stringToColor(name);
   return (
@@ -302,6 +311,7 @@ export default function LinkedDevicesScreen() {
 
   const { userId, ownerUid, isCompanion, displayName: myDisplayName } = useAuth();
   const { isAdmin, isOwner, agents, agentsLoading } = useTeamInbox();
+  const { resolveName } = usePhoneBook();
 
   const [screenTab, setScreenTab] = useState<ScreenTab>('devices');
 
@@ -465,7 +475,7 @@ export default function LinkedDevicesScreen() {
 
   const handleUnlink = useCallback((agent: TeamAgent) => {
     if (isCompanion) { noAuthority('unlink team members'); return; }
-    Alert.alert('Unlink Account', `Remove ${agent.displayName} from the team?`, [
+    Alert.alert('Unlink Account', `Remove ${resolveName(agent.phone, agent.displayName)} from the team?`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Unlink', style: 'destructive', onPress: async () => {
           if (!ownerUid) return;
@@ -473,7 +483,7 @@ export default function LinkedDevicesScreen() {
           if (!r.success) Alert.alert('Error', r.error ?? 'Failed to unlink.');
         }},
     ]);
-  }, [ownerUid, isCompanion, noAuthority]);
+  }, [ownerUid, isCompanion, noAuthority, resolveName]);
 
   const handleRoleChange = useCallback(async (agent: TeamAgent, role: AgentRole) => {
     if (isCompanion) { noAuthority('change roles'); return; }
@@ -483,10 +493,22 @@ export default function LinkedDevicesScreen() {
   }, [ownerUid, isCompanion, noAuthority]);
 
   const openChat = useCallback((conv: InboxConversation) => {
+    if (conv.type === 'group') {
+      (navigation as any).navigate('Chat', {
+        chatId: conv.chatId, displayName: conv.groupName ?? 'Group', isGroup: true,
+      });
+      return;
+    }
+    // Direct chat: pass the counterpart's uid so ChatScreen can resolve the
+    // real contact name (phone book) instead of showing an empty placeholder.
+    const otherUserId = conv.members.find((m) => m !== ownerUid) ?? null;
     (navigation as any).navigate('Chat', {
-      chatId: conv.chatId, displayName: conv.groupName ?? '…', isGroup: conv.type === 'group',
+      chatId: conv.chatId,
+      displayName: '',          // ChatScreen resolves the name from otherUserId
+      isGroup: false,
+      otherUserId,
     });
-  }, [navigation]);
+  }, [navigation, ownerUid]);
 
   return (
     <View style={S.root}>
@@ -679,6 +701,7 @@ export default function LinkedDevicesScreen() {
                   <AgentCard
                     key={agent.uid}
                     agent={agent}
+                    displayName={resolveName(agent.phone, agent.displayName)}
                     isAdmin={isAdmin}
                     ownerUid={ownerUid ?? ''}
                     onRemove={handleUnlink}
@@ -735,7 +758,7 @@ export default function LinkedDevicesScreen() {
                 ItemSeparatorComponent={() => <View style={{ height: 6 }} />}
                 renderItem={({ item }) => (
                   <InboxRow item={item} ownerUid={ownerUid ?? ''} onPress={() => openChat(item)}
-                    bevel={bevel} textColor={textColor} fontFamily={fontFamily} />
+                    bevel={bevel} textColor={textColor} fontFamily={fontFamily} resolveName={resolveName} />
                 )} />
             )}
           </View>

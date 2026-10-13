@@ -614,6 +614,38 @@ export default function ChatScreen() {
     setDisplayName(savedContactName ?? otherUserPhone);
   }, [savedContactName, otherUserPhone, isGroup]);
 
+  // Early header name resolver. The sync effect above only runs once the full
+  // business profile has loaded (which can be slow or absent). This fetches
+  // just the other user's phone number up front so the header shows the saved
+  // contact name (or the phone number) immediately instead of an empty "…".
+  useEffect(() => {
+    if (isGroup || !otherUserId) return;
+    // If we already have a non-empty name from the route param, keep it until
+    // the phone book / profile resolves — but still fetch so an empty name
+    // (common on fresh navigation) gets filled in right away.
+    let cancelled = false;
+    (async () => {
+      try {
+        const fsDbName = db as ReturnType<typeof firestore>;
+        const snap = await fsDbName.collection('users').doc(otherUserId).get();
+        if (cancelled || !snap.exists()) return;
+        const phone: string = snap.data()?.phone || '';
+        if (!phone) return;
+        const resolved = resolveName(normalizePhone(phone), phone);
+        if (!cancelled && resolved) setDisplayName(resolved);
+      } catch (err) {
+        console.warn('[ChatScreen] Failed to resolve header name:', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isGroup, otherUserId, resolveName]);
+
+  // Name shown in the header. Falls back gracefully so it never renders an
+  // empty value or a lone placeholder while the real name is still resolving.
+  const headerName = (displayName && displayName.trim() && displayName.trim() !== '…')
+    ? displayName
+    : (otherUserPhone || (isGroup ? 'Group' : 'Chat'));
+
 
 
   const [input, setInput] = useState('');
@@ -2617,13 +2649,13 @@ export default function ChatScreen() {
               activeOpacity={0.75}
             >
               <Avatar
-                initials={getInitials(displayName)}
+                initials={getInitials(headerName)}
                 color={COLORS.blue}
                 size={40}
                 imageUrl={headerPhoto}
               />
               <View style={styles.contactInfo}>
-                <AppText style={[styles.contactName, { color: textColor, fontFamily }]}>{displayName}</AppText>
+                <AppText style={[styles.contactName, { color: textColor, fontFamily }]}>{headerName}</AppText>
                 <AppText style={[styles.onlineText, { color: isOnline ? COLORS.blue : FG.secondary }]}>
                   {isGroup
                     ? 'Group chat'
