@@ -5,7 +5,7 @@ import {
   StyleSheet, TextInput, KeyboardAvoidingView, Platform,
   ActivityIndicator, PanResponder, Linking, Modal, Alert,
   GestureResponderEvent, PanResponderGestureState, Image, Dimensions,
-  Animated, Share,
+  Animated, Share, Switch, Pressable,
 } from 'react-native';
 import { useNavigation, useRoute, RouteProp, useFocusEffect } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -59,12 +59,12 @@ import { useOutgoingCall } from '../hooks/useOutgoingCall';
 import { usePhoneBook } from '../hooks/usePhoneBook';
 import { useOtherUserPresence, useWritePresence } from '../hooks/usePresence';
 import { fetchUserPrivacySettings } from '../hooks/usePrivacySettings';
-import { clearLocalMessages } from '../hooks/useLocalMessages';
 import { useContacts, AppContact } from '../hooks/useContacts';
 
 import { uploadVoiceNote, UploadProgress } from '../utils/voiceNoteStorage';
 import { sendVoiceMessage, sendImageMessage, sendFileMessage } from '../hooks/useChatActions';
 import { parseSystemMessage } from '../utils/systemMessageParser';
+import { normalizePhone } from '../utils/phoneUtils';
 import { useConversationAssignment } from '../hooks/useTeamInbox';
 import { useTeamInbox } from '../context/TeamInboxContext';
 import { AssignmentSheet } from '../components/AssignmentSheet';
@@ -231,13 +231,25 @@ async function loadMutedState(chatId: string): Promise<boolean> {
   }
 }
 
-/** Save muted state to AsyncStorage */
-async function saveMutedState(chatId: string, muted: boolean): Promise<void> {
+/** Save muted state to AsyncStorage (local UI) and Firestore (so the push
+ *  Cloud Function can skip notifications for this user on this chat). */
+async function saveMutedState(chatId: string, muted: boolean, ownerUid?: string | null): Promise<void> {
   try {
     const key = `${MUTE_STORAGE_KEY_PREFIX}${chatId}`;
     await AsyncStorage.setItem(key, muted.toString());
   } catch (error) {
     console.error('[ChatScreen] Failed to save muted state:', error);
+  }
+  if (ownerUid) {
+    try {
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('chats').doc(chatId).set(
+        { mutedBy: { [ownerUid]: muted } },
+        { merge: true },
+      );
+    } catch (error) {
+      console.warn('[ChatScreen] Failed to sync muted state to Firestore:', error);
+    }
   }
 }
 
@@ -292,11 +304,162 @@ function getWorkHoursSummary(schedule?: Record<string, DaySchedule>) {
   });
 }
 
+// ─── Add Contact Sheet ────────────────────────────────────────────────────────
+// Lets the user save an unsaved chat partner. First/last name fields plus a
+// "Sync to phone" switch that, when on, also writes to the device address book.
+function AddContactSheet({
+  visible, onClose, phone, suggestedName, existingName, onSaved,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  phone: string;
+  suggestedName: string;
+  existingName: string | null;
+  onSaved: () => void;
+}) {
+  const { textColor } = useTypography();
+  const { FG } = useForeground();
+  const { bevel } = useGlass();
+
+  const isEditing = !!existingName;
+
+  const [firstName, setFirstName] = useState('');
+  const [lastName,  setLastName]  = useState('');
+  const [syncToPhone, setSyncToPhone] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  // Seed the name fields when the sheet opens. In edit mode, use the existing
+  // saved contact name; otherwise fall back to the suggested display name.
+  useEffect(() => {
+    if (visible) {
+      const seed = (existingName || suggestedName || '').trim();
+      const parts = seed.split(/\s+/);
+      setFirstName(parts[0] && !/^\+?\d+$/.test(parts[0]) ? parts[0] : '');
+      setLastName(parts.length > 1 && !/^\+?\d+$/.test(parts[1]) ? parts.slice(1).join(' ') : '');
+      setSyncToPhone(true);
+    }
+  }, [visible, suggestedName, existingName]);
+
+  const handleSave = async () => {
+    const fn = firstName.trim();
+    if (!fn || saving) return;
+    setSaving(true);
+    try {
+      if (Platform.OS !== 'web' && (syncToPhone || isEditing)) {
+        const Contacts = await import('expo-contacts/legacy');
+        const { status } = await Contacts.requestPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert('Permission needed', 'Allow contacts access to save this contact to your phone.');
+          setSaving(false);
+          return;
+        }
+
+        // When editing, remove the existing device entries for this number first
+        // so we don't create duplicates.
+        if (isEditing) {
+          const normalized = normalizePhone(phone);
+          const { data } = await Contacts.getContactsAsync({ fields: [Contacts.Fields.PhoneNumbers] });
+          await Promise.all(
+            data
+              .filter((c: any) => (c.phoneNumbers ?? []).some((pn: any) => normalizePhone(pn.number ?? '') === normalized))
+              .map((c: any) => c.id ? Contacts.removeContactAsync(c.id) : Promise.resolve())
+          );
+        }
+
+        // Only write a new device entry when sync is on (edit always keeps it on disk)
+        if (syncToPhone) {
+          await Contacts.addContactAsync({
+            [Contacts.Fields.FirstName]: fn,
+            [Contacts.Fields.LastName]:  lastName.trim(),
+            [Contacts.Fields.PhoneNumbers]: [{ label: 'mobile', number: phone }],
+          } as any);
+        }
+      }
+      onSaved();
+    } catch (err) {
+      console.error('[AddContactSheet] Failed to save contact:', err);
+      Alert.alert('Could not save', 'Failed to save the contact. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+      <Pressable style={addContactStyles.overlay} onPress={onClose} />
+      <View style={[addContactStyles.sheet, { backgroundColor: FG.glassBg, borderColor: FG.glassBorder }]}>
+        <AppBg />
+        <View style={addContactStyles.handle} />
+
+        <View style={addContactStyles.header}>
+          <TouchableOpacity onPress={onClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <AppIcon name="close" size={22} color={COLORS.sub} />
+          </TouchableOpacity>
+          <AppText style={[addContactStyles.title, { color: textColor }]}>{isEditing ? 'Edit Contact' : 'New Contact'}</AppText>
+          <TouchableOpacity onPress={handleSave} disabled={!firstName.trim() || saving} activeOpacity={0.85}>
+            {saving
+              ? <ActivityIndicator size="small" color={COLORS.blue} />
+              : <AppText style={[addContactStyles.save, { opacity: firstName.trim() ? 1 : 0.4 }]}>Save</AppText>}
+          </TouchableOpacity>
+        </View>
+
+        <View style={{ paddingHorizontal: 18, gap: 12 }}>
+          <View style={[addContactStyles.input, bevel]}>
+            <AppIcon name="person-outline" size={18} color={COLORS.sub} />
+            <TextInput
+              style={[addContactStyles.inputField, { color: textColor }]}
+              placeholder="First name"
+              placeholderTextColor={COLORS.sub}
+              value={firstName}
+              onChangeText={setFirstName}
+              autoFocus
+            />
+          </View>
+
+          <View style={[addContactStyles.input, bevel]}>
+            <AppIcon name="person-outline" size={18} color={COLORS.sub} />
+            <TextInput
+              style={[addContactStyles.inputField, { color: textColor }]}
+              placeholder="Last name"
+              placeholderTextColor={COLORS.sub}
+              value={lastName}
+              onChangeText={setLastName}
+            />
+          </View>
+
+          <View style={[addContactStyles.input, bevel]}>
+            <AppIcon name="call-outline" size={18} color={COLORS.sub} />
+            <AppText style={[addContactStyles.inputField, { color: FG.secondary }]}>{phone}</AppText>
+          </View>
+
+          <View style={[addContactStyles.switchRow, bevel]}>
+            <View style={{ flex: 1 }}>
+              <AppText style={[addContactStyles.switchLabel, { color: textColor }]}>Sync to phone</AppText>
+              <AppText style={[addContactStyles.switchSub, { color: FG.secondary }]}>
+                Also save this contact to your device address book
+              </AppText>
+            </View>
+            <Switch
+              value={syncToPhone}
+              onValueChange={setSyncToPhone}
+              trackColor={{ false: 'rgba(0,0,0,0.1)', true: COLORS.blue }}
+              thumbColor="#fff"
+            />
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 export default function ChatScreen() {
   const navigation = useNavigation<NavProp>();
   const route = useRoute<RoutePropType>();
   const insets = useSafeAreaInsets();
-  const { chatId, displayName, isGroup, otherUserId, otherUserPhoto } = route.params;
+  const { chatId, displayName: routeDisplayName, isGroup, otherUserId, otherUserPhoto, openProfile: routeOpenProfile, openAddContact: routeOpenAddContact } = route.params;
+  // Local, live display name: starts from the route param but updates when the
+  // user saves/edits/deletes a contact (so the header reflects it immediately).
+  const [displayName, setDisplayName] = useState(routeDisplayName);
   const { FG } = useForeground();
   const { fontFamily, textColor } = useTypography();
   const { bevel } = useGlass();
@@ -328,7 +491,7 @@ export default function ChatScreen() {
   const [activeCatalogCol,    setActiveCatalogCol]    = useState<string | null>(null); // 'all' | colId
 
   // ── Messages — real-time Firestore stream ───────────────────────
-  const { messages, loading, sendMessage } = useMessages(chatId, userId);
+  const { messages, loading, sendMessage, clearMessages, deleteMessage } = useMessages(chatId, userId);
 
   // ── Filter out blocked messages for recipient ───────────────────
   // If I receive a message that was sent while I was blocked, don't show it
@@ -405,7 +568,7 @@ export default function ChatScreen() {
 
 
   // ── Phone book name resolver (saved contact name, else phone number) ──
-  const { resolveName } = usePhoneBook();
+  const { resolveName, contactsMap, reloadPhoneBook } = usePhoneBook();
 
   /** Resolve a senderId to the name shown in reply previews / reply bubbles. */
   const resolveSenderName = (senderId: string): string => {
@@ -435,6 +598,22 @@ export default function ChatScreen() {
   // ── Contacts (for share contact feature) ──────────────────────────────────
   const { contacts: phoneContacts, loading: contactsLoading, hasPermission: contactsPermission } = useContacts();
 
+  // The other user's phone number (from their Firestore profile) and whether it
+  // is already saved in this device's address book.
+  const otherUserPhone = businessProfile?.phone || '';
+  const savedContactName = useMemo(() => {
+    if (isGroup || !otherUserPhone) return null;
+    return contactsMap.get(normalizePhone(otherUserPhone)) ?? null;
+  }, [isGroup, otherUserPhone, contactsMap]);
+  const isUnsavedContact = !isGroup && !!otherUserPhone && !savedContactName;
+
+  // Keep the header name in sync with the phone book: show the saved contact
+  // name if present, otherwise fall back to the phone number.
+  useEffect(() => {
+    if (isGroup || !otherUserPhone) return;
+    setDisplayName(savedContactName ?? otherUserPhone);
+  }, [savedContactName, otherUserPhone, isGroup]);
+
 
 
   const [input, setInput] = useState('');
@@ -448,6 +627,13 @@ export default function ChatScreen() {
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [addContactOpen, setAddContactOpen] = useState(false);
+
+  // Honor deep-link params from the chat-list actions menu
+  useEffect(() => {
+    if (routeOpenProfile) setProfileModalOpen(true);
+    if (routeOpenAddContact) setAddContactOpen(true);
+  }, [routeOpenProfile, routeOpenAddContact]);
 
   // ── Search state ────────────────────────────────────────────────────
   const [searchOpen, setSearchOpen] = useState(false);
@@ -977,72 +1163,11 @@ export default function ChatScreen() {
     scrollToAndHighlight(messageId);
   }, [messages, highlightAnim]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Check & Trigger Auto Responder for Businesses ───────────────
-  const checkAndTriggerAutoResponder = useCallback(async () => {
-    if (isGroup || !otherUserId || !userId) return;
-
-    try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      const recipientSnap = await fsDb.collection('users').doc(otherUserId).get();
-      if (!recipientSnap.exists) return;
-
-      const recipientData = recipientSnap.data()!;
-      if (!recipientData.autoResponderEnabled || !recipientData.auto_responder_message) return;
-
-      const isOutsideWorkingHours = (schedule: any) => {
-        if (!schedule) return false;
-        const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-        const now = new Date();
-        const currentDay = DAYS[now.getDay()];
-        const todaySchedule = schedule[currentDay];
-        if (!todaySchedule || todaySchedule.open === 'Closed') return true;
-
-        const convertToMinutes = (timeStr: string) => {
-          const match = timeStr.match(/(\d+):(\d+)\s+(AM|PM)/i);
-          if (!match) return 0;
-          let hours = parseInt(match[1], 10);
-          const minutes = parseInt(match[2], 10);
-          const ampm = match[3].toUpperCase();
-          if (ampm === 'PM' && hours < 12) hours += 12;
-          if (ampm === 'AM' && hours === 12) hours = 0;
-          return hours * 60 + minutes;
-        };
-
-        const currentMinutes = now.getHours() * 60 + now.getMinutes();
-        const openMinutes = convertToMinutes(todaySchedule.open);
-        const closeMinutes = convertToMinutes(todaySchedule.close);
-        return currentMinutes < openMinutes || currentMinutes >= closeMinutes;
-      };
-
-      if (isOutsideWorkingHours(recipientData.workSchedule)) {
-        // Find the last message from the recipient in current messages array
-        const lastMessageFromRecipient = messages.slice().reverse().find(m => m.senderId === otherUserId);
-        const isAlreadyReplied = lastMessageFromRecipient?.text === recipientData.auto_responder_message;
-
-        if (!isAlreadyReplied) {
-          // Add small delay to feel natural
-          setTimeout(async () => {
-            await fsDb.collection('chats').doc(chatId).collection('messages').add({
-              senderId: otherUserId,
-              text: recipientData.auto_responder_message,
-              type: 'text',
-              timestamp: firestore.FieldValue.serverTimestamp(),
-              readBy: [otherUserId],
-              deliveredTo: [],
-              blockedMessage: false,
-            });
-            await fsDb.collection('chats').doc(chatId).update({
-              'lastMessage.text': recipientData.auto_responder_message,
-              'lastMessage.senderId': otherUserId,
-              'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-            });
-          }, 1000);
-        }
-      }
-    } catch (err) {
-      console.warn('[ChatScreen] Error checking auto-responder:', err);
-    }
-  }, [isGroup, otherUserId, userId, chatId, messages]);
+  // Auto-responder is now handled server-side by the `autoResponder` Cloud Function
+  // (functions/src/index.ts). It triggers on every new message document creation,
+  // checks the recipient's schedule, and writes the reply using Admin SDK —
+  // bypassing the Firestore senderId == auth.uid rule that broke the client-side version.
+  const checkAndTriggerAutoResponder = useCallback(async () => { /* no-op: moved to Cloud Function */ }, []);
 
 
   // ── Upload and send voice note ──────────────────────────────────
@@ -1234,12 +1359,11 @@ export default function ChatScreen() {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
+            const idToDelete = selectedMessageId;
+            handleClearSelection();
             try {
-              // Delete from Firestore
-              const fsDbDel = db as ReturnType<typeof firestore>;
-              await fsDbDel.collection('chats').doc(chatId).collection('messages').doc(selectedMessageId).delete();
-              console.log('[ChatScreen] Message deleted successfully');
-              handleClearSelection();
+              // Removes from the on-screen list + local cache + Firestore in real time
+              await deleteMessage(idToDelete);
             } catch (error) {
               console.error('[ChatScreen] Error deleting message:', error);
               Alert.alert('Error', 'Failed to delete message.');
@@ -1797,49 +1921,62 @@ export default function ChatScreen() {
   };
 
 
+  // ── Delete contact handler ──────────────────────────────────────
+  // Removes the device address-book entry for this number (so the name/surname
+  // disappears and the header falls back to the phone number). The chat and its
+  // messages are untouched.
+  const handleDeleteContact = useCallback(() => {
+    if (isGroup || !otherUserPhone) return;
+    setProfileModalOpen(false);
+    Alert.alert(
+      'Delete Contact',
+      'Remove this contact from your phone? Your chat history stays, but the saved name will be removed.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              if (Platform.OS === 'web') return;
+              const Contacts = await import('expo-contacts/legacy');
+              const { status } = await Contacts.requestPermissionsAsync();
+              if (status !== 'granted') return;
+              const normalized = normalizePhone(otherUserPhone);
+              const { data } = await Contacts.getContactsAsync({
+                fields: [Contacts.Fields.PhoneNumbers],
+              });
+              // Delete every contact whose number matches this phone
+              await Promise.all(
+                data
+                  .filter((c: any) =>
+                    (c.phoneNumbers ?? []).some((pn: any) => normalizePhone(pn.number ?? '') === normalized)
+                  )
+                  .map((c: any) => c.id ? Contacts.removeContactAsync(c.id) : Promise.resolve())
+              );
+              reloadPhoneBook();
+            } catch (err) {
+              console.error('[ChatScreen] Failed to delete contact:', err);
+              Alert.alert('Could not delete', 'Failed to delete the contact. Please try again.');
+            }
+          },
+        },
+      ],
+    );
+  }, [isGroup, otherUserPhone, reloadPhoneBook]);
+
   // ── Clear chat handler ──────────────────────────────────────────
+  // Delegates to useMessages.clearMessages, which empties the on-screen list
+  // instantly, wipes the local cache, and deletes the Firestore docs.
   const handleClearChat = useCallback(async () => {
-    if (!chatId) {
-      console.error('[ChatScreen] No chatId available');
-      return;
-    }
-
+    if (!chatId) return;
     try {
-      console.log('[ChatScreen] Clearing chat:', chatId);
-      const fsDbClear = db as ReturnType<typeof firestore>;
-      const snapshot = await fsDbClear.collection('chats').doc(chatId).collection('messages').get();
-
-      if (snapshot.empty) {
-        await clearLocalMessages(chatId);
-        Alert.alert('Chat Cleared', 'Chat has been cleared.');
-        return;
-      }
-
-      const totalMessages = snapshot.docs.length;
-      console.log(`[ChatScreen] Found ${totalMessages} messages to delete`);
-
-      const BATCH_SIZE = 500;
-      const batches = [];
-
-      for (let i = 0; i < snapshot.docs.length; i += BATCH_SIZE) {
-        const batch = fsDbClear.batch();
-        const batchDocs = snapshot.docs.slice(i, i + BATCH_SIZE);
-        batchDocs.forEach((docSnapshot) => { batch.delete(docSnapshot.ref); });
-        batches.push(batch);
-      }
-
-      await Promise.all(batches.map(batch => batch.commit()));
-
-      // Wipe the local cache so the user sees an empty chat immediately.
-      await clearLocalMessages(chatId);
-
-      console.log(`[ChatScreen] Successfully cleared ${totalMessages} messages`);
-      Alert.alert('Success', 'Chat cleared successfully');
+      await clearMessages();
     } catch (error) {
       console.error('[ChatScreen] Error clearing chat:', error);
       Alert.alert('Error', 'Failed to clear chat. Please try again.');
     }
-  }, [chatId]);
+  }, [chatId, clearMessages]);
 
   // ── Block contact handler ───────────────────────────────────────
   const handleBlockContact = useCallback(async () => {
@@ -2475,7 +2612,7 @@ export default function ChatScreen() {
                 onPress={async () => {
                   const newMutedState = !muted;
                   setMuted(newMutedState);
-                  await saveMutedState(chatId, newMutedState);
+                  await saveMutedState(chatId, newMutedState, userId);
                   setMenuOpen(false);
                 }}
                 activeOpacity={0.75}
@@ -3231,6 +3368,16 @@ export default function ChatScreen() {
                   end={{ x: 1, y: 1 }}
                   style={profileHeroStyles.heroBanner}
                 />
+                {/* Edit pill — only when the contact is already saved */}
+                {!isGroup && !!savedContactName && (
+                  <TouchableOpacity
+                    style={profileHeroStyles.editBtn}
+                    onPress={() => { setProfileModalOpen(false); setAddContactOpen(true); }}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <AppIcon name="create-outline" size={18} color="#fff" fixedColor />
+                  </TouchableOpacity>
+                )}
                 {/* Close pill */}
                 <TouchableOpacity
                   style={profileHeroStyles.closeBtn}
@@ -3292,6 +3439,22 @@ export default function ChatScreen() {
                       </AppText>
                     </TouchableOpacity>
                   ))}
+                </View>
+              )}
+
+              {/* ── Add to Contacts (only when not already saved) ── */}
+              {!isGroup && isUnsavedContact && (
+                <View style={{ paddingHorizontal: 16, marginBottom: 16 }}>
+                  <TouchableOpacity
+                    style={[profileHeroStyles.addContactBtn, bevel]}
+                    activeOpacity={0.85}
+                    onPress={() => { setProfileModalOpen(false); setAddContactOpen(true); }}
+                  >
+                    <AppIcon name="person-add-outline" size={18} color={COLORS.blue} fixedColor />
+                    <AppText style={[profileHeroStyles.addContactText, { color: COLORS.blue }]}>
+                      Add to Contacts
+                    </AppText>
+                  </TouchableOpacity>
                 </View>
               )}
 
@@ -3550,12 +3713,56 @@ export default function ChatScreen() {
                     </View>
                   </View>
                 )}
+
+                {/* Delete contact — removes the saved name only; chat stays */}
+                {!isGroup && !!savedContactName && (
+                  <TouchableOpacity
+                    style={[styles.profileBlockBtn, bevel, { marginTop: 10 }]}
+                    onPress={handleDeleteContact}
+                    activeOpacity={0.8}
+                  >
+                    <AppIcon name="person-remove-outline" size={20} color={COLORS.missed} fixedColor />
+                    <AppText style={[styles.profileBlockText, { color: COLORS.missed }]}>Delete Contact</AppText>
+                  </TouchableOpacity>
+                )}
+
+                {/* Delete chats — clears the conversation; contact stays */}
+                {!isGroup && (
+                  <TouchableOpacity
+                    style={[styles.profileBlockBtn, bevel, { marginTop: 10 }]}
+                    onPress={() => {
+                      setProfileModalOpen(false);
+                      Alert.alert(
+                        'Delete Chats',
+                        'Clear all messages in this conversation? This cannot be undone.',
+                        [
+                          { text: 'Cancel', style: 'cancel' },
+                          { text: 'Delete', style: 'destructive', onPress: handleClearChat },
+                        ],
+                      );
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <AppIcon name="trash-outline" size={20} color={COLORS.missed} fixedColor />
+                    <AppText style={[styles.profileBlockText, { color: COLORS.missed }]}>Delete Chats</AppText>
+                  </TouchableOpacity>
+                )}
               </View>
 
             </ScrollView>
           </View>
         </View>
       </Modal>
+
+      {/* ── Add / Edit contact sheet ── */}
+      <AddContactSheet
+        visible={addContactOpen}
+        onClose={() => setAddContactOpen(false)}
+        phone={otherUserPhone}
+        suggestedName={displayName}
+        existingName={savedContactName}
+        onSaved={() => { setAddContactOpen(false); reloadPhoneBook(); }}
+      />
 
       {/* ── Forward Modal ── */}
       {userId && (
@@ -4409,6 +4616,13 @@ const profileHeroStyles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.28)',
     alignItems: 'center', justifyContent: 'center',
   },
+  editBtn: {
+    position: 'absolute', top: 12, right: 50,
+    width: 30, height: 30, borderRadius: 15,
+    backgroundColor: 'rgba(0,0,0,0.28)',
+    alignItems: 'center', justifyContent: 'center',
+    zIndex: 2,
+  },
   avatarRing: {
     position: 'absolute',
     bottom: -44,
@@ -4451,6 +4665,19 @@ const profileHeroStyles = StyleSheet.create({
     borderWidth: 1, borderColor: 'rgba(30,156,240,0.18)',
   },
   actionLabel: { fontSize: 12, fontWeight: '600' },
+
+  addContactBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 13,
+    borderRadius: RADIUS.md,
+    backgroundColor: 'rgba(30,156,240,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(30,156,240,0.22)',
+  },
+  addContactText: { fontSize: 15, fontWeight: '700' },
 
   // Info rows (hours, website, location)
   infoSection: {
@@ -4551,6 +4778,36 @@ const profileHeroStyles = StyleSheet.create({
     marginBottom: 2,
   },
   aboutText: { fontSize: 14, lineHeight: 20 },
+});
+
+// ─── Add Contact sheet styles ─────────────────────────────────────────────────
+const addContactStyles = StyleSheet.create({
+  overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.45)' },
+  sheet: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingBottom: Platform.OS === 'ios' ? 36 : 24,
+    overflow: 'hidden', borderWidth: 1,
+    ...SHADOW.glow,
+  },
+  handle: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(30,156,240,0.30)', marginTop: 10, marginBottom: 4 },
+  header: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 18, paddingVertical: 14,
+  },
+  title: { fontSize: 17, fontWeight: '700' },
+  save: { fontSize: 15, fontWeight: '700', color: COLORS.blue },
+  input: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    borderRadius: RADIUS.md, paddingHorizontal: 14, minHeight: 50,
+  },
+  inputField: { flex: 1, fontSize: 15, padding: 0 },
+  switchRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    borderRadius: RADIUS.md, paddingHorizontal: 14, paddingVertical: 12, marginTop: 4,
+  },
+  switchLabel: { fontSize: 15, fontWeight: '600' },
+  switchSub: { fontSize: 12, marginTop: 2 },
 });
 
 const profileCatalogStyles = StyleSheet.create({
@@ -4986,9 +5243,21 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(30,156,240,0.18)',
     paddingHorizontal: 14,
-    height: 42
+    minHeight: 42,
+    paddingVertical: Platform.OS === 'ios' ? 10 : 0,
   },
-  inputField: { flex: 1, fontSize: 14, color: COLORS.text, padding: 0, margin: 0, height: 42 },
+  inputField: {
+    flex: 1,
+    fontSize: 14,
+    lineHeight: 20,
+    color: COLORS.text,
+    paddingTop: 0,
+    paddingBottom: 0,
+    margin: 0,
+    maxHeight: 100,
+    textAlignVertical: 'center',
+    includeFontPadding: false,
+  },
   emojiBtn: { paddingLeft: 8, alignSelf: 'center' },
   sendBtn: { width: 42, height: 42, borderRadius: 21, ...SHADOW.button },
   sendBtnInner: { flex: 1, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },

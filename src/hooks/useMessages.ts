@@ -14,11 +14,11 @@
 //   That way a message sent from the companion looks identical to one sent
 //   from the owner's phone — same tick state, same read receipts.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { fetchUserPrivacySettings } from './usePrivacySettings';
-import { loadLocalMessages, mergeLocalMessages } from './useLocalMessages';
+import { loadLocalMessages, mergeLocalMessages, clearLocalMessages, removeLocalMessage } from './useLocalMessages';
 import { CatalogItem } from '../types';
 
 export interface FireMessage {
@@ -67,6 +67,9 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
   const [messages, setMessages] = useState<FireMessage[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
+  // Per-user "cleared" cutoff: messages at/before this time are hidden for this
+  // user only (set when they clear the chat). Does not affect the other member.
+  const [clearedAt, setClearedAt] = useState<number>(0);
 
   // Seed from local cache immediately
   useEffect(() => {
@@ -75,6 +78,18 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
       if (cached.length > 0) { setMessages(cached); setLoading(false); }
     });
   }, [chatId]);
+
+  // Watch this user's per-user clear cutoff on the chat doc
+  useEffect(() => {
+    if (!chatId || !ownerUid) { setClearedAt(0); return; }
+    const fsDb = db as ReturnType<typeof firestore>;
+    const unsub = fsDb.collection('chats').doc(chatId).onSnapshot((snap) => {
+      const raw = snap.exists() ? (snap.data()?.clearedAt?.[ownerUid]) : null;
+      const ms = raw?.toMillis ? raw.toMillis() : (raw ? new Date(raw).getTime() : 0);
+      setClearedAt(ms || 0);
+    }, () => {});
+    return () => unsub();
+  }, [chatId, ownerUid]);
 
   // Real-time listener
   useEffect(() => {
@@ -174,7 +189,50 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     }
   }
 
-  return { messages, loading, error, sendMessage };
+  // Delete a single message in real time: remove it from the in-memory list and
+  // the local cache immediately, then delete the Firestore doc.
+  const deleteMessage = useCallback(async (messageId: string) => {
+    if (!chatId || !messageId) return;
+    setMessages((prev) => prev.filter((m) => m.messageId !== messageId));
+    await removeLocalMessage(chatId, messageId);
+    try {
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('chats').doc(chatId).collection('messages').doc(messageId).delete();
+    } catch (err: any) {
+      setError(err.message);
+      throw err;
+    }
+  }, [chatId]);
+
+  // Clear every message in the chat: delete the Firestore docs, wipe the local
+  // cache, and immediately empty the in-memory list so the UI updates in real
+  // time without needing to leave and re-enter the screen.
+  // Clear chat FOR THIS USER ONLY. Records a per-user cutoff timestamp on the
+  // chat doc; messages are NOT deleted from Firestore, so the other member keeps
+  // their full history. The local cache is wiped and the UI empties instantly.
+  const clearMessages = useCallback(async () => {
+    if (!chatId || !ownerUid) return;
+    setMessages([]);
+    setClearedAt(Date.now());
+    await clearLocalMessages(chatId);
+    try {
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('chats').doc(chatId).set(
+        { clearedAt: { [ownerUid]: firestore.FieldValue.serverTimestamp() } },
+        { merge: true },
+      );
+    } catch (err: any) {
+      setError(err.message);
+      throw err;
+    }
+  }, [chatId, ownerUid]);
+
+  // Hide messages the user cleared for themselves (timestamp <= their cutoff)
+  const visibleMessages = clearedAt > 0
+    ? messages.filter((m) => (m.timestamp?.getTime() ?? 0) > clearedAt)
+    : messages;
+
+  return { messages: visibleMessages, loading, error, sendMessage, clearMessages, deleteMessage };
 }
 
 async function markAsRead(chatId: string, ownerUid: string, readReceipts = true) {

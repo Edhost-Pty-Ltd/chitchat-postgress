@@ -73,7 +73,7 @@ export default function StatusScreen() {
     createStatus,
     markAsViewed,
     deleteStatus,
-  } = useStatus(userId);
+  } = useStatus(userId, isCompanion);
 
   // ── Resolve poster names via phone book ─────────────────────────────────────
   const [phoneMap, setPhoneMap] = useState<Map<string, string>>(new Map());

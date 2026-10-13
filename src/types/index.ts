@@ -215,7 +215,7 @@ export type RootStackParamList = {
   Splash: undefined;
   SignIn: undefined;
   Chats: undefined;
-  Chat: { chatId: string; displayName: string; isGroup: boolean; otherUserId?: string; otherUserPhoto?: string | null };
+  Chat: { chatId: string; displayName: string; isGroup: boolean; otherUserId?: string; otherUserPhoto?: string | null; openProfile?: boolean; openAddContact?: boolean };
   Calendar:undefined;
   Calls: undefined;
   Status: undefined;

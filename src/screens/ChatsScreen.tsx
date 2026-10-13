@@ -5,7 +5,7 @@ import {
   TextInput, Modal, Pressable, ScrollView, Animated,
   ActivityIndicator, Image, Platform, Alert,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -14,6 +14,10 @@ import { BottomNav } from '../components';
 import { useAuth } from '../context/AuthContext';
 import { useChats, ChatPreview } from '../hooks/useChats';
 import { useContacts, AppContact } from '../hooks/useContacts';
+import { useChatPrefs, MAX_PINNED } from '../hooks/useChatPrefs';
+import { SwipeableRow } from '../components/SwipeableRow';
+import { ChatPreviewModal } from '../components/ChatPreviewModal';
+import { clearLocalMessages } from '../hooks/useLocalMessages';
 import { fetchUserPrivacySettings, isVisibleTo } from '../hooks/usePrivacySettings';
 import { useStatus } from '../hooks/useStatus';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
@@ -177,13 +181,17 @@ interface ChatRowProps {
   fontFamily:       string;
   FGsecondary:      string;
   onPress:          () => void;
+  onLongPress?:     () => void;
   senderInfo?:      { displayName: string } | undefined;
+  isPinned?:        boolean;
+  isMuted?:         boolean;
+  isFavourite?:     boolean;
 }
 
 const ChatRow = memo(function ChatRow({
   item, displayName, isGroup, contactPhotoUri, firebasePhotoURL,
   isSavedContact, hasStatus, userId, bevel, textColor, fontFamily,
-  FGsecondary, onPress, senderInfo,
+  FGsecondary, onPress, onLongPress, senderInfo, isPinned, isMuted, isFavourite,
 }: ChatRowProps) {
   const isVoiceNote = item.lastMessage === '[Voice Note]';
 
@@ -195,7 +203,7 @@ const ChatRow = memo(function ChatRow({
   })();
 
   return (
-    <TouchableOpacity style={[styles.chatCard, bevel]} activeOpacity={0.75} onPress={onPress}>
+    <TouchableOpacity style={[styles.chatCard, bevel]} activeOpacity={0.75} onPress={onPress} onLongPress={onLongPress} delayLongPress={300}>
       <View style={styles.chatAvatarWrap}>
         <ChatAvatar
           displayName={displayName}
@@ -210,7 +218,12 @@ const ChatRow = memo(function ChatRow({
           <Text style={[styles.chatName, { color: textColor, fontFamily }]} numberOfLines={1}>
             {displayName}
           </Text>
-          <Text style={[styles.chatTime, { color: FGsecondary }]}>{formatTime(item.timestamp)}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+            {isFavourite && <Ionicons name="star" size={13} color="#f59e0b" />}
+            {isMuted && <Ionicons name="notifications-off" size={13} color={FGsecondary} />}
+            {isPinned && <Ionicons name="pin" size={13} color={COLORS.blue} />}
+            <Text style={[styles.chatTime, { color: FGsecondary }]}>{formatTime(item.timestamp)}</Text>
+          </View>
         </View>
         <View style={styles.chatBottomRow}>
           {isVoiceNote ? (
@@ -243,12 +256,50 @@ const KEY_ROWS = [
   [{ d: '*', s: '' },    { d: '0', s: '+' },     { d: '#' , s: ''    }],
 ];
 
-function NewContactSheet({ onBack, onDone }: { onBack: () => void; onDone: () => void }) {
+function NewContactSheet({
+  onBack, onDone, reloadContacts,
+}: {
+  onBack: () => void;
+  onDone: () => void;
+  reloadContacts: () => void;
+}) {
   const [number, setNumber] = useState('');
   const [name,   setName]   = useState('');
+  const [saving, setSaving] = useState(false);
   const { bevel } = useGlass();
   const press = (k: string) => setNumber((n) => n + k);
   const del   = () => setNumber((n) => n.slice(0, -1));
+
+  const handleSave = async () => {
+    const trimmedName = name.trim();
+    const trimmedNumber = number.trim();
+    if (!trimmedName || !trimmedNumber || saving) return;
+    setSaving(true);
+    try {
+      const Contacts = await import('expo-contacts/legacy');
+      const { status } = await Contacts.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission needed', 'Allow contacts access to save a new contact.');
+        setSaving(false);
+        return;
+      }
+      await Contacts.addContactAsync({
+        [Contacts.Fields.FirstName]: trimmedName,
+        [Contacts.Fields.PhoneNumbers]: [
+          { label: 'mobile', number: trimmedNumber },
+        ],
+      } as any);
+
+      // Refresh the contact list so the new contact appears, then return to list
+      reloadContacts();
+      onBack();
+    } catch (err) {
+      console.error('[NewContactSheet] Failed to save contact:', err);
+      Alert.alert('Could not save', 'Failed to save the contact. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <>
@@ -292,12 +343,18 @@ function NewContactSheet({ onBack, onDone }: { onBack: () => void; onDone: () =>
         <TouchableOpacity style={[styles.cancelBtn, bevel]} onPress={onBack} activeOpacity={0.8}>
           <AppText style={styles.cancelText}>Cancel</AppText>
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.confirmBtn, (!number || !name) && styles.dimmed]}
-          activeOpacity={number && name ? 0.85 : 1}
-          onPress={() => { if (number && name) onDone(); }}>
+        <TouchableOpacity style={[styles.confirmBtn, (!number || !name || saving) && styles.dimmed]}
+          activeOpacity={number && name && !saving ? 0.85 : 1}
+          onPress={handleSave}>
           <LinearGradient colors={GRADIENTS.primary} style={styles.confirmGrad}>
-            <AppIcon name="person-add-outline" size={18} color="#fff" fixedColor />
-            <AppText fixedColor style={styles.confirmText}>Save Contact</AppText>
+            {saving ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <>
+                <AppIcon name="person-add-outline" size={18} color="#fff" fixedColor />
+                <AppText fixedColor style={styles.confirmText}>Save Contact</AppText>
+              </>
+            )}
           </LinearGradient>
         </TouchableOpacity>
       </View>
@@ -539,7 +596,7 @@ function SelectContactSheet({
     : contacts;
 
   if (mode === 'newContact') {
-    return <NewContactSheet onBack={() => setMode('select')} onDone={onClose} />;
+    return <NewContactSheet onBack={() => setMode('select')} onDone={onClose} reloadContacts={reloadContacts} />;
   }
   if (mode === 'newGroup') {
     return <NewGroupSheet
@@ -1209,6 +1266,27 @@ export default function ChatsScreen() {
 
   const { chats, loading: chatsLoading } = useChats(userId);
   const { contacts, loading: contactsLoading, reload: reloadContacts, hasPermission, error: contactsError } = useContacts();
+  const { pinned, favourites, mutedChats, togglePin, toggleFavourite, toggleMute, loadMutedFor } = useChatPrefs(userId);
+
+  // Chat currently targeted by the swipe-right actions menu
+  const [actionChat, setActionChat] = useState<{
+    chatId: string;
+    displayName: string;
+    isGroup: boolean;
+    otherUserId?: string;
+    otherUserPhone?: string;
+    otherUserPhoto?: string | null;
+    isSavedContact: boolean;
+  } | null>(null);
+
+  // Chat being peeked via long-press (read-only message preview)
+  const [previewChat, setPreviewChat] = useState<{
+    chatId: string;
+    displayName: string;
+    isGroup: boolean;
+    otherUserId?: string;
+    otherUserPhoto?: string | null;
+  } | null>(null);
   const { contactStatuses } = useStatus(userId);
 
   const userStatusMap = useMemo(() => {
@@ -1225,6 +1303,24 @@ export default function ChatsScreen() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [labelManagerOpen, setLabelManagerOpen] = useState(false);
   const [managingLabelId,  setManagingLabelId]  = useState<string | null>(null);
+
+  // Refresh device contacts each time the picker sheet opens
+  useEffect(() => {
+    if (sheetOpen) reloadContacts();
+  }, [sheetOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Refresh contacts whenever the screen regains focus, so a contact edited or
+  // deleted inside a chat is reflected in the chat list name immediately.
+  useFocusEffect(
+    useCallback(() => {
+      reloadContacts();
+    }, [reloadContacts])
+  );
+
+  // Keep the muted-chat badges in sync with the current chat list
+  useEffect(() => {
+    if (chats.length > 0) loadMutedFor(chats.map((c) => c.chatId));
+  }, [chats, loadMutedFor]);
 
   const [labels, setLabels] = useState<ChatLabel[]>([]);
   const pendingLabelIdRef = useRef<string | null>(null);
@@ -1496,8 +1592,15 @@ export default function ChatsScreen() {
       base = [...existing, ...synthetic];
     }
 
-    // Sort by most-recently-active first regardless of search
+    // Sort pinned chats first (in pin order), then by most-recently-active.
+    const pinIndex = (id: string) => {
+      const i = pinned.indexOf(id);
+      return i === -1 ? Infinity : i;
+    };
     const byRecent = (a: ChatPreview, b: ChatPreview) => {
+      const pa = pinIndex(a.chatId);
+      const pb = pinIndex(b.chatId);
+      if (pa !== pb) return pa - pb; // pinned first, in pin order
       const ta = a.timestamp?.getTime() ?? 0;
       const tb = b.timestamp?.getTime() ?? 0;
       return tb - ta;
@@ -1511,7 +1614,7 @@ export default function ChatsScreen() {
         return resolveDisplayName(c, userId, contactsMap, firestoreUsersMap).toLowerCase().includes(q);
       })
       .sort(byRecent);
-  }, [tab, groupChats, labels, chats, query, userId, contactsMap, firestoreUsersMap]);
+  }, [tab, groupChats, labels, chats, query, userId, contactsMap, firestoreUsersMap, pinned]);
 
   const openSearch = () => {
     setSearchOpen(true);
@@ -1585,6 +1688,65 @@ export default function ChatsScreen() {
     setTimeout(() => setManagingLabelId(null), 200);
   }, []);
 
+  // Swipe-left → pin/unpin (max 3)
+  const handleTogglePin = useCallback(async (chatId: string) => {
+    const res = await togglePin(chatId);
+    if (!res.ok && res.reason) Alert.alert('Pin limit', res.reason);
+  }, [togglePin]);
+
+  // Swipe-right → open the actions menu for this chat
+  const openChatActions = useCallback((payload: NonNullable<typeof actionChat>) => {
+    setActionChat(payload);
+  }, []);
+
+  // ── Actions-menu operations ──────────────────────────────────────
+  // Clear chat FOR THIS USER ONLY — records a per-user cutoff; the other member
+  // keeps their messages. Nothing is deleted from Firestore.
+  const actionClearChat = useCallback(async (chatId: string) => {
+    if (!userId) return;
+    try {
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('chats').doc(chatId).set(
+        { clearedAt: { [userId]: firestore.FieldValue.serverTimestamp() } },
+        { merge: true },
+      );
+      await clearLocalMessages(chatId);
+    } catch (err) {
+      console.error('[ChatsScreen] clear chat failed:', err);
+      Alert.alert('Error', 'Could not clear chat.');
+    }
+  }, [userId]);
+
+  // Delete chat FOR THIS USER ONLY — clears their view and removes them from the
+  // chat members so it leaves their list. The other member is unaffected.
+  const actionDeleteChat = useCallback(async (chatId: string) => {
+    if (!userId) return;
+    try {
+      await actionClearChat(chatId);
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('chats').doc(chatId).update({
+        members: firestore.FieldValue.arrayRemove(userId),
+      }).catch(() => {});
+    } catch (err) {
+      console.error('[ChatsScreen] delete chat failed:', err);
+      Alert.alert('Error', 'Could not delete chat.');
+    }
+  }, [actionClearChat, userId]);
+
+  const actionBlock = useCallback(async (otherUid: string, name: string, photo: string | null) => {
+    if (!userId) return;
+    try {
+      const fsDb = db as ReturnType<typeof firestore>;
+      await fsDb.collection('users').doc(userId).collection('blockedUsers').doc(otherUid).set({
+        blockedAt: new Date(), displayName: name, photoURL: photo || null,
+      });
+      Alert.alert('Contact Blocked', `${name} has been blocked.`);
+    } catch (err) {
+      console.error('[ChatsScreen] block failed:', err);
+      Alert.alert('Error', 'Could not block contact.');
+    }
+  }, [userId]);
+
   const renderChat = useCallback(({ item }: { item: ChatPreview }) => {
     if (item.chatId.startsWith(NO_CHAT_PREFIX)) {
       const otherId = item.chatId.slice(NO_CHAT_PREFIX.length);
@@ -1644,35 +1806,96 @@ export default function ChatsScreen() {
     const isSavedContact  = !!(contactPhotoUri || (otherUser && contactsMap.has(otherUser.phone)));
     const hasStatus       = otherMemberId ? (userStatusMap.get(otherMemberId) ?? false) : false;
 
-    return (
-      <ChatRow
-        item={item}
-        displayName={displayName}
-        isGroup={isGroup}
-        otherMemberId={otherMemberId ?? undefined}
-        contactPhotoUri={contactPhotoUri}
-        firebasePhotoURL={firebasePhotoURL ?? undefined}
-        isSavedContact={isSavedContact}
-        hasStatus={hasStatus}
-        userId={userId}
-        bevel={bevel}
-        textColor={textColor}
-        fontFamily={fontFamily}
-        FGsecondary={FG.secondary}
-        onPress={() => navigation.navigate('Chat', {
+    const isPinned = pinned.includes(item.chatId);
+    const isMuted  = mutedChats.has(item.chatId);
+    const otherPhone = otherUser?.phone;
+
+    const swipeActions = [
+      {
+        key: 'pin',
+        label: isPinned ? 'Unpin' : 'Pin',
+        icon: 'pin',
+        color: '#f59e0b',
+        onPress: () => handleTogglePin(item.chatId),
+      },
+      {
+        key: 'mute',
+        label: isMuted ? 'Unmute' : 'Mute',
+        icon: isMuted ? 'notifications' : 'notifications-off',
+        color: '#6366f1',
+        onPress: () => { toggleMute(item.chatId); },
+      },
+      {
+        key: 'more',
+        label: 'More',
+        icon: 'ellipsis-horizontal',
+        color: COLORS.blue,
+        onPress: () => openChatActions({
           chatId: item.chatId,
           displayName,
           isGroup,
-          otherUserId: otherMemberId || undefined,
+          otherUserId: otherMemberId ?? undefined,
+          otherUserPhone: otherPhone,
           otherUserPhoto: firebasePhotoURL || contactPhotoUri || null,
-        })}
-        senderInfo={item.lastSenderId && isGroup ? firestoreUsersMap.get(item.lastSenderId) : undefined}
-      />
+          isSavedContact,
+        }),
+      },
+    ];
+
+    return (
+      <SwipeableRow actions={swipeActions}>
+        <ChatRow
+          item={item}
+          displayName={displayName}
+          isGroup={isGroup}
+          otherMemberId={otherMemberId ?? undefined}
+          contactPhotoUri={contactPhotoUri}
+          firebasePhotoURL={firebasePhotoURL ?? undefined}
+          isSavedContact={isSavedContact}
+          hasStatus={hasStatus}
+          userId={userId}
+          bevel={bevel}
+          textColor={textColor}
+          fontFamily={fontFamily}
+          FGsecondary={FG.secondary}
+          isPinned={isPinned}
+          isMuted={isMuted}
+          isFavourite={favourites.includes(item.chatId)}
+          onPress={() => navigation.navigate('Chat', {
+            chatId: item.chatId,
+            displayName,
+            isGroup,
+            otherUserId: otherMemberId || undefined,
+            otherUserPhoto: firebasePhotoURL || contactPhotoUri || null,
+          })}
+          onLongPress={() => setPreviewChat({
+            chatId: item.chatId,
+            displayName,
+            isGroup,
+            otherUserId: otherMemberId || undefined,
+            otherUserPhoto: firebasePhotoURL || contactPhotoUri || null,
+          })}
+          senderInfo={item.lastSenderId && isGroup ? firestoreUsersMap.get(item.lastSenderId) : undefined}
+        />
+      </SwipeableRow>
     );
   }, [
     userId, contacts, contactsMap, firestoreUsersMap, privacyPhotoMap, userStatusMap,
     bevel, textColor, fontFamily, FG.secondary, navigation, openOrCreateDirectChat,
+    pinned, mutedChats, favourites, handleTogglePin, toggleMute, openChatActions,
   ]);
+
+  const openPreviewedChat = useCallback(() => {
+    if (!previewChat) return;
+    const pc = previewChat;
+    navigation.navigate('Chat', {
+      chatId: pc.chatId,
+      displayName: pc.displayName,
+      isGroup: pc.isGroup,
+      otherUserId: pc.otherUserId,
+      otherUserPhoto: pc.otherUserPhoto ?? null,
+    });
+  }, [previewChat, navigation]);
 
   const currentLabelTitle = (() => {
     if (tab === 'Chats') return 'Chats';
@@ -1705,6 +1928,113 @@ export default function ChatsScreen() {
             onNavigateToGroup={handleNavigateToGroup}
           />
         </View>
+      </Modal>
+
+      {/* ── Long-press message preview (read-only peek) ── */}
+      <ChatPreviewModal
+        visible={!!previewChat}
+        chatId={previewChat?.chatId ?? null}
+        currentUserId={userId}
+        displayName={previewChat?.displayName ?? ''}
+        onClose={() => setPreviewChat(null)}
+        onOpenChat={openPreviewedChat}
+      />
+
+      {/* ── Chat actions menu (swipe right) ── */}
+      <Modal
+        visible={!!actionChat}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setActionChat(null)}
+        statusBarTranslucent
+      >
+        <Pressable style={styles.overlay} onPress={() => setActionChat(null)} />
+        {actionChat && (
+          <View style={styles.actionMenuSheet}>
+            <AppBg />
+            <View style={styles.handle} />
+            <AppText style={[styles.actionMenuTitle, { color: textColor, fontFamily }]} numberOfLines={1}>
+              {actionChat.displayName}
+            </AppText>
+
+            {([
+              {
+                icon: 'information-circle-outline', label: 'Contact info', color: COLORS.blue,
+                onPress: () => {
+                  const ac = actionChat;
+                  setActionChat(null);
+                  navigation.navigate('Chat', {
+                    chatId: ac.chatId, displayName: ac.displayName, isGroup: ac.isGroup,
+                    otherUserId: ac.otherUserId, otherUserPhoto: ac.otherUserPhoto ?? null,
+                    openProfile: true,
+                  } as any);
+                },
+              },
+              !actionChat.isSavedContact && !actionChat.isGroup && !!actionChat.otherUserPhone ? {
+                icon: 'person-add-outline', label: 'Create contact', color: COLORS.blue,
+                onPress: () => {
+                  const ac = actionChat;
+                  setActionChat(null);
+                  navigation.navigate('Chat', {
+                    chatId: ac.chatId, displayName: ac.displayName, isGroup: ac.isGroup,
+                    otherUserId: ac.otherUserId, otherUserPhoto: ac.otherUserPhoto ?? null,
+                    openAddContact: true,
+                  } as any);
+                },
+              } : null,
+              {
+                icon: mutedChats.has(actionChat.chatId) ? 'notifications' : 'notifications-off-outline',
+                label: mutedChats.has(actionChat.chatId) ? 'Unmute' : 'Mute',
+                color: COLORS.blue,
+                onPress: async () => { await toggleMute(actionChat.chatId); setActionChat(null); },
+              },
+              {
+                icon: favourites.includes(actionChat.chatId) ? 'star' : 'star-outline',
+                label: favourites.includes(actionChat.chatId) ? 'Remove favourite' : 'Add to favourites',
+                color: '#f59e0b',
+                onPress: async () => { await toggleFavourite(actionChat.chatId); setActionChat(null); },
+              },
+              {
+                icon: 'brush-outline', label: 'Clear chat', color: COLORS.blue,
+                onPress: () => {
+                  const ac = actionChat; setActionChat(null);
+                  Alert.alert('Clear Chat', 'Clear all messages in this chat?', [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Clear', style: 'destructive', onPress: () => actionClearChat(ac.chatId) },
+                  ]);
+                },
+              },
+              !actionChat.isGroup && !!actionChat.otherUserId ? {
+                icon: 'ban-outline', label: 'Block', color: COLORS.missed,
+                onPress: () => {
+                  const ac = actionChat; setActionChat(null);
+                  Alert.alert('Block Contact', `Block ${ac.displayName}?`, [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Block', style: 'destructive', onPress: () => actionBlock(ac.otherUserId!, ac.displayName, ac.otherUserPhoto ?? null) },
+                  ]);
+                },
+              } : null,
+              {
+                icon: 'trash-outline', label: 'Delete chat', color: COLORS.missed,
+                onPress: () => {
+                  const ac = actionChat; setActionChat(null);
+                  Alert.alert('Delete Chat', 'Delete this chat and all its messages?', [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Delete', style: 'destructive', onPress: () => actionDeleteChat(ac.chatId) },
+                  ]);
+                },
+              },
+            ].filter(Boolean) as { icon: string; label: string; color: string; onPress: () => void }[])
+              .map((a) => (
+                <TouchableOpacity key={a.label} style={[styles.actionMenuRow, bevel]} activeOpacity={0.75} onPress={a.onPress}>
+                  <AppIcon name={a.icon as any} size={20} color={a.color} fixedColor />
+                  <AppText style={[styles.actionMenuLabel, { color: a.color === COLORS.missed ? COLORS.missed : textColor }]}>
+                    {a.label}
+                  </AppText>
+                </TouchableOpacity>
+              ))}
+          </View>
+        )}
       </Modal>
 
       <Modal
@@ -2068,6 +2398,23 @@ const styles = StyleSheet.create({
     alignSelf: 'center', width: 40, height: 4, borderRadius: 2,
     backgroundColor: 'rgba(30,156,240,0.30)', marginTop: 10, marginBottom: 4,
   },
+
+  // Chat actions menu (swipe right)
+  actionMenuSheet: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingHorizontal: 14,
+    paddingBottom: Platform.OS === 'ios' ? 36 : 20,
+    overflow: 'hidden',
+    ...SHADOW.glow,
+  },
+  actionMenuTitle: { fontSize: 16, fontWeight: '700', textAlign: 'center', marginTop: 4, marginBottom: 12 },
+  actionMenuRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    paddingVertical: 14, paddingHorizontal: 16,
+    borderRadius: RADIUS.md, marginBottom: 8,
+  },
+  actionMenuLabel: { fontSize: 15, fontWeight: '600' },
 
   sheetSubHeader: {
     flexDirection: 'row', alignItems: 'center',

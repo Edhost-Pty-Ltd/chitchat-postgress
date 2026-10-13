@@ -194,7 +194,7 @@ export default function VideoCallScreen() {
   const {
     room, loading: roomLoading,
     join, leave, muteUser, unmuteUser, muteAll, unmuteAll,
-    removeUser, addParticipants, saveMinutes, addRecording, endMeeting,
+    removeUser, addParticipants, saveMinutes, addRecording, endMeeting, setRecordingState,
   } = useMeetingRoom(meetingId);
 
   const isOrganizer = !!user?.uid && room.organizerId === user.uid;
@@ -649,6 +649,7 @@ export default function VideoCallScreen() {
       try {
         setIsRecording(false);
         if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+        setRecordingState(false).catch(() => {});
         await audioRecorder.stop();
         const uri = audioRecorder.uri;
         if (uri) {
@@ -683,6 +684,8 @@ export default function VideoCallScreen() {
       setIsRecording(true);
       setRecordingMs(0);
       recordingTimerRef.current = setInterval(() => setRecordingMs(ms => ms + 1000), 1000);
+      // Notify all participants via Firestore
+      setRecordingState(true).catch(() => {});
     } catch (err) {
       console.error('[VideoCall] start recording failed:', err);
     }
@@ -1213,6 +1216,16 @@ export default function VideoCallScreen() {
         </View>
       )}
 
+      {/* ── Recording indicator for non-organizer participants ── */}
+      {isMeeting && !isOrganizer && room.isRecording && (
+        <View style={styles.recordingNoticeBanner}>
+          <View style={styles.recordingNoticeDot} />
+          <AppText fixedColor style={styles.recordingNoticeText}>
+            This meeting is being recorded
+          </AppText>
+        </View>
+      )}
+
       {showCameraToggle && (
         <View style={styles.cameraToggleAlert}>
           <View style={styles.cameraToggleContent}>
@@ -1695,6 +1708,33 @@ const styles = StyleSheet.create({
     ...SHADOW.card,
   },
   aloneText: { flex: 1, fontSize: 13, fontWeight: '600', color: '#fff' },
+
+  recordingNoticeBanner: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 140 : 120,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    paddingVertical: 7,
+    paddingHorizontal: 14,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: 'rgba(239,68,68,0.5)',
+  },
+  recordingNoticeDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#ef4444',
+  },
+  recordingNoticeText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#fff',
+    letterSpacing: 0.2,
+  },
 
   summarizingOverlay: {
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,

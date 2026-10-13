@@ -56,16 +56,22 @@ console.log('[useChats][diag] auth.uid =', getAuth().currentUser?.uid,
           const result: ChatPreview[] = snap.docs.map((doc) => {
             const d = doc.data();
             const lm = d.lastMessage;
+            const lmTime = lm?.timestamp ? (lm.timestamp as firestore.Timestamp).toDate() : null;
+
+            // Per-user clear: if this user cleared the chat after the last
+            // message, hide the preview text/time for them only.
+            const clearedRaw = d.clearedAt?.[ownerUid];
+            const clearedMs = clearedRaw?.toMillis ? clearedRaw.toMillis() : 0;
+            const cleared = clearedMs > 0 && (lmTime?.getTime() ?? 0) <= clearedMs;
+
             return {
               chatId:       doc.id,
               type:         d.type ?? 'direct',
               members:      d.members ?? [],
               groupName:    d.groupName ?? null,
-              lastMessage:  lm?.text ?? '',
-              lastSenderId: lm?.senderId ?? '',
-              timestamp:    lm?.timestamp
-                ? (lm.timestamp as firestore.Timestamp).toDate()
-                : null,
+              lastMessage:  cleared ? '' : (lm?.text ?? ''),
+              lastSenderId: cleared ? '' : (lm?.senderId ?? ''),
+              timestamp:    cleared ? null : lmTime,
               unreadCount: getUnreadCount(d.unreadCounts, ownerUid),
             };
           });

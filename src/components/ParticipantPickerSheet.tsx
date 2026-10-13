@@ -107,19 +107,32 @@ export function ParticipantPickerSheet({
         </View>
 
         {picked.length > 0 && (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsRow}>
-            {picked.map(uid => {
-              const c = contacts.find(x => x.userId === uid);
-              if (!c) return null;
-              return (
-                <TouchableOpacity key={uid} style={styles.chip} onPress={() => toggle(uid)}>
-                  <ContactAvatar contact={c} size={22} />
-                  <AppText style={styles.chipText} numberOfLines={1}>{c.displayName.split(' ')[0]}</AppText>
-                  <AppIcon name="close-circle" size={14} color={COLORS.sub} />
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
+          <>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.chipsRow}
+            >
+              {picked.map(uid => {
+                const c = contacts.find(x => x.userId === uid);
+                if (!c) return null;
+                return (
+                  <TouchableOpacity key={uid} style={styles.chip} onPress={() => toggle(uid)} activeOpacity={0.75}>
+                    <View style={styles.chipAvatarWrap}>
+                      <ContactAvatar contact={c} size={36} />
+                      <View style={styles.chipRemoveBadge}>
+                        <AppIcon name="close" size={9} color="#fff" fixedColor />
+                      </View>
+                    </View>
+                    <AppText style={styles.chipText} numberOfLines={1}>
+                      {c.displayName.split(' ')[0]}
+                    </AppText>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+            <View style={styles.chipsDivider} />
+          </>
         )}
 
         {!hasPermission ? (
@@ -154,12 +167,14 @@ export function ParticipantPickerSheet({
               const isSel = picked.includes(c.userId);
               return (
                 <TouchableOpacity style={styles.contactRow} activeOpacity={0.7} onPress={() => toggle(c.userId)}>
-                  <ContactAvatar contact={c} size={40} />
+                  <ContactAvatar contact={c} size={44} />
                   <View style={{ flex: 1, marginLeft: 12 }}>
                     <AppText style={[styles.contactName, { color: textColor }]}>{c.displayName}</AppText>
                     <AppText style={[styles.contactPhone, { color: FG.secondary }]}>{c.phone}</AppText>
                   </View>
-                  {isSel && <AppIcon name="checkmark-circle" size={22} color={COLORS.blue} />}
+                  <View style={[styles.checkCircle, isSel && styles.checkCircleSelected]}>
+                    {isSel && <AppIcon name="checkmark" size={13} color="#fff" fixedColor />}
+                  </View>
                 </TouchableOpacity>
               );
             }}
@@ -189,12 +204,68 @@ const styles = StyleSheet.create({
   nextBtnText: { fontSize: 13, fontWeight: '700', color: '#fff' },
   glassInput: { flexDirection: 'row', alignItems: 'center', gap: 10, borderRadius: RADIUS.md, paddingHorizontal: 14, paddingVertical: 12 },
   inputField: { flex: 1, fontSize: 14, padding: 0 },
-  contactRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12 },
+  contactRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11 },
   contactName: { fontSize: 14, fontWeight: '600' },
   contactPhone: { fontSize: 12, marginTop: 1 },
-  chipsRow: { paddingHorizontal: 14, paddingBottom: 10, gap: 8, flexDirection: 'row' },
-  chip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(30,156,240,0.12)', borderRadius: RADIUS.full, paddingHorizontal: 8, paddingVertical: 4 },
-  chipText: { fontSize: 12, fontWeight: '600', maxWidth: 70 },
+
+  // Selected participants horizontal strip
+  chipsRow: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 16,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  chip: {
+    alignItems: 'center',
+    width: 56,
+    gap: 5,
+  },
+  chipAvatarWrap: {
+    position: 'relative',
+  },
+  chipRemoveBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: 'rgba(100,100,110,0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: '#fff',
+  },
+  chipText: {
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'center',
+    maxWidth: 56,
+  },
+
+  // Check indicator on contact rows
+  checkCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: 'rgba(150,150,160,0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkCircleSelected: {
+    backgroundColor: COLORS.blue,
+    borderColor: COLORS.blue,
+  },
+
+  chipsDivider: {
+    height: 1,
+    backgroundColor: 'rgba(150,150,160,0.12)',
+    marginHorizontal: 14,
+    marginBottom: 4,
+  },
+
   centerPad: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 8 },
   emptyText: { fontSize: 15, color: COLORS.sub },
   retryBtn: { marginTop: 12, paddingHorizontal: 20, paddingVertical: 10, borderRadius: RADIUS.full, backgroundColor: COLORS.blue },

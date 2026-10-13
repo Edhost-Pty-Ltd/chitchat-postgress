@@ -4,3 +4,4 @@ import App from './App';
 
 // Web-specific entry point
 registerRootComponent(App);
+ 

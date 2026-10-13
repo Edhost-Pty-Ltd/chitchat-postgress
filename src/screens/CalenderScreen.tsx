@@ -14,19 +14,19 @@ import firestore from '@react-native-firebase/firestore';
 import * as Notifications from 'expo-notifications';
 import * as Contacts from 'expo-contacts';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import auth from '@react-native-firebase/auth';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { readAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 
 import { BottomNav } from '../components';
 import { ParticipantPickerSheet } from '../components/ParticipantPickerSheet';
 import { useAuth } from '../context/AuthContext';
 import { useContacts, AppContact } from '../hooks/useContacts';
+import { getOrCreateDirectChat } from '../hooks/useChatActions';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
 const HOUR_HEIGHT = 70; // Height per hour in the timeline
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'Calendar'>;
@@ -53,14 +53,14 @@ interface Meeting {
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: false,
-    shouldShowBanner: true, shouldShowList: true,
+    shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false,
+
   }),
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const stringToColor = (str: string) => {
-  const c = ['#f97316','#8b5cf6','#ec4899','#06b6d4','#10b981','#f59e0b','#6366f1','#e11d48'];
+  const c = ['#f97316', '#8b5cf6', '#ec4899', '#06b6d4', '#10b981', '#f59e0b', '#6366f1', '#e11d48'];
   let h = 0; for (let i = 0; i < str.length; i++) h = str.charCodeAt(i) + ((h << 5) - h);
   return c[Math.abs(h) % c.length];
 };
@@ -90,11 +90,11 @@ const deriveEnd = (start: Date, duration: string): Date => {
 };
 const getEndTime = (m: Meeting): Date => m.endDate ?? deriveEnd(m.date, m.duration);
 const isMeetingActive = (m: Meeting, now: Date) => m.isActive && now >= m.date && now <= getEndTime(m);
-const isMeetingPast   = (m: Meeting, now: Date) => !m.isActive || getEndTime(m) < now;
+const isMeetingPast = (m: Meeting, now: Date) => !m.isActive || getEndTime(m) < now;
 
-const isSameDay = (d1: Date, d2: Date) => 
-  d1.getFullYear() === d2.getFullYear() && 
-  d1.getMonth() === d2.getMonth() && 
+const isSameDay = (d1: Date, d2: Date) =>
+  d1.getFullYear() === d2.getFullYear() &&
+  d1.getMonth() === d2.getMonth() &&
   d1.getDate() === d2.getDate();
 
 const fmtRemaining = (ms: number) => {
@@ -111,7 +111,7 @@ const fmtRemaining = (ms: number) => {
 const getWeekDays = (date: Date) => {
   const start = new Date(date);
   start.setDate(start.getDate() - (start.getDay() === 0 ? 6 : start.getDay() - 1));
-  return Array.from({length: 7}).map((_, i) => {
+  return Array.from({ length: 7 }).map((_, i) => {
     const d = new Date(start);
     d.setDate(start.getDate() + i);
     return d;
@@ -123,7 +123,7 @@ const getMonthGrid = (month: Date): (Date | null)[] => {
   const year = month.getFullYear();
   const m = month.getMonth();
   const firstDay = new Date(year, m, 1);
-  const lastDay  = new Date(year, m + 1, 0);
+  const lastDay = new Date(year, m + 1, 0);
   // Monday-indexed: Mon=0 … Sun=6
   const startPad = (firstDay.getDay() + 6) % 7;
   const cells: (Date | null)[] = Array(startPad).fill(null);
@@ -142,7 +142,7 @@ function LiveDot({ size = 10 }: { size?: number }) {
   useEffect(() => {
     const loop = Animated.loop(Animated.sequence([
       Animated.timing(pulse, { toValue: 1, duration: 900, easing: Easing.out(Easing.ease), useNativeDriver: true }),
-      Animated.timing(pulse, { toValue: 0, duration: 900, easing: Easing.in(Easing.ease),  useNativeDriver: true }),
+      Animated.timing(pulse, { toValue: 0, duration: 900, easing: Easing.in(Easing.ease), useNativeDriver: true }),
     ]));
     loop.start(); return () => loop.stop();
   }, [pulse]);
@@ -162,13 +162,15 @@ function LiveDot({ size = 10 }: { size?: number }) {
 function ContactAvatar({ contact, size = 36 }: { contact: AppContact; size?: number }) {
   const photo = contact.photoUri || contact.firebasePhotoURL;
   return (
-    <View style={{ width: size, height: size, borderRadius: size / 2, overflow: 'hidden',
-      backgroundColor: stringToColor(contact.displayName), alignItems: 'center', justifyContent: 'center' }}>
+    <View style={{
+      width: size, height: size, borderRadius: size / 2, overflow: 'hidden',
+      backgroundColor: stringToColor(contact.displayName), alignItems: 'center', justifyContent: 'center'
+    }}>
       {photo
         ? <Image source={{ uri: photo }} style={{ width: size, height: size }} />
         : <Text style={{ color: '#fff', fontSize: size * 0.36, fontWeight: '700' }}>
-            {getInitials(contact.displayName)}
-          </Text>}
+          {getInitials(contact.displayName)}
+        </Text>}
     </View>
   );
 }
@@ -185,7 +187,7 @@ const MeetingRow = React.memo(function MeetingRow({
 
   const handlePress = () => {
     if (isActive) { onJoin(); return; }
-    onPress(); 
+    onPress();
   };
 
   return (
@@ -278,6 +280,7 @@ function NewMeetingSheet({
 }: any) {
   const [creating, setCreating] = useState(false);
   const { contacts } = useContacts();
+  const { displayName } = useAuth();
   const { bevel } = useGlass();
   const { textColor } = useTypography();
   const duration = useMemo(() => calcDuration(startTime, endTime), [startTime, endTime]);
@@ -292,7 +295,7 @@ function NewMeetingSheet({
           fields: [Contacts.Fields.PhoneNumbers, Contacts.Fields.Emails],
         });
         setPhoneCount(data.length);
-      } catch {}
+      } catch { }
     })();
   }, []);
 
@@ -348,9 +351,10 @@ function NewMeetingSheet({
         scheduledIds.push(id);
       }
 
-      for (let i = 5; i <= 30; i += 5) {
-        const t = new Date(startTime.getTime() + i * 60000);
-        if (t > now) {
+      // Post-start "still waiting" nudges — only schedule if the meeting hasn't started yet
+      if (startTime > now) {
+        for (let i = 5; i <= 30; i += 5) {
+          const t = new Date(startTime.getTime() + i * 60000);
           const id = await Notifications.scheduleNotificationAsync({
             content: {
               title: `Waiting for "${title}"`,
@@ -368,15 +372,42 @@ function NewMeetingSheet({
         await meetingRef.update({ notificationIds: scheduledIds });
       }
 
-      // Notify each invited participant (local push — they see it on their device)
+      // Invite participants. We write a `system` message into each participant's
+      // direct chat: this triggers sendMessageNotification (the proven push path)
+      // via the lastMessage update, while rendering as a clean centered notice
+      // in the chat rather than a normal message bubble.
       const invitees = allParticipants.filter(uid => uid !== userId);
-      for (const _ of invitees) {
-        // We can only schedule local notifications for the current device.
-        // For remote pushes to other devices a Cloud Function with FCM is required.
-        // This immediate notification is for the organizer's own device as a confirmation.
-      }
-      // Send an immediate local invite notification so the organizer sees confirmation
       if (invitees.length > 0) {
+        const businessName = (displayName || '').trim() || 'A business';
+        const inviteText = `You're invited to the meeting "${title}" by ${businessName}.`;
+        try {
+          await Promise.all(invitees.map(async (inviteeUid) => {
+            const chatId = await getOrCreateDirectChat(userId, inviteeUid);
+            const chatRef = firestore().collection('chats').doc(chatId);
+            const msgRef = chatRef.collection('messages').doc();
+            const batch = firestore().batch();
+            batch.set(msgRef, {
+              messageId:   msgRef.id,
+              senderId:    userId,
+              text:        inviteText,
+              type:        'system',
+              timestamp:   firestore.FieldValue.serverTimestamp(),
+              readBy:      [userId],
+              deliveredTo: [],
+            });
+            batch.update(chatRef, {
+              'lastMessage.text':      inviteText,
+              'lastMessage.senderId':  userId,
+              'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
+              [`unreadCounts.${inviteeUid}`]: firestore.FieldValue.increment(1),
+            });
+            await batch.commit();
+          }));
+        } catch (err) {
+          console.warn('[handleCreate] Failed to send invite messages:', err);
+        }
+
+        // Local confirmation on the organizer's device
         await Notifications.scheduleNotificationAsync({
           content: {
             title: 'Meeting invitations sent',
@@ -522,6 +553,7 @@ function RecordingPlayer({
   const isPlaying = status.playing ?? false;
 
   const [summarizing, setSummarizing] = useState(false);
+  const [summarizeStep, setSummarizeStep] = useState<'transcribing' | 'summarizing' | null>(null);
   const [minutes, setMinutes] = useState<string | null>(existingMinutes);
   const [exportingPdf, setExportingPdf] = useState(false);
 
@@ -557,41 +589,46 @@ function RecordingPlayer({
       Alert.alert('No recording', 'Recording URL is not available.');
       return;
     }
-    if (!GEMINI_API_KEY) {
-      Alert.alert('Not configured', 'Gemini API key is not set. Add GEMINI_API_KEY to your .env file.');
-      return;
-    }
+
     setSummarizing(true);
+    setSummarizeStep('transcribing');
+
     try {
-      const { downloadAsync, documentDirectory } = await import('expo-file-system/legacy');
-      const dest = `${documentDirectory}rec_${rec.id}_tmp.m4a`;
-      await downloadAsync(rec.url, dest);
-      const base64Audio = await readAsStringAsync(dest, { encoding: EncodingType.Base64 });
+      // Call Cloud Function directly via fetch with Firebase ID token —
+      // bypasses @react-native-firebase/functions which falls back to the
+      // JS SDK web module and has timeout/module-resolution issues on iOS.
+      const currentUser = auth().currentUser;
+      if (!currentUser) throw new Error('You must be signed in to summarize a recording.');
+      const idToken = await currentUser.getIdToken();
 
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+        'https://us-central1-chitchatbusiness-880ce.cloudfunctions.net/summarizeMeetingRecording',
         {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
-                { text: 'Act as an executive meeting recorder. Produce clear minutes with: 1. Executive Summary 2. Key Decisions 3. Attendees & Action Items. Format as structured plain text.' },
-                { inlineData: { mimeType: 'audio/mp4', data: base64Audio } },
-              ],
-            }],
-          }),
-        }
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${idToken}`,
+          },
+          body: JSON.stringify({ data: { url: rec.url, recordingId: rec.id } }),
+        },
       );
-      const data = await res.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? 'No content returned.';
-      setMinutes(text);
-      onMinutesGenerated(text);
+
+      const json = await res.json();
+      if (json.error) throw new Error(json.error.message ?? 'Cloud Function error');
+      const { minutes } = json.result as { minutes: string };
+
+      setMinutes(minutes);
+      onMinutesGenerated(minutes);
+
     } catch (e: any) {
       console.error('[RecordingPlayer] summarize failed:', e);
-      Alert.alert('Summarize failed', e?.message ?? 'Could not generate minutes. Please try again.');
+      console.error('[RecordingPlayer] error code:', e?.code);
+      console.error('[RecordingPlayer] error details:', e?.details);
+      console.error('[RecordingPlayer] error cause:', e?.cause);
+      Alert.alert('Summarize failed', `${e?.code ?? ''}: ${e?.message ?? 'Could not generate minutes.'}`);
     } finally {
       setSummarizing(false);
+      setSummarizeStep(null);
     }
   };
 
@@ -663,7 +700,7 @@ function RecordingPlayer({
         </View>
 
         <TouchableOpacity
-          onPress={() => Share.share({ url: rec.url, message: rec.url }).catch(() => {})}
+          onPress={() => Share.share({ url: rec.url, message: rec.url }).catch(() => { })}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           disabled={!rec.url}
         >
@@ -690,7 +727,13 @@ function RecordingPlayer({
             <AppIcon name="sparkles-outline" size={15} color={COLORS.blue} />
           )}
           <AppText style={[styles.recActionText, { color: COLORS.blue }]}>
-            {summarizing ? 'Generating…' : minutes ? 'Re-summarize' : 'Summarize'}
+            {summarizeStep === 'transcribing'
+              ? 'Transcribing…'
+              : summarizeStep === 'summarizing'
+                ? 'Summarizing…'
+                : minutes
+                  ? 'Re-summarize'
+                  : 'Summarize'}
           </AppText>
         </TouchableOpacity>
 
@@ -771,8 +814,8 @@ function MeetingDetailSheet({
   if (!meeting) return null;
 
   const nowDate = new Date();
-  const isPast     = isMeetingPast(meeting, nowDate);
-  const isActive   = isMeetingActive(meeting, nowDate);
+  const isPast = isMeetingPast(meeting, nowDate);
+  const isActive = isMeetingActive(meeting, nowDate);
   const isUpcoming = !isPast && !isActive;
   const isOrganizer = meeting.organizerId === currentUserId;
   const didAttend = meeting.attendance.includes(currentUserId);
@@ -948,7 +991,15 @@ function MeetingDetailSheet({
                     total={allRecordings.length}
                     meetingTitle={meeting.title}
                     existingMinutes={generatedMinutes ?? meeting.minutes}
-                    onMinutesGenerated={text => setGeneratedMinutes(text)}
+                    onMinutesGenerated={text => {
+                      setGeneratedMinutes(text);
+                      // Persist so the summary survives sheet close / app restart
+                      firestore()
+                        .collection('meetings')
+                        .doc(meeting.id)
+                        .update({ minutes: text })
+                        .catch(err => console.warn('[MeetingDetailSheet] Failed to save minutes:', err));
+                    }}
                   />
                 ))
               ) : (
@@ -1017,7 +1068,7 @@ export default function CalendarScreen() {
   const { bevel, iconButton } = useGlass();
 
   const [tab, setTab] = useState<TabType>('Upcoming');
-  
+
   // Calendar specific state
   const [selectedDate, setSelectedDate] = useState(new Date());
   // The month displayed in the grid (can differ from selectedDate when navigating)
@@ -1114,10 +1165,10 @@ export default function CalendarScreen() {
               const d = change.doc.data();
               if (d.isActive === false && Array.isArray(d.notificationIds)) {
                 d.notificationIds.forEach((id: string) => {
-                  Notifications.cancelScheduledNotificationAsync(id).catch(() => {});
+                  Notifications.cancelScheduledNotificationAsync(id).catch(() => { });
                 });
                 // Clear the stored IDs so we don't try to cancel again
-                change.doc.ref.update({ notificationIds: [] }).catch(() => {});
+                change.doc.ref.update({ notificationIds: [] }).catch(() => { });
               }
             }
           });
@@ -1161,7 +1212,7 @@ export default function CalendarScreen() {
     const q = query.toLowerCase().trim();
     return meetings.filter(m => {
       const active = isMeetingActive(m, nowDate);
-      const past   = isMeetingPast(m, nowDate);
+      const past = isMeetingPast(m, nowDate);
       const matchesTab = tab === 'Upcoming' ? (!past || active) : past;
       const matchesQuery = !q || m.title.toLowerCase().includes(q);
       return matchesTab && matchesQuery;
@@ -1214,7 +1265,7 @@ export default function CalendarScreen() {
 
   const renderMeetingRow = useCallback(({ item }: { item: Meeting }) => {
     const active = isMeetingActive(item, nowDate);
-    const past   = isMeetingPast(item, nowDate);
+    const past = isMeetingPast(item, nowDate);
     const remainingMs = active ? Math.max(0, getEndTime(item).getTime() - now) : 0;
     const remainingLabel = active ? fmtRemaining(remainingMs) : null;
 
@@ -1395,7 +1446,7 @@ export default function CalendarScreen() {
                 <View key={ri} style={styles.calWeekRow}>
                   {row.map((day, ci) => {
                     if (!day) return <View key={ci} style={styles.calDayCell} />;
-                    const isToday   = isSameDay(day, today);
+                    const isToday = isSameDay(day, today);
                     const isSelected = isSameDay(day, selectedDate);
                     const hasMeeting = meetings.some(m => isSameDay(m.date, day));
                     return (
@@ -1407,7 +1458,7 @@ export default function CalendarScreen() {
                           // keep calendarMonth in sync when tapping a different month's overflow day
                           const newMonth = new Date(day.getFullYear(), day.getMonth(), 1);
                           if (newMonth.getMonth() !== calendarMonth.getMonth() ||
-                              newMonth.getFullYear() !== calendarMonth.getFullYear()) {
+                            newMonth.getFullYear() !== calendarMonth.getFullYear()) {
                             setCalendarMonth(newMonth);
                           }
                         }}
@@ -1460,69 +1511,69 @@ export default function CalendarScreen() {
           </View>
 
           <ScrollView ref={scrollViewRef} style={styles.timelineScroll} showsVerticalScrollIndicator={false}>
-             <View style={{ height: 24 * HOUR_HEIGHT, paddingBottom: 100 }}>
-               
-               {/* Background Hour Lines */}
-               {hoursArray.map((d, i) => (
-                 <View key={i} style={[styles.timelineHourRow, { top: i * HOUR_HEIGHT }]}>
-                    <View style={styles.timelineHourTextWrap}>
-                      <AppText style={[styles.timelineHourText, { color: FG.secondary }]}>
-                        {i === 0 ? '12 AM' : i < 12 ? `${i} AM` : i === 12 ? '12 PM' : `${i - 12} PM`}
+            <View style={{ height: 24 * HOUR_HEIGHT, paddingBottom: 100 }}>
+
+              {/* Background Hour Lines */}
+              {hoursArray.map((d, i) => (
+                <View key={i} style={[styles.timelineHourRow, { top: i * HOUR_HEIGHT }]}>
+                  <View style={styles.timelineHourTextWrap}>
+                    <AppText style={[styles.timelineHourText, { color: FG.secondary }]}>
+                      {i === 0 ? '12 AM' : i < 12 ? `${i} AM` : i === 12 ? '12 PM' : `${i - 12} PM`}
+                    </AppText>
+                  </View>
+                  <View style={[styles.timelineHourLine, { borderColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)' }]} />
+                </View>
+              ))}
+
+              {/* Current Time Indicator */}
+              {isSameDay(selectedDate, new Date()) && (
+                <View style={[styles.currentTimeContainer, { top: (new Date().getHours() + new Date().getMinutes() / 60) * HOUR_HEIGHT }]}>
+                  <View style={[styles.currentTimeBadge, { backgroundColor: textColor }]}>
+                    <AppText style={[styles.currentTimeText, { color: isDark ? '#000' : '#fff' }]}>
+                      {formatTimeSmall(new Date())}
+                    </AppText>
+                  </View>
+                  <View style={[styles.currentTimeLine, { backgroundColor: textColor }]} />
+                </View>
+              )}
+
+              {/* Event Blocks */}
+              {timelineData.map((event) => {
+                const colorBase = stringToColor(event.title);
+                const bg = hexToRgba(colorBase, isDark ? 0.2 : 0.15);
+                return (
+                  <TouchableOpacity
+                    key={event.id}
+                    style={[styles.timelineEventBlock, {
+                      top: event.top,
+                      height: event.height,
+                      backgroundColor: bg,
+                      borderLeftColor: colorBase,
+                    }]}
+                    onPress={() => setDetailMeeting(event)}
+                    activeOpacity={0.8}
+                  >
+                    <AppText style={[styles.timelineEventTitle, { color: textColor }]} numberOfLines={1}>
+                      {event.title}
+                    </AppText>
+                    {event.height > 40 && (
+                      <AppText style={[styles.timelineEventSub, { color: FG.secondary }]} numberOfLines={1}>
+                        {event.duration}
                       </AppText>
-                    </View>
-                    <View style={[styles.timelineHourLine, { borderColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)' }]} />
-                 </View>
-               ))}
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
 
-               {/* Current Time Indicator */}
-               {isSameDay(selectedDate, new Date()) && (
-                 <View style={[styles.currentTimeContainer, { top: (new Date().getHours() + new Date().getMinutes() / 60) * HOUR_HEIGHT }]}>
-                    <View style={[styles.currentTimeBadge, { backgroundColor: textColor }]}>
-                      <AppText style={[styles.currentTimeText, { color: isDark ? '#000' : '#fff' }]}>
-                        {formatTimeSmall(new Date())}
-                      </AppText>
-                    </View>
-                    <View style={[styles.currentTimeLine, { backgroundColor: textColor }]} />
-                 </View>
-               )}
+              {/* Empty day hint */}
+              {timelineData.length === 0 && (
+                <View style={{ position: 'absolute', left: 65, right: 14, top: (8.5) * HOUR_HEIGHT, alignItems: 'center', gap: 8 }}>
+                  <AppIcon name="calendar-outline" size={36} color={COLORS.sub} />
+                  <AppText style={{ color: COLORS.sub, fontSize: 13 }}>No meetings on this day</AppText>
+                </View>
+              )}
 
-               {/* Event Blocks */}
-               {timelineData.map((event) => {
-                 const colorBase = stringToColor(event.title);
-                 const bg = hexToRgba(colorBase, isDark ? 0.2 : 0.15);
-                 return (
-                   <TouchableOpacity
-                     key={event.id}
-                     style={[styles.timelineEventBlock, {
-                       top: event.top,
-                       height: event.height,
-                       backgroundColor: bg,
-                       borderLeftColor: colorBase,
-                     }]}
-                     onPress={() => setDetailMeeting(event)}
-                     activeOpacity={0.8}
-                   >
-                     <AppText style={[styles.timelineEventTitle, { color: textColor }]} numberOfLines={1}>
-                        {event.title}
-                     </AppText>
-                     {event.height > 40 && (
-                       <AppText style={[styles.timelineEventSub, { color: FG.secondary }]} numberOfLines={1}>
-                          {event.duration}
-                       </AppText>
-                     )}
-                   </TouchableOpacity>
-                 );
-               })}
-
-               {/* Empty day hint */}
-               {timelineData.length === 0 && (
-                 <View style={{ position: 'absolute', left: 65, right: 14, top: (8.5) * HOUR_HEIGHT, alignItems: 'center', gap: 8 }}>
-                   <AppIcon name="calendar-outline" size={36} color={COLORS.sub} />
-                   <AppText style={{ color: COLORS.sub, fontSize: 13 }}>No meetings on this day</AppText>
-                 </View>
-               )}
-
-             </View>
+            </View>
           </ScrollView>
         </View>
       )}
@@ -1553,7 +1604,7 @@ export default function CalendarScreen() {
             data={filteredData.filter(m => {
               const d = m.date;
               return d.getFullYear() === calendarMonth.getFullYear() &&
-                     d.getMonth() === calendarMonth.getMonth();
+                d.getMonth() === calendarMonth.getMonth();
             })}
             keyExtractor={item => item.id}
             renderItem={renderMeetingRow}
@@ -1575,7 +1626,7 @@ export default function CalendarScreen() {
       {/* ── FAB ──────────────────────────────────────────────────────────── */}
       <TouchableOpacity
         style={[styles.fab, bevel, { bottom: insets.bottom + 150 },
-          Platform.OS === 'web' && styles.fabWeb]}
+        Platform.OS === 'web' && styles.fabWeb]}
         activeOpacity={0.85}
         onPress={openMeetingSheet}
       >

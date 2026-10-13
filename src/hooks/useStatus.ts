@@ -39,7 +39,7 @@ function isExpired(expiresAt: Date): boolean {
   return new Date() > expiresAt;
 }
 
-export function useStatus(ownerUid: string | null) {
+export function useStatus(ownerUid: string | null, isCompanion = false) {
   const [myStatuses,      setMyStatuses]      = useState<FireStatus[]>([]);
   const [contactStatuses, setContactStatuses] = useState<StatusGroup[]>([]);
   const [loading,         setLoading]         = useState(true);
@@ -169,8 +169,22 @@ export function useStatus(ownerUid: string | null) {
   const markAsViewed = useCallback(
     async (statusId: string) => {
       if (!ownerUid) return;
+
+      // Companions share the same ownerUid as the primary. If a companion
+      // views a status it would add ownerUid to viewedBy — making it look like
+      // the primary owner already viewed it, or adding the owner to the viewers
+      // list of their own status. Both are wrong. Skip the write entirely.
+      if (isCompanion) return;
+
       try {
         const fsDb = db as ReturnType<typeof firestore>;
+
+        // Don't add the status owner to their own viewedBy list.
+        const snap = await fsDb.collection('statuses').doc(statusId).get();
+        if (!snap.exists()) return;
+        const statusOwnerId = snap.data()?.userId;
+        if (statusOwnerId === ownerUid) return;
+
         await fsDb.collection('statuses').doc(statusId).update({
           viewedBy: firestore.FieldValue.arrayUnion(ownerUid),
         });
@@ -178,7 +192,7 @@ export function useStatus(ownerUid: string | null) {
         console.error('[useStatus] Mark viewed error:', err);
       }
     },
-    [ownerUid],
+    [ownerUid, isCompanion],
   );
 
   const deleteStatus = useCallback(async (statusId: string, mediaUrl: string | null) => {

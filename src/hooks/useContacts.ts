@@ -3,6 +3,7 @@
 // For companion devices, it fetches the synced contacts directly from Firestore.
 
 import { useState, useEffect, useCallback } from 'react';
+import { AppState } from 'react-native';
 import { getContactsAsync, requestPermissionsAsync, Fields } from 'expo-contacts/legacy';
 import firestore from '@react-native-firebase/firestore';
 import { normalizePhone, chunkArray } from '../utils/phoneUtils';
@@ -73,7 +74,24 @@ export function useContacts() {
             ? 'Contacts permission denied. Enable it in Settings to invite friends.'
             : 'Contacts permission required.'
         );
-        setContacts([]);
+        // ── Fallback: load synced contacts from Firestore ──────────────
+        // Covers the case where the user has bought a new device and hasn't
+        // restored contacts yet, or has denied permission. They still see the
+        // contacts the previous device already synced to the cloud.
+        try {
+          const snap = await firestore()
+            .collection('users').doc(ownerUid).collection('syncedContacts').get();
+          if (!snap.empty) {
+            const synced: AppContact[] = snap.docs.map(doc => doc.data() as AppContact);
+            synced.sort((a, b) => (a.displayName || '').localeCompare(b.displayName || ''));
+            setContacts(synced);
+            console.log(`[useContacts] Loaded ${synced.length} contacts from Firestore fallback.`);
+          } else {
+            setContacts([]);
+          }
+        } catch {
+          setContacts([]);
+        }
         return;
       }
 
@@ -110,8 +128,26 @@ export function useContacts() {
       console.log('[useContacts] unique normalized phones:', contactsByPhone.size);
 
       if (contactsByPhone.size === 0) {
-        setError('No contacts found on this device.');
-        setContacts([]);
+        // No contacts on this device — try the Firestore fallback before giving up.
+        // This happens when the user has a brand-new phone and hasn't restored
+        // their contacts yet but already has a previous sync in the cloud.
+        console.log('[useContacts] No device contacts found. Trying Firestore fallback...');
+        try {
+          const snap = await firestore()
+            .collection('users').doc(ownerUid).collection('syncedContacts').get();
+          if (!snap.empty) {
+            const synced: AppContact[] = snap.docs.map(doc => doc.data() as AppContact);
+            synced.sort((a, b) => (a.displayName || '').localeCompare(b.displayName || ''));
+            setContacts(synced);
+            console.log(`[useContacts] Loaded ${synced.length} contacts from Firestore fallback.`);
+          } else {
+            setError('No contacts found on this device.');
+            setContacts([]);
+          }
+        } catch {
+          setError('No contacts found on this device.');
+          setContacts([]);
+        }
         return;
       }
 
@@ -133,7 +169,7 @@ export function useContacts() {
           const firebasePhotoURL = photoPrivacy === 'Nobody' ? null : (docData.photoURL || null);
 
           registeredUsers.set(phone, {
-            userId: doc.id,
+            userId:   doc.id,
             photoURL: firebasePhotoURL ?? undefined,
           });
         }
@@ -150,7 +186,7 @@ export function useContacts() {
         appContacts.push({
           userId:           registeredUser?.userId ?? phone,
           phone,
-          displayName:      contactInfo.name,
+          displayName:      contactInfo.name,   // always the phone book name
           isSaved:          !!registeredUser,
           photoUri:         contactInfo.photoUri || undefined,
           firebasePhotoURL: registeredUser?.photoURL || undefined,
@@ -209,6 +245,19 @@ export function useContacts() {
 
   useEffect(() => { 
     loadContacts(); 
+  }, [loadContacts]);
+
+  // Reload device contacts when the app returns to the foreground, so contacts
+  // added in the phone's Contacts app while away appear without manual refresh.
+  useEffect(() => {
+    let prev = AppState.currentState;
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active' && prev.match(/inactive|background/)) {
+        loadContacts();
+      }
+      prev = next;
+    });
+    return () => sub.remove();
   }, [loadContacts]);
 
   return {

@@ -65,10 +65,12 @@ export async function mergeLocalMessages(
     for (const m of existing)  map.set(m.messageId, m);
     for (const m of incoming)  map.set(m.messageId, m);
 
-    // Sort ascending by timestamp.
+    // Sort ascending by timestamp. A null timestamp means the message was just
+    // sent and its server timestamp hasn't resolved yet — it's the newest, so
+    // sort it to the BOTTOM (treat as +Infinity), not the top.
     const merged = Array.from(map.values()).sort((a, b) => {
-      const ta = a.timestamp?.getTime() ?? 0;
-      const tb = b.timestamp?.getTime() ?? 0;
+      const ta = a.timestamp?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      const tb = b.timestamp?.getTime() ?? Number.MAX_SAFE_INTEGER;
       return ta - tb;
     });
 
@@ -84,5 +86,16 @@ export async function clearLocalMessages(chatId: string): Promise<void> {
     await AsyncStorage.removeItem(KEY(chatId));
   } catch (err) {
     console.warn('[useLocalMessages] clear error:', err);
+  }
+}
+
+/** Remove a single message from the local cache (called when a user deletes it). */
+export async function removeLocalMessage(chatId: string, messageId: string): Promise<void> {
+  try {
+    const existing = await loadLocalMessages(chatId);
+    const next = existing.filter((m) => m.messageId !== messageId);
+    await AsyncStorage.setItem(KEY(chatId), JSON.stringify(next.map(serialise)));
+  } catch (err) {
+    console.warn('[useLocalMessages] removeLocalMessage error:', err);
   }
 }

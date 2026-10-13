@@ -14,38 +14,31 @@ import { normalizePhone } from '../utils/phoneUtils';
 export function usePhoneBook() {
   const [contactsMap, setContactsMap] = useState<Map<string, string>>(new Map());
 
-  useEffect(() => {
-    let mounted = true;
+  const load = useCallback(async () => {
+    try {
+      if (Platform.OS === 'web') return; // no device contacts on web
+      const { getContactsAsync, requestPermissionsAsync, Fields } = require('expo-contacts/legacy');
 
-    const load = async () => {
-      try {
-        if (Platform.OS === 'web') return; // no device contacts on web
-        const { getContactsAsync, requestPermissionsAsync, Fields } = require('expo-contacts/legacy');
+      const { status } = await requestPermissionsAsync();
+      if (status !== 'granted') return;
 
-        const { status } = await requestPermissionsAsync();
-        if (status !== 'granted') return;
+      const { data } = await getContactsAsync({ fields: [Fields.Name, Fields.PhoneNumbers] });
 
-        const { data } = await getContactsAsync({ fields: [Fields.Name, Fields.PhoneNumbers] });
-
-        const map = new Map<string, string>();
-        for (const contact of data) {
-          if (!contact.phoneNumbers || !contact.name) continue;
-          for (const pn of contact.phoneNumbers) {
-            if (!pn.number) continue;
-            map.set(normalizePhone(pn.number), contact.name);
-          }
+      const map = new Map<string, string>();
+      for (const contact of data) {
+        if (!contact.phoneNumbers || !contact.name) continue;
+        for (const pn of contact.phoneNumbers) {
+          if (!pn.number) continue;
+          map.set(normalizePhone(pn.number), contact.name);
         }
-        if (mounted) setContactsMap(map);
-      } catch (err) {
-        console.warn('[usePhoneBook] Failed to load contacts:', err);
       }
-    };
-
-    load();
-    return () => {
-      mounted = false;
-    };
+      setContactsMap(map);
+    } catch (err) {
+      console.warn('[usePhoneBook] Failed to load contacts:', err);
+    }
   }, []);
+
+  useEffect(() => { load(); }, [load]);
 
   /**
    * Resolve a display name from a phone number: the saved contact name if the
@@ -59,5 +52,5 @@ export function usePhoneBook() {
     [contactsMap]
   );
 
-  return { contactsMap, resolveName };
+  return { contactsMap, resolveName, reloadPhoneBook: load };
 }

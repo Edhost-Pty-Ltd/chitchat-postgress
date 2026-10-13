@@ -224,13 +224,15 @@ interface ExpoPushMessage {
   channelId?: string;
 }
 
-/** POST a batch of Expo push messages (max 100 per call). */
-async function sendExpoPushBatch(messages: ExpoPushMessage[]): Promise<void> {
-  if (messages.length === 0) return;
+interface ExpoTicket { status: string; message?: string; details?: { error?: string } }
+
+/** POST a batch of Expo push messages (max 100 per call). Returns per-message tickets. */
+async function sendExpoPushBatch(messages: ExpoPushMessage[]): Promise<ExpoTicket[]> {
+  if (messages.length === 0) return [];
 
   const payload = JSON.stringify(messages);
 
-  await new Promise<void>((resolve, reject) => {
+  return new Promise<ExpoTicket[]>((resolve, reject) => {
     const url = new URL(EXPO_PUSH_URL);
     const req = https.request(
       {
@@ -248,9 +250,23 @@ async function sendExpoPushBatch(messages: ExpoPushMessage[]): Promise<void> {
         res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
         res.on('end', () => {
           if (res.statusCode && res.statusCode >= 400) {
-            logger.warn('[sendMessageNotification] Expo push error:', res.statusCode, body);
+            logger.warn('[sendExpoPushBatch] HTTP error:', res.statusCode, body);
+            resolve([]);
+            return;
           }
-          resolve();
+          try {
+            const parsed = JSON.parse(body) as { data?: ExpoTicket[] };
+            const tickets = parsed.data ?? [];
+            const errors = tickets.filter(r => r.status !== 'ok');
+            if (errors.length > 0) {
+              logger.warn('[sendExpoPushBatch] Per-token errors:', JSON.stringify(errors));
+            } else {
+              logger.info(`[sendExpoPushBatch] All ${messages.length} push(es) delivered OK.`);
+            }
+            resolve(tickets);
+          } catch {
+            resolve([]);
+          }
         });
       },
     );
@@ -289,6 +305,8 @@ export const sendMessageNotification = onDocumentWritten(
     const isGroup    = chatData.type === 'group';
     const groupName  = (chatData.groupName ?? 'Group') as string;
     const msgText    = lastMsg.text || (lastMsg.type === 'image' ? '📷 Photo' : lastMsg.type === 'voice' ? '🎤 Voice message' : '📎 File');
+    // Users who muted this chat — skip their push notifications
+    const mutedBy    = (chatData.mutedBy ?? {}) as Record<string, boolean>;
 
     const dbAdmin = getFirestore();
 
@@ -311,10 +329,13 @@ export const sendMessageNotification = onDocumentWritten(
 
     // Collect all push tokens for non-sender members
     const pushMessages: ExpoPushMessage[] = [];
+    const tokenRefs: FirebaseFirestore.DocumentReference[] = [];
 
+    const seenTokens = new Set<string>();
     await Promise.all(
       members
         .filter((uid) => uid !== senderId)
+        .filter((uid) => mutedBy[uid] !== true)  // skip recipients who muted this chat
         .map(async (uid) => {
           try {
             const tokensSnap = await dbAdmin
@@ -325,6 +346,9 @@ export const sendMessageNotification = onDocumentWritten(
             for (const tokenDoc of tokensSnap.docs) {
               const token = tokenDoc.data().token as string | undefined;
               if (!token || !token.startsWith('ExponentPushToken[')) continue;
+              // Skip duplicate token values (same device registered more than once)
+              if (seenTokens.has(token)) continue;
+              seenTokens.add(token);
 
               pushMessages.push({
                 to:        token,
@@ -338,6 +362,7 @@ export const sendMessageNotification = onDocumentWritten(
                   type:       'message',
                 },
               });
+              tokenRefs.push(tokenDoc.ref);
             }
           } catch (err) {
             logger.warn(`[sendMessageNotification] Failed to get tokens for uid ${uid}:`, err);
@@ -350,7 +375,14 @@ export const sendMessageNotification = onDocumentWritten(
     // Expo limits 100 messages per batch
     const BATCH_SIZE = 100;
     for (let i = 0; i < pushMessages.length; i += BATCH_SIZE) {
-      await sendExpoPushBatch(pushMessages.slice(i, i + BATCH_SIZE));
+      const tickets = await sendExpoPushBatch(pushMessages.slice(i, i + BATCH_SIZE));
+      tickets.forEach((t, j) => {
+        const err = t.details?.error;
+        if (t.status === 'error' && (err === 'DeviceNotRegistered' || err === 'InvalidCredentials')) {
+          const ref = tokenRefs[i + j];
+          if (ref) ref.delete().catch(() => {});
+        }
+      });
     }
 
     logger.info(`[sendMessageNotification] Sent ${pushMessages.length} push(es) for chat ${event.params.chatId}`);
@@ -447,3 +479,312 @@ export const recordProfileView = onCall(async (request) => {
   logger.info('[recordProfileView]', { viewerUid, viewedUid });
   return { ok: true };
 });
+
+// ─── Meeting Recording Summarizer ───────────────────────────────────────────
+// Callable that fetches the audio from a Firebase Storage download URL,
+// uploads it to the Gemini Files API, transcribes + summarises it, then
+// deletes the temporary Gemini file.  Running server-side sidesteps the
+// React Native JS-bridge size limit that blocks large binary transfers from
+// the client.
+//
+// Expected request.data:
+//   { url: string, recordingId: string }
+//
+// Returns:
+//   { minutes: string }
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? '';
+const GEMINI_MODEL   = 'gemini-3.8-flash';
+
+export const summarizeMeetingRecording = onCall(
+  { timeoutSeconds: 300, memory: '512MiB', secrets: ['GEMINI_API_KEY'] },
+  async (request) => {
+    if (!request.auth) {
+      throw new HttpsError('unauthenticated', 'Must be signed in.');
+    }
+
+    const url         = (request.data?.url         ?? '') as string;
+    const recordingId = (request.data?.recordingId ?? '') as string;
+
+    if (!url || typeof url !== 'string') {
+      throw new HttpsError('invalid-argument', 'url is required.');
+    }
+    if (!GEMINI_API_KEY) {
+      throw new HttpsError('failed-precondition', 'GEMINI_API_KEY is not set on the server.');
+    }
+
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+    // 1. Download audio from Firebase Storage into memory
+    const audioRes = await fetch(url);
+    if (!audioRes.ok) throw new HttpsError('unavailable', `Failed to fetch audio (HTTP ${audioRes.status}).`);
+    const audioBuffer = Buffer.from(await audioRes.arrayBuffer());
+    const audioSize   = audioBuffer.byteLength;
+    logger.info(`[summarizeMeetingRecording] Fetched audio: ${audioSize} bytes, id=${recordingId}`);
+
+    // 2. Start a resumable upload to the Gemini Files API
+    const startRes = await fetch(
+      `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: {
+          'X-Goog-Upload-Protocol':              'resumable',
+          'X-Goog-Upload-Command':               'start',
+          'X-Goog-Upload-Header-Content-Length': String(audioSize),
+          'X-Goog-Upload-Header-Content-Type':   'audio/mp4',
+          'Content-Type':                        'application/json',
+        },
+        body: JSON.stringify({ file: { display_name: `rec_${recordingId}.m4a` } }),
+      },
+    );
+    if (!startRes.ok) throw new HttpsError('unavailable', `Gemini upload start failed: ${await startRes.text()}`);
+
+    const uploadUrl = startRes.headers.get('x-goog-upload-url');
+    if (!uploadUrl) throw new HttpsError('internal', 'Gemini did not return an upload URL.');
+
+    // 3. Upload the binary content
+    const uploadRes = await fetch(uploadUrl, {
+      method:  'POST',
+      headers: {
+        'Content-Length':        String(audioSize),
+        'X-Goog-Upload-Offset':  '0',
+        'X-Goog-Upload-Command': 'upload, finalize',
+      },
+      body: audioBuffer,
+    });
+    if (!uploadRes.ok) throw new HttpsError('unavailable', `Gemini upload failed: ${await uploadRes.text()}`);
+
+    const uploadData     = await uploadRes.json() as any;
+    const geminiFileName = uploadData.file?.name as string | undefined;
+    const fileUri        = uploadData.file?.uri  as string | undefined;
+    if (!fileUri || !geminiFileName) throw new HttpsError('internal', 'Gemini did not return a file URI.');
+    logger.info(`[summarizeMeetingRecording] Uploaded to Gemini: ${geminiFileName}`);
+
+    // 4. Poll until the file is ACTIVE (Gemini processes audio asynchronously)
+    for (let i = 0; i < 20; i++) {
+      const stateData = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/${geminiFileName}?key=${GEMINI_API_KEY}`,
+      ).then(r => r.json()) as any;
+      const state = stateData.state as string | undefined;
+      logger.info(`[summarizeMeetingRecording] File state (attempt ${i + 1}): ${state}`);
+      if (state === 'ACTIVE') break;
+      if (state === 'FAILED') throw new HttpsError('internal', 'Gemini file processing failed.');
+      if (i === 19) throw new HttpsError('deadline-exceeded', 'Timed out waiting for Gemini file to become ACTIVE.');
+      await sleep(3000);
+    }
+
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+    // Helper: POST to Gemini with up to 4 retries on capacity/rate-limit errors
+    async function geminiPost(body: object): Promise<any> {
+      let lastError = '';
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (attempt > 0) await sleep(5000 * attempt); // 5s, 10s, 15s backoff
+        const res  = await fetch(endpoint, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(body),
+        });
+        const data = await res.json() as any;
+        if (res.ok) return data;
+        const msg: string = data?.error?.message ?? `Gemini error ${res.status}`;
+        lastError = msg;
+        if (res.status === 429 || res.status === 503 || msg.toLowerCase().includes('high demand') || msg.toLowerCase().includes('quota')) {
+          logger.warn(`[summarizeMeetingRecording] Capacity error (attempt ${attempt + 1}), retrying...`);
+          continue;
+        }
+        throw new HttpsError('internal', msg);
+      }
+      throw new HttpsError('resource-exhausted', `Gemini overloaded after retries: ${lastError}`);
+    }
+
+    // 5. Transcribe
+    logger.info('[summarizeMeetingRecording] Starting transcription...');
+    const transcriptData = await geminiPost({
+      contents: [{
+        parts: [
+          { text: 'Transcribe this meeting recording verbatim. Include every spoken word accurately. Do not summarize — produce a full, clean transcript only. Label each speaker as "Speaker 1:", "Speaker 2:", etc. when voices change.' },
+          { fileData: { mimeType: 'audio/mp4', fileUri } },
+        ],
+      }],
+    });
+
+    const tCand      = transcriptData.candidates?.[0];
+    const transcript = ((tCand?.content?.parts ?? []) as any[]).map((p: any) => p.text ?? '').join('').trim();
+    logger.info(`[summarizeMeetingRecording] Transcript: ${transcript.length} chars, finishReason: ${tCand?.finishReason}`);
+    if (!transcript) throw new HttpsError('internal', `Empty transcript (finishReason: ${tCand?.finishReason ?? 'unknown'}).`);
+
+    // 6. Summarize
+    logger.info('[summarizeMeetingRecording] Starting summarization...');
+    const promptText = [
+      'You are a professional executive meeting secretary. Using the transcript below, produce formal, structured meeting minutes.',
+      '',
+      'Format your output EXACTLY as follows:',
+      '',
+      'MEETING MINUTES',
+      '---',
+      '',
+      'EXECUTIVE SUMMARY',
+      '[2-4 sentence overview of the meeting\'s purpose and main outcomes]',
+      '',
+      'KEY TOPICS DISCUSSED',
+      '- [Topic 1]',
+      '- [Topic 2]',
+      '',
+      'DECISIONS MADE',
+      '- [Decision 1]',
+      '',
+      'ACTION ITEMS',
+      '- [Person/Role] - [Task] - [Deadline if mentioned]',
+      '',
+      'FULL TRANSCRIPT',
+      transcript,
+      '',
+      'Write in formal business English. Be concise, accurate, and professional.',
+    ].join('\n');
+
+    const summaryData = await geminiPost({
+      contents: [{ parts: [{ text: promptText }] }],
+    });
+
+    const minutes = summaryData.candidates?.[0]?.content?.parts?.[0]?.text ?? 'No summary returned.';
+    logger.info(`[summarizeMeetingRecording] Done. Minutes: ${minutes.length} chars`);
+
+    // 7. Clean up the Gemini file
+    try {
+      await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/${geminiFileName}?key=${GEMINI_API_KEY}`,
+        { method: 'DELETE' },
+      );
+    } catch (e) {
+      logger.warn('[summarizeMeetingRecording] Failed to delete Gemini file:', e);
+    }
+
+    return { minutes };
+  },
+);
+
+// ─── Auto Responder ──────────────────────────────────────────────────────────
+// Triggers on every new message in any chat.
+// If the recipient is a business with autoResponderEnabled + a work schedule,
+// and the current time is outside their working hours, and we haven't already
+// sent an auto-reply this "visit" (last message from recipient is not already
+// the auto-reply), write the canned response as the business user.
+//
+// Runs server-side so it bypasses the Firestore senderId == auth.uid rule.
+
+import { onDocumentCreated } from 'firebase-functions/v2/firestore';
+
+export const autoResponder = onDocumentCreated(
+  {
+    document: 'chats/{chatId}/messages/{messageId}',
+    database: '(default)',
+    region: 'us-central1',
+  },
+  async (event) => {
+    const msgData = event.data?.data();
+    if (!msgData) return;
+
+    const chatId   = event.params.chatId;
+    const senderId = msgData.senderId as string | undefined;
+    if (!senderId) return;
+
+    // Don't auto-reply to blocked messages or non-text types
+    if (msgData.blockedMessage) return;
+
+    const dbAdmin = getFirestore();
+
+    // Load the parent chat to find the other member and confirm it's 1-on-1
+    const chatSnap = await dbAdmin.collection('chats').doc(chatId).get();
+    if (!chatSnap.exists) return;
+
+    const chatData = chatSnap.data()!;
+    const members  = (chatData.members ?? []) as string[];
+    if (chatData.type === 'group' || members.length !== 2) return;
+
+    // The recipient is whoever didn't send this message
+    const recipientUid = members.find(uid => uid !== senderId);
+    if (!recipientUid) return;
+
+    // Load recipient's profile to check auto-responder settings
+    const recipientSnap = await dbAdmin.collection('users').doc(recipientUid).get();
+    if (!recipientSnap.exists) return;
+
+    const recipient = recipientSnap.data()!;
+    if (!recipient.autoResponderEnabled || !recipient.auto_responder_message) return;
+
+    // Check if current time is outside recipient's working hours.
+    // If NO schedule is configured, treat it as "always respond" (return true).
+    const isOutsideWorkingHours = (schedule: Record<string, { open: string; close: string }> | undefined): boolean => {
+      if (!schedule || Object.keys(schedule).length === 0) return true; // no schedule = always auto-reply
+      // If every day in the schedule is 'Closed', treat as no schedule — always auto-reply
+      const hasAnyOpenDay = Object.values(schedule).some(d => d.open !== 'Closed');
+      if (!hasAnyOpenDay) return true;
+      const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const now        = new Date();
+      const currentDay = DAYS[now.getDay()];
+      const today      = schedule[currentDay];
+      if (!today || today.open === 'Closed') return true;
+
+      const toMinutes = (t: string): number => {
+        const m = t.match(/(\d+):(\d+)\s+(AM|PM)/i);
+        if (!m) return 0;
+        let h = parseInt(m[1], 10);
+        const min = parseInt(m[2], 10);
+        if (m[3].toUpperCase() === 'PM' && h < 12) h += 12;
+        if (m[3].toUpperCase() === 'AM' && h === 12) h = 0;
+        return h * 60 + min;
+      };
+
+      const now_min   = now.getHours() * 60 + now.getMinutes();
+      const open_min  = toMinutes(today.open);
+      const close_min = toMinutes(today.close);
+      return now_min < open_min || now_min >= close_min;
+    };
+
+    if (!isOutsideWorkingHours(recipient.workSchedule)) return;
+
+    // Check if the last message from the recipient is already the auto-reply
+    // (prevents spamming on every message in a session)
+    const recentSnap = await dbAdmin
+      .collection('chats').doc(chatId).collection('messages')
+      .orderBy('timestamp', 'desc')
+      .limit(10)
+      .get();
+
+    const lastFromRecipient = recentSnap.docs
+      .map(d => d.data())
+      .find(d => d.senderId === recipientUid);
+
+    if (lastFromRecipient?.text === recipient.auto_responder_message) {
+      logger.info(`[autoResponder] Already replied in chat ${chatId}, skipping.`);
+      return;
+    }
+
+    // Write the auto-reply as the recipient (business) — Admin SDK bypasses security rules
+    const autoReplyText = recipient.auto_responder_message as string;
+
+    await dbAdmin.collection('chats').doc(chatId).collection('messages').add({
+      senderId:       recipientUid,
+      text:           autoReplyText,
+      type:           'text',
+      timestamp:      AdminTimestamp.now(),
+      readBy:         [recipientUid],
+      deliveredTo:    [],
+      blockedMessage: false,
+      isAutoReply:    true,
+    });
+
+    await dbAdmin.collection('chats').doc(chatId).update({
+      'lastMessage.text':      autoReplyText,
+      'lastMessage.senderId':  recipientUid,
+      'lastMessage.timestamp': AdminTimestamp.now(),
+    });
+
+    logger.info(`[autoResponder] Sent auto-reply in chat ${chatId} from ${recipientUid}`);
+  },
+);
+
+// Meeting invites are delivered via a normal chat message from the organizer
+// to each participant (see CalenderScreen handleCreate → sendBroadcastMessage),
+// which triggers sendMessageNotification — the same proven push path as chat.

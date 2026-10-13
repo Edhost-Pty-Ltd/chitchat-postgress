@@ -23,7 +23,6 @@ try {
   Notifications = require('expo-notifications');
   Notifications.setNotificationHandler({
     handleNotification: async () => ({
-      shouldShowAlert: true,
       shouldPlaySound: true,
       shouldSetBadge: true,
       shouldShowBanner: true,
@@ -151,7 +150,7 @@ async function savePushToken(ownerUid: string, token: string) {
         { merge: true },
       );
 
-    console.log('[usePushNotifications] Push token saved for ownerUid:', ownerUid, 'device:', deviceId);
+    // console.log('[usePushNotifications] Push token saved for ownerUid:', ownerUid, 'device:', deviceId);
   } catch (error) {
     console.error('[usePushNotifications] Error saving push token:', error);
   }

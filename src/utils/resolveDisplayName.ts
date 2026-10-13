@@ -56,10 +56,10 @@ export function resolveDisplayName(
   const otherUser = firestoreUsers.get(otherMemberId);
   if (!otherUser) return 'Unknown';
 
-  // Priority 2: Phone book contact name (only if saved in this device's contacts)
+  // Priority 2: Phone book contact name (saved in this device's contacts)
   const contactName = contactsMap.get(otherUser.phone);
   if (contactName) return contactName;
 
-  // Priority 3: Raw phone number (contact not saved on this device)
-  return otherUser.phone;
+  // Priority 3: Raw phone number (contact not in phone book on this device)
+  return otherUser.phone || 'Unknown';
 }

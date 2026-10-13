@@ -18,6 +18,7 @@ export interface MeetingRoomState {
   mutedUsers: string[];
   kickedUsers: string[];
   isActive: boolean;
+  isRecording: boolean;
   endedAt: Date | null;
   minutes: string | null;
   minutesGeneratedAt: Date | null;
@@ -28,7 +29,7 @@ export interface MeetingRoomState {
 
 const EMPTY: MeetingRoomState = {
   participants: [], joinedMembers: [], mutedUsers: [], kickedUsers: [],
-  isActive: false, endedAt: null, minutes: null, minutesGeneratedAt: null,
+  isActive: false, isRecording: false, endedAt: null, minutes: null, minutesGeneratedAt: null,
   recordings: [], title: '', organizerId: '',
 };
 
@@ -54,6 +55,7 @@ export function useMeetingRoom(meetingId: string | null) {
             mutedUsers:        d.mutedUsers        ?? [],
             kickedUsers:       d.kickedUsers       ?? [],
             isActive:          !!d.isActive,
+            isRecording:       !!d.isRecording,
             endedAt:           d.endedAt?.toDate?.() ?? null,
             minutes:           d.minutes           ?? null,
             minutesGeneratedAt:d.minutesGeneratedAt?.toDate?.() ?? null,
@@ -203,7 +205,15 @@ export function useMeetingRoom(meetingId: string | null) {
     if (!meetingId) return;
     await firestore().collection('meetings').doc(meetingId).update({
       isActive: false,
+      isRecording: false,
       endedAt: firestore.FieldValue.serverTimestamp(),
+    });
+  }, [meetingId]);
+
+  const setRecordingState = useCallback(async (recording: boolean) => {
+    if (!meetingId) return;
+    await firestore().collection('meetings').doc(meetingId).update({
+      isRecording: recording,
     });
   }, [meetingId]);
 
@@ -212,6 +222,6 @@ export function useMeetingRoom(meetingId: string | null) {
     join, leave,
     muteUser, unmuteUser, muteAll, unmuteAll,
     removeUser, addParticipants,
-    saveMinutes, addRecording, endMeeting,
+    saveMinutes, addRecording, endMeeting, setRecordingState,
   };
 }
