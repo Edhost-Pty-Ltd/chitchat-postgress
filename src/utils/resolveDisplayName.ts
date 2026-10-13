@@ -51,15 +51,17 @@ export function resolveDisplayName(
 
   // 2-3. Direct chats — find the other member
   const otherMemberId = chat.members.find((id) => id !== currentUserId);
-  if (!otherMemberId) return 'Unknown';
+  if (!otherMemberId) return '';
 
   const otherUser = firestoreUsers.get(otherMemberId);
-  if (!otherUser) return 'Unknown';
+  // Data not loaded yet — return empty rather than the misleading "Unknown".
+  // Callers gate rendering on readiness, so this is only a transient fallback.
+  if (!otherUser) return '';
 
   // Priority 2: Phone book contact name (saved in this device's contacts)
   const contactName = contactsMap.get(otherUser.phone);
   if (contactName) return contactName;
 
-  // Priority 3: Raw phone number (contact not in phone book on this device)
-  return otherUser.phone || 'Unknown';
+  // Priority 3: Raw phone number, else the user's own displayName as a last resort
+  return otherUser.phone || otherUser.displayName || '';
 }

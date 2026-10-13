@@ -55,6 +55,7 @@ export interface FireMessage {
   } | null;
   edited?:    boolean;
   editedAt?:  Date | null;
+  forwarded?: boolean;
 }
 
 function toDate(raw: any): Date | null {
@@ -130,6 +131,7 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
               replyTo:            d.replyTo    ?? null,
               edited:             d.edited     ?? false,
               editedAt:           toDate(d.editedAt),
+              forwarded:          d.forwarded  ?? false,
             };
           });
 

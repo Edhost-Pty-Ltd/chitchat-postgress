@@ -8,15 +8,15 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  View, Modal, Pressable, StyleSheet, ScrollView, ActivityIndicator, Text, Animated, Easing,
+  View, Modal, Pressable, StyleSheet, ScrollView, ActivityIndicator, Text, Animated, Easing, TouchableOpacity, Dimensions,
 } from 'react-native';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
-import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
-import { LinearGradient } from 'expo-linear-gradient';
+import { COLORS, SHADOW } from '../types/theme';
 
-const PREVIEW_HEIGHT = 500;
+// Bigger preview — ~65% of the screen height (capped so it never fills it)
+const PREVIEW_HEIGHT = Math.min(640, Math.round(Dimensions.get('window').height * 0.65));
 
 interface PreviewMessage {
   id: string;
@@ -43,20 +43,29 @@ function fmtTime(d: Date | null): string {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+export interface PreviewAction {
+  key: string;
+  label: string;
+  icon: string;
+  destructive?: boolean;
+  onPress: () => void;
+}
+
 interface Props {
   visible: boolean;
   chatId: string | null;
   currentUserId: string | null;
   displayName: string;
+  actions?: PreviewAction[];
   onClose: () => void;
   onOpenChat: () => void;
 }
 
 export function ChatPreviewModal({
-  visible, chatId, currentUserId, displayName, onClose, onOpenChat,
+  visible, chatId, currentUserId, displayName, actions = [], onClose, onOpenChat,
 }: Props) {
   const { textColor } = useTypography();
-  const { FG } = useForeground();
+  const { FG, isDark } = useForeground();
   const { bevel } = useGlass();
 
   const [messages, setMessages] = useState<PreviewMessage[]>([]);
@@ -146,9 +155,13 @@ export function ChatPreviewModal({
               },
             ]}
           >
-            <Pressable style={styles.cardInner} onPress={() => { onClose(); onOpenChat(); }}>
-              <View style={[StyleSheet.absoluteFill, styles.cardBg, { backgroundColor: FG.glassBg, borderColor: FG.glassBorder }]}>
+            <Pressable style={[styles.cardInner, actions.length > 0 && styles.cardInnerWithActions]} onPress={() => { onClose(); onOpenChat(); }}>
+              <View style={[StyleSheet.absoluteFill, styles.cardBg, { borderColor: FG.glassBorder }]}>
                 <AppBg />
+                <View style={[
+                  StyleSheet.absoluteFill,
+                  { backgroundColor: isDark ? 'rgba(28,32,40,0.86)' : 'rgba(255,255,255,0.80)' },
+                ]} />
               </View>
 
               {/* Header */}
@@ -196,14 +209,40 @@ export function ChatPreviewModal({
                 </ScrollView>
               )}
 
-              {/* Open button */}
-              <View style={styles.openBtn}>
-                <LinearGradient colors={GRADIENTS.primary} style={styles.openBtnGrad}>
-                  <AppIcon name="chatbubble-ellipses-outline" size={18} color="#fff" fixedColor />
-                  <AppText fixedColor style={styles.openBtnText}>Open chat</AppText>
-                </LinearGradient>
-              </View>
             </Pressable>
+
+            {/* Actions — a separate card below the preview (not inside the
+                tap-to-open Pressable, so these taps run their own handlers) */}
+            {actions.length > 0 && (
+              <View style={[styles.actionsCard, { borderColor: FG.glassBorder }]}>
+                {/* Opaque background layer so the rows are clearly visible */}
+                <View style={StyleSheet.absoluteFill}>
+                  <AppBg />
+                  <View style={[
+                    styles.actionsScrim,
+                    { backgroundColor: isDark ? 'rgba(28,32,40,0.86)' : 'rgba(255,255,255,0.80)' },
+                  ]} />
+                </View>
+                {actions.map((a, i) => (
+                  <TouchableOpacity
+                    key={a.key}
+                    style={[styles.actionRow, i < actions.length - 1 && styles.actionRowBorder]}
+                    activeOpacity={0.7}
+                    onPress={a.onPress}
+                  >
+                    <AppIcon
+                      name={a.icon as any}
+                      size={20}
+                      color={a.destructive ? COLORS.missed : COLORS.blue}
+                      fixedColor
+                    />
+                    <AppText style={[styles.actionLabel, { color: a.destructive ? COLORS.missed : textColor }]}>
+                      {a.label}
+                    </AppText>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
           </Animated.View>
         </View>
       </Pressable>
@@ -214,15 +253,41 @@ export function ChatPreviewModal({
 const styles = StyleSheet.create({
   fill: { flex: 1 },
   backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
-  centerWrap: { flex: 1, justifyContent: 'center', paddingHorizontal: 20 },
+  centerWrap: { flex: 1, justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 24 },
   card: {
-    height: PREVIEW_HEIGHT,
     width: '100%',
+    maxHeight: '100%',
     borderRadius: 24,
+  },
+  cardInner: { height: PREVIEW_HEIGHT, borderRadius: 24, overflow: 'hidden', ...SHADOW.glow },
+  // When actions are shown, let the preview take the remaining space and shrink
+  // gracefully so both the (scrollable) messages and the actions fit on screen.
+  cardInnerWithActions: { height: undefined, flex: 1, minHeight: 260 },
+  cardBg: { borderRadius: 24, borderWidth: 1, overflow: 'hidden' },
+
+  actionsCard: {
+    marginTop: 12,
+    borderRadius: 18,
+    borderWidth: 1,
+    overflow: 'hidden',
     ...SHADOW.glow,
   },
-  cardInner: { flex: 1, borderRadius: 24, overflow: 'hidden' },
-  cardBg: { borderRadius: 24, borderWidth: 1, overflow: 'hidden' },
+  // Scrim over AppBg so the action rows are clearly readable (color set inline per theme)
+  actionsScrim: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    paddingVertical: 13,
+    paddingHorizontal: 18,
+  },
+  actionRowBorder: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(150,150,160,0.15)',
+  },
+  actionLabel: { fontSize: 15, fontWeight: '600' },
 
   header: {
     paddingHorizontal: 18, paddingTop: 16, paddingBottom: 10,
@@ -244,11 +309,4 @@ const styles = StyleSheet.create({
   bubbleTextOut: { fontSize: 14, lineHeight: 19, color: '#fff' },
   timeIn: { fontSize: 10, marginTop: 3, alignSelf: 'flex-end' },
   timeOut: { fontSize: 10, marginTop: 3, alignSelf: 'flex-end', color: 'rgba(255,255,255,0.75)' },
-
-  openBtn: { margin: 12, borderRadius: RADIUS.md, overflow: 'hidden' },
-  openBtnGrad: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 8, paddingVertical: 13,
-  },
-  openBtnText: { fontSize: 15, fontWeight: '700', color: '#fff' },
 });

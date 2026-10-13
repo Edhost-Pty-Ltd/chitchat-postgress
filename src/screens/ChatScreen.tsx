@@ -702,15 +702,20 @@ export default function ChatScreen() {
   const [viewerImageUrl, setViewerImageUrl] = useState<string | null>(null);
 
   // ── Selected message state (for long-press actions) ────────────
-  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
-  const [showMessageActions, setShowMessageActions] = useState(false);
+  // Multi-select (WhatsApp style): long-press enters selection mode, then
+  // tapping messages toggles them. `selectedIds` holds all selected message ids.
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const selectionMode = selectedIds.length > 0;
+  // Convenience single-selection id (for actions that only apply to one message)
+  const selectedMessageId = selectedIds.length === 1 ? selectedIds[0] : null;
+  const showMessageActions = selectionMode;
 
   // ── Reply state ─────────────────────────────────────────────────
   const [replyingTo, setReplyingTo] = useState<FireMessage | null>(null);
 
   // ── Forward state ───────────────────────────────────────────────
   const [forwardModalVisible, setForwardModalVisible] = useState(false);
-  const [messageToForward, setMessageToForward] = useState<FireMessage | null>(null);
+  const [messagesToForward, setMessagesToForward] = useState<FireMessage[]>([]);
 
   // ── Message info state ──────────────────────────────────────────
   const [messageInfoVisible, setMessageInfoVisible] = useState(false);
@@ -1323,15 +1328,21 @@ export default function ChatScreen() {
   };
 
   // ── Message selection and actions ───────────────────────────────
+  // Long-press enters selection mode and selects that message
   const handleLongPressMessage = (messageId: string) => {
-    setSelectedMessageId(messageId);
-    setShowMessageActions(true);
+    setSelectedIds((prev) => (prev.includes(messageId) ? prev : [...prev, messageId]));
     setShowEmoji(false); // Close emoji panel if open
   };
 
+  // While in selection mode, tapping a message toggles it in/out of the selection
+  const handleToggleSelectMessage = (messageId: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(messageId) ? prev.filter((id) => id !== messageId) : [...prev, messageId]
+    );
+  };
+
   const handleClearSelection = () => {
-    setSelectedMessageId(null);
-    setShowMessageActions(false);
+    setSelectedIds([]);
   };
 
   const handleEditMessage = () => {
@@ -1348,25 +1359,26 @@ export default function ChatScreen() {
   };
 
   const handleDeleteMessage = async () => {
-    if (!selectedMessageId) return;
+    if (selectedIds.length === 0) return;
+    const idsToDelete = [...selectedIds];
+    const n = idsToDelete.length;
 
     Alert.alert(
-      'Delete Message',
-      'Are you sure you want to delete this message?',
+      n === 1 ? 'Delete Message' : 'Delete Messages',
+      `Are you sure you want to delete ${n === 1 ? 'this message' : `these ${n} messages`}?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            const idToDelete = selectedMessageId;
             handleClearSelection();
             try {
               // Removes from the on-screen list + local cache + Firestore in real time
-              await deleteMessage(idToDelete);
+              await Promise.all(idsToDelete.map((id) => deleteMessage(id)));
             } catch (error) {
-              console.error('[ChatScreen] Error deleting message:', error);
-              Alert.alert('Error', 'Failed to delete message.');
+              console.error('[ChatScreen] Error deleting messages:', error);
+              Alert.alert('Error', 'Failed to delete messages.');
             }
           },
         },
@@ -1384,12 +1396,43 @@ export default function ChatScreen() {
   };
 
   const handleForwardMessage = () => {
-    if (!selectedMessageId) return;
-    const message = messages.find(m => m.messageId === selectedMessageId);
-    if (message) {
-      setMessageToForward(message);
+    if (selectedIds.length === 0) return;
+    // Preserve chat order (oldest → newest) for the forwarded batch
+    const selected = messages.filter((m) => selectedIds.includes(m.messageId));
+    if (selected.length > 0) {
+      setMessagesToForward(selected);
       setForwardModalVisible(true);
       handleClearSelection();
+    }
+  };
+
+  // Share the selected messages' text via the native share sheet
+  const handleShareMessages = async () => {
+    if (selectedIds.length === 0) return;
+    const selected = messages.filter((m) => selectedIds.includes(m.messageId));
+    const body = selected
+      .map((m) => {
+        if (m.text) return m.text;
+        switch (m.type) {
+          case 'image': return '[Photo]';
+          case 'voice': return '[Voice message]';
+          case 'video': return '[Video]';
+          case 'file':  return `[File] ${m.fileName ?? ''}`.trim();
+          case 'location': return '[Location]';
+          default: return '';
+        }
+      })
+      .filter(Boolean)
+      .join('\n');
+    handleClearSelection();
+    if (!body) {
+      Alert.alert('Nothing to share', 'The selected messages have no shareable text.');
+      return;
+    }
+    try {
+      await Share.share({ message: body });
+    } catch (err) {
+      console.warn('[ChatScreen] Share failed:', err);
     }
   };
 
@@ -1421,74 +1464,74 @@ export default function ChatScreen() {
     }
   };
 
-  // ── Forward to selected chats handler ───────────────────────────
+  // ── Forward selected messages to selected chats ─────────────────
   const handleForwardToChats = async (selectedChatIds: string[]) => {
-    if (!messageToForward || !userId) return;
+    if (messagesToForward.length === 0 || !userId) return;
+
+    const previewFor = (m: FireMessage): string =>
+      m.type === 'text'  ? (m.text ?? 'Message')
+      : m.type === 'voice' ? '🎤 Voice message'
+      : m.type === 'image' ? '📷 Image'
+      : m.type === 'file'  ? `📎 ${m.fileName || 'File'}`
+      : m.type === 'location' ? '📍 Location'
+      : 'Message';
 
     try {
-      console.log('[ChatScreen] Forwarding message to', selectedChatIds.length, 'chats');
+      const fsDbFwd = db as ReturnType<typeof firestore>;
 
-      // Forward to each selected chat
       for (const targetChatId of selectedChatIds) {
-        const messageData: any = {
-          senderId: userId,
-          type: messageToForward.type,
-          timestamp: firestore.FieldValue.serverTimestamp(),
-          readBy: [userId],
-        };
+        let lastPreview = 'Message';
 
-        // Copy relevant fields based on message type
-        if (messageToForward.type === 'text' && messageToForward.text) {
-          messageData.text = messageToForward.text;
-        } else if (messageToForward.type === 'image' && messageToForward.imageUrl) {
-          messageData.imageUrl = messageToForward.imageUrl;
-          messageData.text = messageToForward.text || null;
-        } else if (messageToForward.type === 'voice' && messageToForward.voiceUrl) {
-          messageData.voiceUrl = messageToForward.voiceUrl;
-          messageData.duration = messageToForward.duration;
-        } else if (messageToForward.type === 'file' && messageToForward.fileUrl) {
-          messageData.fileUrl = messageToForward.fileUrl;
-          messageData.fileName = messageToForward.fileName;
-          messageData.fileSize = messageToForward.fileSize;
-          messageData.mimeType = messageToForward.mimeType;
+        // Forward each selected message, preserving order
+        for (const src of messagesToForward) {
+          const messageData: any = {
+            senderId: userId,
+            type: src.type,
+            timestamp: firestore.FieldValue.serverTimestamp(),
+            readBy: [userId],
+            // Only label as "Forwarded" when the original wasn't sent by me —
+            // forwarding your own message shouldn't show the label (WhatsApp behaviour).
+            forwarded: src.senderId !== userId,
+          };
+
+          if (src.type === 'text' && src.text) {
+            messageData.text = src.text;
+          } else if (src.type === 'image' && src.imageUrl) {
+            messageData.imageUrl = src.imageUrl;
+            messageData.text = src.text || null;
+          } else if (src.type === 'voice' && src.voiceUrl) {
+            messageData.voiceUrl = src.voiceUrl;
+            messageData.duration = src.duration;
+          } else if (src.type === 'file' && src.fileUrl) {
+            messageData.fileUrl = src.fileUrl;
+            messageData.fileName = src.fileName;
+            messageData.fileSize = src.fileSize;
+            messageData.mimeType = src.mimeType;
+          }
+
+          await fsDbFwd.collection('chats').doc(targetChatId).collection('messages').add(messageData);
+          lastPreview = previewFor(src);
         }
 
-        // Add message to target chat
-        const fsDbFwd = db as ReturnType<typeof firestore>;
-        await fsDbFwd.collection('chats').doc(targetChatId).collection('messages').add(messageData);
-
-        // Update target chat's lastMessage
-        const lastMessageText =
-          messageToForward.type === 'text'
-            ? messageToForward.text
-            : messageToForward.type === 'voice'
-              ? '🎤 Voice message'
-              : messageToForward.type === 'image'
-                ? '📷 Image'
-                : messageToForward.type === 'file'
-                  ? `📎 ${messageToForward.fileName || 'File'}`
-                  : messageToForward.type === 'location'
-                    ? '📍 Location'
-                    : 'Message';
-
+        // Update the target chat's lastMessage with the final forwarded message
         await fsDbFwd.collection('chats').doc(targetChatId).update({
-          'lastMessage.text': lastMessageText,
+          'lastMessage.text': lastPreview,
           'lastMessage.senderId': userId,
           'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
         });
       }
 
-      console.log('[ChatScreen] Message forwarded successfully');
+      const n = messagesToForward.length;
       Alert.alert(
-        'Message Forwarded',
-        `Message forwarded to ${selectedChatIds.length} ${selectedChatIds.length === 1 ? 'chat' : 'chats'}`
+        'Forwarded',
+        `${n} message${n === 1 ? '' : 's'} forwarded to ${selectedChatIds.length} ${selectedChatIds.length === 1 ? 'chat' : 'chats'}`
       );
 
-      setMessageToForward(null);
+      setMessagesToForward([]);
       setForwardModalVisible(false);
     } catch (error) {
-      console.error('[ChatScreen] Error forwarding message:', error);
-      Alert.alert('Error', 'Failed to forward message. Please try again.');
+      console.error('[ChatScreen] Error forwarding messages:', error);
+      Alert.alert('Error', 'Failed to forward. Please try again.');
     }
   };
 
@@ -2162,7 +2205,10 @@ export default function ChatScreen() {
     }
 
     const isOut = item.senderId === userId;
-    const isSelected = selectedMessageId === item.messageId;
+    const isSelected = selectedIds.includes(item.messageId);
+    // While in selection mode, a plain tap toggles selection instead of its
+    // normal action (opening an image, jumping to a reply, etc.).
+    const onBubblePress = selectionMode ? () => handleToggleSelectMessage(item.messageId) : undefined;
     const isSearchMatch = searchQuery.trim().length > 0 &&
       item.type === 'text' &&
       item.text?.toLowerCase().includes(searchQuery.toLowerCase());
@@ -2179,6 +2225,7 @@ export default function ChatScreen() {
       return (
         <TouchableOpacity
           activeOpacity={1}
+          onPress={onBubblePress}
           onLongPress={() => handleLongPressMessage(item.messageId)}
           delayLongPress={300}
         >
@@ -2291,6 +2338,12 @@ export default function ChatScreen() {
                   </View>
                 </TouchableOpacity>
               )}
+              {item.forwarded && (
+                <View style={styles.forwardedRow}>
+                  <AppIcon name="arrow-redo-outline" size={12} color="rgba(255,255,255,0.7)" fixedColor />
+                  <AppText fixedColor style={styles.forwardedLabelIn}>Forwarded</AppText>
+                </View>
+              )}
               {item.text && <AppText fixedColor style={styles.bubbleTextIn}>{item.text}</AppText>}
               <View style={styles.timeInRow}>
                 {item.edited && (
@@ -2391,6 +2444,12 @@ export default function ChatScreen() {
                   </View>
                 </TouchableOpacity>
               )}
+              {item.forwarded && (
+                <View style={styles.forwardedRow}>
+                  <AppIcon name="arrow-redo-outline" size={12} color={FG.secondary} fixedColor />
+                  <AppText style={[styles.forwardedLabelOut, { color: FG.secondary }]}>Forwarded</AppText>
+                </View>
+              )}
               {item.text && <AppText style={[styles.bubbleTextOut, { color: textColor, fontFamily }]}>{item.text}</AppText>}
               <View style={styles.timeOutRow}>
                 {item.edited && (
@@ -2413,6 +2472,7 @@ export default function ChatScreen() {
     return (
       <TouchableOpacity
         activeOpacity={1}
+        onPress={onBubblePress}
         onLongPress={() => handleLongPressMessage(item.messageId)}
         delayLongPress={300}
       >
@@ -2807,51 +2867,68 @@ export default function ChatScreen() {
           )}
 
           {/* ── Message Action Toolbar ── */}
-          {showMessageActions && selectedMessageId && (
+          {showMessageActions && (
             <View style={[styles.actionToolbar, { backgroundColor: FG.glassBg, borderTopColor: FG.glassBorder }]}>
-              <View style={styles.actionToolbarContent}>
-                <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleReplyMessage}>
-                  <AppIcon name="arrow-undo-outline" size={22} color={COLORS.blue} />
-                  <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Reply</AppText>
+              {/* Selection count header */}
+              <View style={styles.actionToolbarCountRow}>
+                <TouchableOpacity style={styles.actionToolbarClose} onPress={handleClearSelection}>
+                  <AppIcon name="close" size={22} color={FG.secondary} />
                 </TouchableOpacity>
+                <AppText style={[styles.actionToolbarCount, { color: textColor }]}>
+                  {selectedIds.length} selected
+                </AppText>
+                <View style={{ width: 22 }} />
+              </View>
 
-                {/* Edit — only shown for own text messages within 15 minutes of sending */}
-                {(() => {
-                  const EDIT_WINDOW_MS = 15 * 60 * 1000;
-                  const msg = messages.find(m => m.messageId === selectedMessageId);
-                  if (!msg || msg.senderId !== userId || msg.type !== 'text') return null;
-                  const msgTime = msg.timestamp instanceof Date ? msg.timestamp : msg.timestamp ? new Date(msg.timestamp) : null;
-                  if (msgTime && Date.now() - msgTime.getTime() > EDIT_WINDOW_MS) return null;
-                  return (
-                    <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleEditMessage}>
-                      <AppIcon name="pencil-outline" size={22} color={COLORS.blue} />
-                      <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Edit</AppText>
+              <View style={styles.actionToolbarContent}>
+                {/* Single-selection-only actions */}
+                {selectedIds.length === 1 && (
+                  <>
+                    <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleReplyMessage}>
+                      <AppIcon name="arrow-undo-outline" size={22} color={COLORS.blue} />
+                      <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Reply</AppText>
                     </TouchableOpacity>
-                  );
-                })()}
 
+                    {(() => {
+                      const EDIT_WINDOW_MS = 15 * 60 * 1000;
+                      const msg = messages.find(m => m.messageId === selectedMessageId);
+                      if (!msg || msg.senderId !== userId || msg.type !== 'text') return null;
+                      const msgTime = msg.timestamp instanceof Date ? msg.timestamp : msg.timestamp ? new Date(msg.timestamp) : null;
+                      if (msgTime && Date.now() - msgTime.getTime() > EDIT_WINDOW_MS) return null;
+                      return (
+                        <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleEditMessage}>
+                          <AppIcon name="pencil-outline" size={22} color={COLORS.blue} />
+                          <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Edit</AppText>
+                        </TouchableOpacity>
+                      );
+                    })()}
+
+                    <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleCopyMessage}>
+                      <AppIcon name="copy-outline" size={22} color={COLORS.blue} />
+                      <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Copy</AppText>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleShowMessageInfo}>
+                      <AppIcon name="information-circle-outline" size={22} color={COLORS.blue} />
+                      <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Info</AppText>
+                    </TouchableOpacity>
+                  </>
+                )}
+
+                {/* Multi-selection-capable actions */}
                 <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleForwardMessage}>
                   <AppIcon name="arrow-redo-outline" size={22} color={COLORS.blue} />
                   <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Forward</AppText>
                 </TouchableOpacity>
 
-                <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleCopyMessage}>
-                  <AppIcon name="copy-outline" size={22} color={COLORS.blue} />
-                  <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Copy</AppText>
-                </TouchableOpacity>
-
-                <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleShowMessageInfo}>
-                  <AppIcon name="information-circle-outline" size={22} color={COLORS.blue} />
-                  <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Info</AppText>
+                <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleShareMessages}>
+                  <AppIcon name="share-social-outline" size={22} color={COLORS.blue} />
+                  <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Share</AppText>
                 </TouchableOpacity>
 
                 <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleDeleteMessage}>
                   <AppIcon name="trash-outline" size={22} color={COLORS.missed} fixedColor />
                   <AppText style={[styles.actionToolbarLabel, { color: COLORS.missed }]}>Delete</AppText>
-                </TouchableOpacity>
-
-                <TouchableOpacity style={styles.actionToolbarClose} onPress={handleClearSelection}>
-                  <AppIcon name="close-circle" size={24} color={FG.secondary} />
                 </TouchableOpacity>
               </View>
             </View>
@@ -3770,7 +3847,7 @@ export default function ChatScreen() {
           visible={forwardModalVisible}
           onClose={() => {
             setForwardModalVisible(false);
-            setMessageToForward(null);
+            setMessagesToForward([]);
           }}
           onForward={handleForwardToChats}
           currentUserId={userId}
@@ -5845,6 +5922,34 @@ const styles = StyleSheet.create({
   },
   actionToolbarClose: {
     padding: 4,
+  },
+  actionToolbarCountRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 8,
+    marginBottom: 4,
+  },
+  actionToolbarCount: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+
+  // ── Forwarded label ───────────────────────────────────────────────────────
+  forwardedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 2,
+  },
+  forwardedLabelIn: {
+    fontSize: 11,
+    fontStyle: 'italic',
+    color: 'rgba(255,255,255,0.7)',
+  },
+  forwardedLabelOut: {
+    fontSize: 11,
+    fontStyle: 'italic',
   },
 
   // ── Reply Preview ──────────────────────────────────────────────────────────

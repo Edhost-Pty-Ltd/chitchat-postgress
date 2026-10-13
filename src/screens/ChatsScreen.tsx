@@ -22,6 +22,7 @@ import { fetchUserPrivacySettings, isVisibleTo } from '../hooks/usePrivacySettin
 import { useStatus } from '../hooks/useStatus';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
 import { resolveDisplayName } from '../utils/resolveDisplayName';
+import { normalizePhone } from '../utils/phoneUtils';
 import { db } from '../config/firebase';
 import firestore from '@react-native-firebase/firestore';
 import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
@@ -1259,7 +1260,7 @@ export default function ChatsScreen() {
   const navigation  = useNavigation<NavProp>();
   const { userId }  = useAuth();
 
-  const { FG }                    = useForeground();
+  const { FG, isDark }            = useForeground();
   const { fontFamily, textColor } = useTypography();
   const { bevel, iconButton }     = useGlass();
   const insets = useSafeAreaInsets();
@@ -1279,13 +1280,17 @@ export default function ChatsScreen() {
     isSavedContact: boolean;
   } | null>(null);
 
-  // Chat being peeked via long-press (read-only message preview)
+  // Chat being peeked via long-press (read-only message preview + actions)
   const [previewChat, setPreviewChat] = useState<{
     chatId: string;
     displayName: string;
     isGroup: boolean;
     otherUserId?: string;
+    otherUserPhone?: string;
     otherUserPhoto?: string | null;
+    isSavedContact?: boolean;
+    isMuted?: boolean;
+    isFavourite?: boolean;
   } | null>(null);
   const { contactStatuses } = useStatus(userId);
 
@@ -1303,6 +1308,15 @@ export default function ChatsScreen() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [labelManagerOpen, setLabelManagerOpen] = useState(false);
   const [managingLabelId,  setManagingLabelId]  = useState<string | null>(null);
+
+  // "Add to label" picker — holds the chat we're labelling
+  const [labelPickerChat, setLabelPickerChat] = useState<{
+    chatId: string;
+    isGroup: boolean;
+    otherUserId?: string;
+  } | null>(null);
+  const [creatingLabelName, setCreatingLabelName] = useState('');
+  const [showNewLabelInput, setShowNewLabelInput] = useState(false);
 
   // Refresh device contacts each time the picker sheet opens
   useEffect(() => {
@@ -1422,6 +1436,41 @@ export default function ChatsScreen() {
     setLabels((prev) => prev.filter((l) => l.id !== labelId));
   }, [userId]);
 
+  // Returns the identifier used to place a chat inside a label:
+  //  - group chats are tracked by chatId in `groupIds`
+  //  - direct chats are tracked by the other member's uid in `memberIds`
+  const labelKeyForChat = useCallback(
+    (chat: { chatId: string; isGroup: boolean; otherUserId?: string }) =>
+      chat.isGroup ? chat.chatId : (chat.otherUserId ?? null),
+    [],
+  );
+
+  const isChatInLabel = useCallback(
+    (label: ChatLabel, chat: { chatId: string; isGroup: boolean; otherUserId?: string }) => {
+      const key = labelKeyForChat(chat);
+      if (!key) return false;
+      return chat.isGroup ? label.groupIds.includes(key) : label.memberIds.includes(key);
+    },
+    [labelKeyForChat],
+  );
+
+  // Add/remove a chat from a label (updates the correct array)
+  const toggleChatInLabel = useCallback(async (
+    label: ChatLabel,
+    chat: { chatId: string; isGroup: boolean; otherUserId?: string },
+  ) => {
+    const key = labelKeyForChat(chat);
+    if (!key) return;
+    const inLabel = isChatInLabel(label, chat);
+    const memberIds = chat.isGroup
+      ? label.memberIds
+      : (inLabel ? label.memberIds.filter((id) => id !== key) : [...label.memberIds, key]);
+    const groupIds = chat.isGroup
+      ? (inLabel ? label.groupIds.filter((id) => id !== key) : [...label.groupIds, key])
+      : label.groupIds;
+    await updateLabel(label.id, label.title, memberIds, groupIds);
+  }, [labelKeyForChat, isChatInLabel, updateLabel]);
+
   useEffect(() => {
     if (tab === 'Chats' || tab === 'Groups' || tab === 'Broadcast') return;
     const exists = labels.some((l) => l.id === tab);
@@ -1464,6 +1513,19 @@ export default function ChatsScreen() {
     }
     return map;
   }, [contacts, memberInfo]);
+
+  // The chat list should only render once names can be resolved. A direct chat
+  // is "ready" when its other member is present in firestoreUsersMap (from
+  // contacts or the async member fetch). This prevents the flash of "Unknown".
+  const namesReady = useMemo(() => {
+    if (!userId) return false;
+    for (const chat of chats) {
+      if ((chat.type ?? 'direct') === 'group') continue;
+      const otherId = chat.members.find((id) => id !== userId);
+      if (otherId && !firestoreUsersMap.has(otherId)) return false;
+    }
+    return true;
+  }, [chats, userId, firestoreUsersMap]);
 
   useEffect(() => {
     if (!chats.length || !userId) return;
@@ -1752,7 +1814,7 @@ export default function ChatsScreen() {
       const otherId = item.chatId.slice(NO_CHAT_PREFIX.length);
       const contact = contacts.find((c) => c.userId === otherId);
       const otherUser = firestoreUsersMap.get(otherId);
-      const displayName = contact?.displayName ?? otherUser?.displayName ?? 'Unknown';
+      const displayName = contact?.displayName ?? otherUser?.phone ?? otherUser?.displayName ?? '';
       const contactPhotoUri = contact?.photoUri ?? otherUser?.contactPhotoUri;
       const rawPhoto = contact?.firebasePhotoURL ?? otherUser?.photoURL;
       const photoSetting = privacyPhotoMap.get(otherId) ?? 'Contacts';
@@ -1795,7 +1857,7 @@ export default function ChatsScreen() {
       );
     }
 
-    const displayName     = userId ? resolveDisplayName(item, userId, contactsMap, firestoreUsersMap) : 'Unknown';
+    const displayName     = userId ? resolveDisplayName(item, userId, contactsMap, firestoreUsersMap) : '';
     const isGroup         = classifyChat(item) === 'group';
     const otherMemberId   = isGroup ? null : item.members.find((id) => id !== userId);
     const otherUser       = otherMemberId ? firestoreUsersMap.get(otherMemberId) : null;
@@ -1873,7 +1935,11 @@ export default function ChatsScreen() {
             displayName,
             isGroup,
             otherUserId: otherMemberId || undefined,
+            otherUserPhone: otherPhone,
             otherUserPhoto: firebasePhotoURL || contactPhotoUri || null,
+            isSavedContact,
+            isMuted,
+            isFavourite: favourites.includes(item.chatId),
           })}
           senderInfo={item.lastSenderId && isGroup ? firestoreUsersMap.get(item.lastSenderId) : undefined}
         />
@@ -1896,6 +1962,135 @@ export default function ChatsScreen() {
       otherUserPhoto: pc.otherUserPhoto ?? null,
     });
   }, [previewChat, navigation]);
+
+  // Delete the saved device contact for a chat's other user (keeps the chat)
+  const actionDeleteContact = useCallback(async (phone?: string) => {
+    if (!phone || Platform.OS === 'web') return;
+    try {
+      const Contacts = await import('expo-contacts/legacy');
+      const { status } = await Contacts.requestPermissionsAsync();
+      if (status !== 'granted') return;
+      const normalized = normalizePhone(phone);
+      const { data } = await Contacts.getContactsAsync({ fields: [Contacts.Fields.PhoneNumbers] });
+      await Promise.all(
+        data
+          .filter((c: any) => (c.phoneNumbers ?? []).some((pn: any) => normalizePhone(pn.number ?? '') === normalized))
+          .map((c: any) => (c.id ? Contacts.removeContactAsync(c.id) : Promise.resolve())),
+      );
+      reloadContacts();
+    } catch (err) {
+      console.warn('[ChatsScreen] delete contact failed:', err);
+    }
+  }, [reloadContacts]);
+
+  // Actions shown inside the long-press preview dialog
+  const previewActions = useMemo(() => {
+    if (!previewChat) return [];
+    const pc = previewChat;
+    const list: { key: string; label: string; icon: string; destructive?: boolean; onPress: () => void }[] = [];
+
+    list.push({
+      key: 'info', label: 'Contact info', icon: 'information-circle-outline',
+      onPress: () => {
+        setPreviewChat(null);
+        navigation.navigate('Chat', {
+          chatId: pc.chatId, displayName: pc.displayName, isGroup: pc.isGroup,
+          otherUserId: pc.otherUserId, otherUserPhoto: pc.otherUserPhoto ?? null, openProfile: true,
+        } as any);
+      },
+    });
+
+    list.push({
+      key: 'mute', label: pc.isMuted ? 'Unmute' : 'Mute', icon: pc.isMuted ? 'notifications' : 'notifications-off-outline',
+      onPress: async () => { await toggleMute(pc.chatId); setPreviewChat(null); },
+    });
+
+    list.push({
+      key: 'favourite', label: pc.isFavourite ? 'Remove favourite' : 'Add to favourites',
+      icon: pc.isFavourite ? 'star' : 'star-outline',
+      onPress: async () => { await toggleFavourite(pc.chatId); setPreviewChat(null); },
+    });
+
+    // When viewing a specific label's tab and the chat is in it, offer "Remove
+    // from this label". Otherwise offer the generic "Add to label" picker.
+    const chatRef = { chatId: pc.chatId, isGroup: pc.isGroup, otherUserId: pc.otherUserId };
+    if (currentLabel && isChatInLabel(currentLabel, chatRef)) {
+      list.push({
+        key: 'label',
+        label: `Remove from "${currentLabel.title}"`,
+        icon: 'pricetag',
+        onPress: async () => {
+          await toggleChatInLabel(currentLabel, chatRef);
+          setPreviewChat(null);
+        },
+      });
+    } else {
+      list.push({
+        key: 'label', label: 'Add to label', icon: 'pricetag-outline',
+        onPress: () => {
+          setPreviewChat(null);
+          setShowNewLabelInput(false);
+          setCreatingLabelName('');
+          // Wait for the preview modal to finish dismissing before presenting the
+          // picker modal — iOS can't present a modal while another is dismissing.
+          setTimeout(() => {
+            setLabelPickerChat({ chatId: pc.chatId, isGroup: pc.isGroup, otherUserId: pc.otherUserId });
+          }, 350);
+        },
+      });
+    }
+
+    if (!pc.isGroup && pc.isSavedContact && pc.otherUserPhone) {
+      list.push({
+        key: 'deleteContact', label: 'Delete contact', icon: 'person-remove-outline', destructive: true,
+        onPress: () => {
+          const phone = pc.otherUserPhone; setPreviewChat(null);
+          Alert.alert('Delete Contact', 'Remove this contact from your phone? The chat stays.', [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Delete', style: 'destructive', onPress: () => actionDeleteContact(phone) },
+          ]);
+        },
+      });
+    }
+
+    list.push({
+      key: 'clear', label: 'Clear chat', icon: 'brush-outline',
+      onPress: () => {
+        const id = pc.chatId; setPreviewChat(null);
+        Alert.alert('Clear Chat', 'Clear all messages in this chat?', [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Clear', style: 'destructive', onPress: () => actionClearChat(id) },
+        ]);
+      },
+    });
+
+    if (!pc.isGroup && pc.otherUserId) {
+      list.push({
+        key: 'block', label: 'Block', icon: 'ban-outline', destructive: true,
+        onPress: () => {
+          const uid = pc.otherUserId!; const name = pc.displayName; const photo = pc.otherUserPhoto ?? null;
+          setPreviewChat(null);
+          Alert.alert('Block Contact', `Block ${name}?`, [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Block', style: 'destructive', onPress: () => actionBlock(uid, name, photo) },
+          ]);
+        },
+      });
+    }
+
+    list.push({
+      key: 'delete', label: 'Delete chat', icon: 'trash-outline', destructive: true,
+      onPress: () => {
+        const id = pc.chatId; setPreviewChat(null);
+        Alert.alert('Delete Chat', 'Delete this chat? It will be removed from your list.', [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Delete', style: 'destructive', onPress: () => actionDeleteChat(id) },
+        ]);
+      },
+    });
+
+    return list;
+  }, [previewChat, navigation, toggleMute, toggleFavourite, actionDeleteContact, actionClearChat, actionBlock, actionDeleteChat, currentLabel, isChatInLabel, toggleChatInLabel]);
 
   const currentLabelTitle = (() => {
     if (tab === 'Chats') return 'Chats';
@@ -1936,9 +2131,111 @@ export default function ChatsScreen() {
         chatId={previewChat?.chatId ?? null}
         currentUserId={userId}
         displayName={previewChat?.displayName ?? ''}
+        actions={previewActions}
         onClose={() => setPreviewChat(null)}
         onOpenChat={openPreviewedChat}
       />
+
+      {/* ── Add to Label picker ── */}
+      <Modal
+        visible={!!labelPickerChat}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setLabelPickerChat(null)}
+        statusBarTranslucent
+      >
+        <Pressable style={styles.overlay} onPress={() => setLabelPickerChat(null)} />
+        {labelPickerChat && (
+          <View style={styles.labelPickerSheet}>
+            <View style={StyleSheet.absoluteFill}>
+              <AppBg />
+              <View style={[
+                StyleSheet.absoluteFill,
+                { backgroundColor: isDark ? 'rgba(28,32,40,0.92)' : 'rgba(255,255,255,0.92)' },
+              ]} />
+            </View>
+            <View style={styles.handle} />
+            <AppText style={[styles.labelPickerTitle, { color: textColor, fontFamily }]}>Add to label</AppText>
+
+            <ScrollView style={{ maxHeight: 360 }} showsVerticalScrollIndicator={false}>
+              {labels.length === 0 && !showNewLabelInput && (
+                <View style={styles.labelPickerEmpty}>
+                  <AppIcon name="pricetags-outline" size={40} color={FG.secondary} />
+                  <AppText style={[styles.labelPickerEmptyText, { color: FG.secondary }]}>
+                    No labels yet. Create one below.
+                  </AppText>
+                </View>
+              )}
+
+              {labels.map((label) => {
+                const checked = isChatInLabel(label, labelPickerChat);
+                return (
+                  <TouchableOpacity
+                    key={label.id}
+                    style={[styles.labelPickerRow, bevel]}
+                    activeOpacity={0.75}
+                    onPress={() => toggleChatInLabel(label, labelPickerChat)}
+                  >
+                    <AppIcon name="pricetag" size={18} color={COLORS.blue} fixedColor />
+                    <AppText style={[styles.labelPickerRowText, { color: textColor }]} numberOfLines={1}>
+                      {label.title}
+                    </AppText>
+                    <View style={[styles.labelPickerCheck, checked && styles.labelPickerCheckOn]}>
+                      {checked && <AppIcon name="checkmark" size={14} color="#fff" fixedColor />}
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            {/* New label input / button */}
+            {showNewLabelInput ? (
+              <View style={[styles.labelNewRow, bevel]}>
+                <TextInput
+                  style={[styles.labelNewInput, { color: textColor }]}
+                  placeholder="Label name"
+                  placeholderTextColor={COLORS.sub}
+                  value={creatingLabelName}
+                  onChangeText={setCreatingLabelName}
+                  autoFocus
+                />
+                <TouchableOpacity
+                  disabled={!creatingLabelName.trim()}
+                  onPress={async () => {
+                    const name = creatingLabelName.trim();
+                    if (!name || !labelPickerChat) return;
+                    const key = labelKeyForChat(labelPickerChat);
+                    const memberIds = !labelPickerChat.isGroup && key ? [key] : [];
+                    const groupIds  = labelPickerChat.isGroup && key ? [key] : [];
+                    await createLabel(name, memberIds, groupIds);
+                    setCreatingLabelName('');
+                    setShowNewLabelInput(false);
+                  }}
+                >
+                  <AppText style={[styles.labelNewSave, { opacity: creatingLabelName.trim() ? 1 : 0.4 }]}>
+                    Create
+                  </AppText>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <TouchableOpacity
+                style={styles.labelAddNewBtn}
+                activeOpacity={0.85}
+                onPress={() => setShowNewLabelInput(true)}
+              >
+                <LinearGradient colors={GRADIENTS.primary} style={styles.labelAddNewGrad}>
+                  <AppIcon name="add" size={18} color="#fff" fixedColor />
+                  <AppText fixedColor style={styles.labelAddNewText}>Add new label</AppText>
+                </LinearGradient>
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity style={styles.labelDoneBtn} onPress={() => setLabelPickerChat(null)} activeOpacity={0.8}>
+              <AppText style={[styles.labelDoneText, { color: COLORS.blue }]}>Done</AppText>
+            </TouchableOpacity>
+          </View>
+        )}
+      </Modal>
 
       {/* ── Chat actions menu (swipe right) ── */}
       <Modal
@@ -2176,7 +2473,7 @@ export default function ChatsScreen() {
 
       {tab === 'Broadcast' ? (
         <BroadcastScreen />
-      ) : chatsLoading ? (
+      ) : (chatsLoading || !namesReady) ? (
         <View style={styles.emptyWrap}>
           <ActivityIndicator size="large" color={COLORS.blue} />
           <Text style={styles.emptyText}>Loading chats…</Text>
@@ -2398,6 +2695,45 @@ const styles = StyleSheet.create({
     alignSelf: 'center', width: 40, height: 4, borderRadius: 2,
     backgroundColor: 'rgba(30,156,240,0.30)', marginTop: 10, marginBottom: 4,
   },
+
+  // Add to Label picker
+  labelPickerSheet: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingHorizontal: 14,
+    paddingBottom: Platform.OS === 'ios' ? 36 : 20,
+    overflow: 'hidden',
+    ...SHADOW.glow,
+  },
+  labelPickerTitle: { fontSize: 16, fontWeight: '700', textAlign: 'center', marginTop: 4, marginBottom: 12 },
+  labelPickerEmpty: { alignItems: 'center', gap: 8, paddingVertical: 24 },
+  labelPickerEmptyText: { fontSize: 14 },
+  labelPickerRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 13, paddingHorizontal: 16,
+    borderRadius: RADIUS.md, marginBottom: 8,
+  },
+  labelPickerRowText: { flex: 1, fontSize: 15, fontWeight: '600' },
+  labelPickerCheck: {
+    width: 24, height: 24, borderRadius: 12,
+    borderWidth: 1.5, borderColor: 'rgba(150,150,160,0.4)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  labelPickerCheckOn: { backgroundColor: COLORS.blue, borderColor: COLORS.blue },
+  labelNewRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingHorizontal: 14, borderRadius: RADIUS.md, minHeight: 50, marginTop: 4,
+  },
+  labelNewInput: { flex: 1, fontSize: 15, padding: 0 },
+  labelNewSave: { fontSize: 15, fontWeight: '700', color: COLORS.blue },
+  labelAddNewBtn: { marginTop: 4, borderRadius: RADIUS.md, overflow: 'hidden' },
+  labelAddNewGrad: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8, paddingVertical: 13,
+  },
+  labelAddNewText: { fontSize: 15, fontWeight: '700', color: '#fff' },
+  labelDoneBtn: { alignItems: 'center', paddingVertical: 14, marginTop: 4 },
+  labelDoneText: { fontSize: 15, fontWeight: '700' },
 
   // Chat actions menu (swipe right)
   actionMenuSheet: {

@@ -67,7 +67,7 @@ export function ForwardModal({ visible, onClose, onForward, currentUserId }: For
           let photoURL: string | null = null;
           let isGroup = false;
 
-          if (data.isGroup) {
+          if (data.type === 'group' || data.isGroup) {
             displayName = data.groupName || 'Unnamed Group';
             photoURL = data.groupPhoto || null;
             isGroup = true;
