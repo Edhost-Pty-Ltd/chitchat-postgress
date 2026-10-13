@@ -86,17 +86,30 @@ export class ApiClient {
       ...options.headers,
     };
 
+    // Default 10-second timeout. Callers can pass their own signal to override.
+    const defaultController = options.signal ? null : new AbortController();
+    const timeoutId = defaultController
+      ? setTimeout(() => defaultController.abort(), 10_000)
+      : null;
+    const signal = options.signal ?? defaultController!.signal;
+
     let response: Response;
     try {
       response = await fetch(this.buildUrl(path, options.query), {
         method: options.method ?? 'GET',
         headers,
         body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-        signal: options.signal,
+        signal,
       });
     } catch (err) {
       // fetch rejects only on network-level failures (Req 3.5).
-      return { ok: false, error: new NetworkError('Network request failed', err) };
+      const isTimeout = (err as any)?.name === 'AbortError';
+      return {
+        ok: false,
+        error: new NetworkError(isTimeout ? 'Timeout' : 'Network request failed', err),
+      };
+    } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId);
     }
 
     const text = await response.text();

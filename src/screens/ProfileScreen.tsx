@@ -453,17 +453,16 @@ export default function ProfileScreen() {
     if (!result.canceled && result.assets[0]) {
       const uri = result.assets[0].uri;
       try {
-        // Save local URI for immediate display; avatar upload via S3 presigned
-        // URLs is handled by the media service (EXPO_PUBLIC_BACKEND_MEDIA=true).
-        // For now, update the display locally and persist the object key once
-        // mediaService is integrated here.
+        // Show local URI immediately for instant feedback
         await setAvatarUri(uri);
-        // PATCH /me with the local URI as placeholder — a full media upload
-        // (presigned URL → S3 → avatarObjectKey) is a follow-up task.
-        await endpoints.updateMe({ avatarObjectKey: uri }).catch(() => {});
+        // Upload to object store, then persist the returned key
+        const { mediaService, fileSize } = await import('../services/mediaService');
+        const sizeBytes = await fileSize(uri);
+        const objectKey = await mediaService.upload(uri, 'avatar', { sizeBytes });
+        await endpoints.updateMe({ avatarObjectKey: objectKey });
       } catch (error: any) {
         console.error('[ProfileScreen] Error saving avatar:', error);
-        await setAvatarUri(uri);
+        // Local display is already updated — the next load will re-fetch the stored key
       }
     }
   };

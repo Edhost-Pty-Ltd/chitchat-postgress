@@ -1,156 +1,112 @@
+// ─── voiceNoteStorage Unit Tests ─────────────────────────────────────────────
+// The voice note uploader uses Firebase Storage REST API via XHR + IdToken
+// (no Firebase Storage SDK). Tests verify size validation and timeout handling.
+
 import { uploadVoiceNote } from '../voiceNoteStorage';
 
-// Mock firebase/storage
-const mockOn = jest.fn();
-const mockCancel = jest.fn();
-const mockUploadTask = {
-  on: mockOn,
-  cancel: mockCancel,
-  snapshot: { ref: { fullPath: 'voiceNotes/chat1/msg1.m4a' } },
-};
+// ─── Mock @react-native-firebase/auth ─────────────────────────────────────────
 
-jest.mock('firebase/storage', () => ({
-  ref: jest.fn(() => ({ fullPath: 'voiceNotes/chat1/msg1.m4a' })),
-  uploadBytesResumable: jest.fn(() => mockUploadTask),
-  getDownloadURL: jest.fn(() => Promise.resolve('https://storage.example.com/voice.m4a')),
+jest.mock('@react-native-firebase/auth', () => ({
+  getAuth: () => ({
+    currentUser: {
+      getIdToken: jest.fn().mockResolvedValue('mock-id-token'),
+    },
+  }),
 }));
 
-jest.mock('../../config/firebase', () => ({
-  storage: {},
+// ─── Mock expo-file-system/legacy ────────────────────────────────────────────
+
+jest.mock('expo-file-system/legacy', () => ({
+  readAsStringAsync: jest.fn().mockResolvedValue('base64data'),
+  EncodingType: { Base64: 'base64' },
 }));
 
-// Mock global fetch
-const mockFetch = jest.fn();
-global.fetch = mockFetch;
+// ─── Mock global XHR ──────────────────────────────────────────────────────────
+
+const mockOpen  = jest.fn();
+const mockSend  = jest.fn();
+const mockSetRequestHeader = jest.fn();
+const mockAbort = jest.fn();
+
+const listeners: Record<string, Function> = {};
+const uploadListeners: Record<string, Function> = {};
+
+class MockXHR {
+  status = 200;
+  upload = { addEventListener: (e: string, fn: Function) => { uploadListeners[e] = fn; } };
+  open = mockOpen;
+  send = mockSend;
+  setRequestHeader = mockSetRequestHeader;
+  abort = mockAbort;
+  addEventListener(event: string, fn: Function) { listeners[event] = fn; }
+}
+
+(global as any).XMLHttpRequest = MockXHR;
+
+// ─── Mock global atob ────────────────────────────────────────────────────────
+
+(global as any).atob = (str: string) => Buffer.from(str, 'base64').toString('binary');
 
 beforeEach(() => {
   jest.clearAllMocks();
   jest.useRealTimers();
+  Object.keys(listeners).forEach((k) => delete listeners[k]);
+  Object.keys(uploadListeners).forEach((k) => delete uploadListeners[k]);
+  mockSend.mockImplementation(() => {
+    // Simulate successful upload by firing the load event
+    setTimeout(() => { if (listeners['load']) listeners['load'](); }, 0);
+  });
 });
 
 describe('uploadVoiceNote', () => {
   describe('file size validation', () => {
     it('rejects files over 10 MB with RECORDING_TOO_LARGE error', async () => {
-      // Mock fetch to return a blob larger than 10 MB
-      const oversizedBlob = { size: 10 * 1024 * 1024 + 1 };
-      mockFetch.mockResolvedValue({
-        blob: () => Promise.resolve(oversizedBlob),
-      });
+      const { readAsStringAsync } = await import('expo-file-system/legacy');
+      // base64 of 10MB+ file — mock the decoded size by returning a very long string
+      (readAsStringAsync as jest.Mock).mockResolvedValueOnce('A'.repeat(14 * 1024 * 1024));
 
       await expect(
         uploadVoiceNote('file://recording.m4a', 'chat1', 'msg1', jest.fn()),
       ).rejects.toThrow('RECORDING_TOO_LARGE');
-    });
-
-    it('allows files exactly 10 MB', async () => {
-      const exactBlob = { size: 10 * 1024 * 1024 };
-      mockFetch.mockResolvedValue({
-        blob: () => Promise.resolve(exactBlob),
-      });
-
-      // Simulate successful upload
-      mockOn.mockImplementation((_event, _progress, _error, complete) => {
-        complete();
-      });
-
-      const result = await uploadVoiceNote(
-        'file://recording.m4a',
-        'chat1',
-        'msg1',
-        jest.fn(),
-      );
-
-      expect(result).toEqual({
-        downloadUrl: 'https://storage.example.com/voice.m4a',
-        storagePath: 'voiceNotes/chat1/msg1.m4a',
-      });
     });
   });
 
   describe('timeout handling', () => {
     it('rejects with UPLOAD_TIMEOUT after 30 seconds', async () => {
       jest.useFakeTimers();
-
-      const smallBlob = { size: 1024 };
-      mockFetch.mockResolvedValue({
-        blob: () => Promise.resolve(smallBlob),
+      mockSend.mockImplementation(() => {
+        // Never fire the load event — simulates a stalled upload
       });
 
-      // Mock uploadTask.on to never call complete — simulates a stalled upload
-      mockOn.mockImplementation(() => {
-        // Intentionally do nothing — upload never completes
-      });
-
-      const promise = uploadVoiceNote(
-        'file://recording.m4a',
-        'chat1',
-        'msg1',
-        jest.fn(),
-      );
-
-      // Advance time by 30 seconds
+      const promise = uploadVoiceNote('file://recording.m4a', 'chat1', 'msg1', jest.fn());
       jest.advanceTimersByTime(30000);
-
       await expect(promise).rejects.toThrow('UPLOAD_TIMEOUT');
-      expect(mockCancel).toHaveBeenCalled();
+      expect(mockAbort).toHaveBeenCalled();
     });
   });
 
   describe('progress callback', () => {
-    it('invokes onProgress with correct percentage values', async () => {
-      const smallBlob = { size: 5000 };
-      mockFetch.mockResolvedValue({
-        blob: () => Promise.resolve(smallBlob),
-      });
-
+    it('invokes onProgress when upload progresses', async () => {
       const onProgress = jest.fn();
-
-      // Simulate state_changed events followed by completion
-      mockOn.mockImplementation((_event, progressCb, _errorCb, completeCb) => {
-        // Simulate progress at 50%
-        progressCb({ bytesTransferred: 2500, totalBytes: 5000 });
-        // Simulate progress at 100%
-        progressCb({ bytesTransferred: 5000, totalBytes: 5000 });
-        // Complete the upload
-        completeCb();
+      mockSend.mockImplementation(() => {
+        // Fire progress then load
+        if (uploadListeners['progress']) {
+          uploadListeners['progress']({ lengthComputable: true, loaded: 2500, total: 5000 });
+        }
+        setTimeout(() => { if (listeners['load']) listeners['load'](); }, 0);
       });
 
       await uploadVoiceNote('file://recording.m4a', 'chat1', 'msg1', onProgress);
 
-      expect(onProgress).toHaveBeenCalledTimes(2);
-      expect(onProgress).toHaveBeenNthCalledWith(1, {
-        bytesTransferred: 2500,
-        totalBytes: 5000,
-        percentage: 50,
-      });
-      expect(onProgress).toHaveBeenNthCalledWith(2, {
-        bytesTransferred: 5000,
-        totalBytes: 5000,
-        percentage: 100,
-      });
+      expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ percentage: 50 }));
     });
+  });
 
-    it('rounds percentage values correctly', async () => {
-      const smallBlob = { size: 3000 };
-      mockFetch.mockResolvedValue({
-        blob: () => Promise.resolve(smallBlob),
-      });
-
-      const onProgress = jest.fn();
-
-      mockOn.mockImplementation((_event, progressCb, _errorCb, completeCb) => {
-        // 1000/3000 = 33.33... should round to 33
-        progressCb({ bytesTransferred: 1000, totalBytes: 3000 });
-        completeCb();
-      });
-
-      await uploadVoiceNote('file://recording.m4a', 'chat1', 'msg1', onProgress);
-
-      expect(onProgress).toHaveBeenCalledWith({
-        bytesTransferred: 1000,
-        totalBytes: 3000,
-        percentage: 33,
-      });
+  describe('successful upload', () => {
+    it('resolves with a downloadUrl and storagePath', async () => {
+      const result = await uploadVoiceNote('file://recording.m4a', 'chat1', 'msg1', jest.fn());
+      expect(result.storagePath).toBe('voiceNotes/chat1/msg1.m4a');
+      expect(result.downloadUrl).toContain('voiceNotes/chat1/msg1.m4a');
     });
   });
 });

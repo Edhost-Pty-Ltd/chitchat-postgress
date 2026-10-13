@@ -57,5 +57,25 @@ export function useChats(userId: string | null) {
     return () => { active = false; unsubs.forEach((u) => u()); };
   }, [userId]);
 
-  return { chats, loading, error };
+  const reload = () => {
+    if (!userId) return;
+    void endpoints.listChats().then((res) => {
+      if (res.ok) {
+        setChats(
+          res.data.chats.map((c) => ({
+            chatId:       c.chatId,
+            type:         c.type,
+            members:      c.members,
+            groupName:    c.groupName,
+            lastMessage:  c.lastMessage ?? '',
+            lastSenderId: c.lastSenderId ?? '',
+            timestamp:    c.lastMessageAt ? new Date(c.lastMessageAt) : null,
+            unreadCount:  c.unreadCount,
+          })),
+        );
+      }
+    });
+  };
+
+  return { chats, loading, error, reload };
 }

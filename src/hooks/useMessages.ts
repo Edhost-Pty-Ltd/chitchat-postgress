@@ -146,12 +146,27 @@ export function useMessages(chatId: string | null, currentUserId: string | null)
       return load();
     }).catch(() => load());
 
+    // On message:new, splice the incoming message directly into state for
+    // instant display, then do a background reconcile to sync receipts/order.
+    const handleMessageNew = (p: any) => {
+      if (p?.message?.chatId !== chatId) return;
+      const incoming: FireMessage = backendToFireMessage(p.message as BackendMessage);
+      setMessages((prev) => {
+        // Remove any optimistic placeholder (matched by clientId) and deduplicate.
+        const withoutOptimistic = prev.filter(
+          (m) => m.messageId !== incoming.messageId && m.messageId !== p.message.clientId,
+        );
+        return [...withoutOptimistic, incoming];
+      });
+      void load(); // background reconcile for read receipts / ordering
+    };
+
     const unsubs = [
-      socketClient.subscribe('message:new',       (p: any) => { if (p?.message?.chatId === chatId) void load(); }),
-      socketClient.subscribe('message:read',       (p: any) => { if (p?.chatId === chatId) void load(); }),
-      socketClient.subscribe('message:deleted',    (p: any) => { if (p?.chatId === chatId) void load(); }),
-      socketClient.subscribe('message:edited',     (p: any) => { if (p?.chatId === chatId) void load(); }),
-      socketClient.subscribe('client:reconnect',   () => void load()),
+      socketClient.subscribe('message:new',     handleMessageNew),
+      socketClient.subscribe('message:read',    (p: any) => { if (p?.chatId === chatId) void load(); }),
+      socketClient.subscribe('message:deleted', (p: any) => { if (p?.chatId === chatId) void load(); }),
+      socketClient.subscribe('message:edited',  (p: any) => { if (p?.chatId === chatId) void load(); }),
+      socketClient.subscribe('client:reconnect', () => void load()),
     ];
 
     return () => {
@@ -163,12 +178,48 @@ export function useMessages(chatId: string | null, currentUserId: string | null)
 
   async function sendMessage(text: string): Promise<boolean> {
     if (!chatId || !currentUserId || !text.trim()) return false;
+
+    // ── Optimistic update ─────────────────────────────────────────────────
+    // Show the message immediately; the server echo will replace it with the
+    // real message (deduped by clientId) once the socket event arrives.
+    const clientId = `${currentUserId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const optimistic: FireMessage = {
+      messageId:    clientId,
+      senderId:     currentUserId,
+      text:         text.trim(),
+      imageUrl:     null,
+      voiceUrl:     null,
+      videoUrl:     null,
+      fileUrl:      null,
+      type:         'text',
+      timestamp:    new Date(),
+      expiresAt:    null,
+      readBy:       [],
+      deliveredTo:  [],
+      duration:     null,
+      fileName:     null,
+      fileSize:     null,
+      mimeType:     null,
+      thumbnailUrl: null,
+      edited:       false,
+      editedAt:     null,
+      replyTo:      null,
+    };
+    setMessages((prev) => [...prev, optimistic]);
+
     const res = await endpoints.sendMessage(chatId, {
       type: 'text',
       text: text.trim(),
-      clientId: `${currentUserId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      clientId,
     });
-    if (!res.ok) { setError(res.error.message); return false; }
+
+    if (!res.ok) {
+      // Roll back the optimistic entry on failure.
+      setMessages((prev) => prev.filter((m) => m.messageId !== clientId));
+      setError(res.error.message);
+      return false;
+    }
+    // Server will broadcast message:new → handleMessageNew replaces optimistic entry.
     return true;
   }
 

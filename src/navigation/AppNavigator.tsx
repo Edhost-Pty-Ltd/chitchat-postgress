@@ -104,11 +104,30 @@ export default function AppNavigator() {
     try {
       setProfileCheckError(false);
       const res = await endpoints.getMe();
-      // Profile exists when the backend returns a row with a display name set.
-      setProfileExists(res.ok && !!res.data.displayName);
+      if (res.ok) {
+        // 200 → user row exists in the DB. displayName may be null (profile
+        // incomplete) but the account is real — let them through.
+        setProfileExists(true);
+      } else if (!res.ok && (res.error as any)?.status === 404) {
+        // 404 → no DB row for this Firebase UID → new user, route to sign-up.
+        setProfileExists(false);
+      } else {
+        // Any other HTTP error (401, 500, …) or a NetworkError returned as
+        // { ok: false } — treat optimistically so a transient backend issue
+        // never locks the user out.
+        setProfileExists(true);
+      }
     } catch (err: any) {
-      if (err?.message?.includes('offline') || err?.message === 'Timeout') {
-        setProfileExists(true); // optimistic offline
+      // Treat any network/timeout failure optimistically — let the user in and
+      // let individual screens handle offline gracefully. The AbortError name
+      // is the canonical signal from the 10s timeout in ApiClient.
+      const isNetworkIssue =
+        err?.name === 'AbortError' ||
+        err?.message?.includes('Timeout') ||
+        err?.message?.includes('offline') ||
+        err?.message?.includes('Network request failed');
+      if (isNetworkIssue) {
+        setProfileExists(true); // optimistic: server unreachable, let user in
       } else {
         setProfileCheckError(true);
       }

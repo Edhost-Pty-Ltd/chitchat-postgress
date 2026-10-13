@@ -872,36 +872,40 @@ export default function ChatScreen() {
     try {
       // ── Edit existing message ────────────────────────────────────
       if (editingMessage) {
-        await endpoints.editMessage(chatId, editingMessage.messageId, trimmed);
+        // Clear immediately — don't wait for the server round-trip.
+        const editTarget = editingMessage;
         setEditingMessage(null);
         setInput('');
         setShowEmoji(false);
+        await endpoints.editMessage(chatId, editTarget.messageId, trimmed);
         return;
       }
 
       // ── Reply branch ─────────────────────────────────────────────
       if (replyingTo) {
+        // Clear immediately so the input feels responsive.
+        const replyTarget = replyingTo;
+        setReplyingTo(null);
+        setInput('');
+        setShowEmoji(false);
         await endpoints.sendMessage(chatId, {
           type: 'text',
           text: trimmed,
           replyTo: {
-            messageId: replyingTo.messageId,
-            senderId: replyingTo.senderId,
-            text: replyingTo.text,
-            type: replyingTo.type,
+            messageId: replyTarget.messageId,
+            senderId: replyTarget.senderId,
+            text: replyTarget.text,
+            type: replyTarget.type,
           },
         });
-        setReplyingTo(null);
-        setInput('');
-        setShowEmoji(false);
         await checkAndTriggerAutoResponder();
       } else {
-        // Server enforces block rules — just send normally. Blocked messages
-        // are filtered by the backend for the other party.
+        // Clear input immediately — sendMessage does an optimistic update so
+        // the message is already visible; no need to wait for success first.
+        setInput('');
+        setShowEmoji(false);
         const success = await sendMessage(trimmed);
         if (success) {
-          setInput('');
-          setShowEmoji(false);
           await checkAndTriggerAutoResponder();
         }
       }
@@ -1008,10 +1012,8 @@ export default function ChatScreen() {
     const message = messages.find(m => m.messageId === selectedMessageId);
     if (message?.text) {
       try {
-        // Use React Native's built-in Clipboard (available in react-native)
-        const { Clipboard } = await import('react-native');
-        Clipboard.setString(message.text);
-        console.log('[ChatScreen] Message copied to clipboard');
+        const Clipboard = await import('expo-clipboard');
+        await Clipboard.setStringAsync(message.text);
         Alert.alert('Copied', 'Message copied to clipboard');
         handleClearSelection();
       } catch (error) {

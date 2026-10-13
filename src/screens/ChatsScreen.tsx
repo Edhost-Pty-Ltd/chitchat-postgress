@@ -5,7 +5,7 @@ import {
   TextInput, Modal, Pressable, ScrollView, Animated,
   ActivityIndicator, Image, Platform,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -674,9 +674,17 @@ export default function ChatsScreen() {
   const { bevel, iconButton }          = useGlass();
   const insets = useSafeAreaInsets();
 
-  const { chats, loading: chatsLoading } = useChats(userId);
+  const { chats, loading: chatsLoading, reload: reloadChats } = useChats(userId);
   const { contacts, loading: contactsLoading, reload: reloadContacts, hasPermission, error: contactsError } = useContacts();
   const { contactStatuses } = useStatus(userId);
+
+  // Refetch the chat list every time this screen comes into focus so the
+  // last message + unread count are always current after leaving a chat.
+  useFocusEffect(
+    useCallback(() => {
+      reloadChats();
+    }, [reloadChats]),
+  );
 
   // Create a map of userId -> hasStatus for quick lookup
   const userStatusMap = useMemo(() => {
@@ -712,19 +720,35 @@ export default function ChatsScreen() {
     return map;
   }, [contacts]);
 
+  // Build uid → contact map for direct UID-based name lookup (registered contacts only)
+  const uidToContact = useMemo(() => {
+    const map = new Map<string, { displayName: string; phone: string; photoURL?: string; contactPhotoUri?: string }>();
+    for (const c of contacts) {
+      if (c.isSaved) {
+        map.set(c.userId, {
+          displayName: c.displayName,
+          phone: c.phone,
+          photoURL: c.firebasePhotoURL,
+          contactPhotoUri: c.photoUri,
+        });
+      }
+    }
+    return map;
+  }, [contacts]);
+
   // Build firestoreUsers map: userId → { displayName, phone, photoURL }
   const firestoreUsersMap = useMemo(() => {
     const map = new Map<string, { displayName: string; phone: string; photoURL?: string; contactPhotoUri?: string }>();
-    // Add all contacts (displayName from useContacts already has correct priority)
+    // Registered contacts first — keyed by their Firebase UID
     for (const c of contacts) {
-      map.set(c.userId, { 
-        displayName: c.displayName, 
+      map.set(c.userId, {
+        displayName: c.displayName,
         phone: c.phone,
         photoURL: c.firebasePhotoURL,
         contactPhotoUri: c.photoUri,
       });
     }
-    // Add users not in contacts (fetched separately from Firestore)
+    // Non-contact members fetched from the backend
     for (const [uid, info] of memberInfo) {
       if (!map.has(uid)) {
         map.set(uid, info);
@@ -758,12 +782,16 @@ export default function ChatsScreen() {
         try {
           const res = await endpoints.getUser(uid);
           if (res.ok) {
+            // Normalize the phone so contactsMap lookup (always E.164 with +) works
+            const { normalizePhone } = await import('../utils/phoneUtils');
+            const phone = normalizePhone(res.data.phoneNumber ?? '') ?? (res.data.phoneNumber ?? '');
             newInfo.set(uid, {
-              displayName: res.data.displayName ?? res.data.phoneNumber ?? uid,
-              phone: res.data.phoneNumber ?? '',
+              // Never store the raw UID as displayName — fall back to phone or 'Unknown'
+              displayName: res.data.displayName ?? phone ?? 'Unknown',
+              phone,
               photoURL: res.data.avatarObjectKey ?? null,
             });
-            newPrivacy.set(uid, 'Contacts'); // privacy not on public profile; default permissive
+            newPrivacy.set(uid, 'Contacts');
           }
         } catch (_) {}
       }));
@@ -820,7 +848,7 @@ export default function ChatsScreen() {
     const q = query.toLowerCase();
     const matched = base.filter((c) => {
       if (!userId) return false;
-      return resolveDisplayName(c, userId, contactsMap, firestoreUsersMap).toLowerCase().includes(q);
+      return resolveDisplayName(c, userId, contactsMap, firestoreUsersMap, uidToContact).toLowerCase().includes(q);
     });
     return sortByRecent(matched);
   }, [tab, directChats, groupChats, query, userId, contactsMap, firestoreUsersMap]);
@@ -865,7 +893,7 @@ export default function ChatsScreen() {
 
   // renderItem is stable — only re-runs when the resolved row data changes
   const renderChat = useCallback(({ item }: { item: ChatPreview }) => {
-    const displayName     = userId ? resolveDisplayName(item, userId, contactsMap, firestoreUsersMap) : 'Unknown';
+    const displayName     = userId ? resolveDisplayName(item, userId, contactsMap, firestoreUsersMap, uidToContact) : 'Unknown';
     const isGroup         = item.type === 'group';
     const otherMemberId   = isGroup ? null : item.members.find((id) => id !== userId);
     const otherUser       = otherMemberId ? firestoreUsersMap.get(otherMemberId) : null;

@@ -112,8 +112,13 @@ export function useRegistration(): UseRegistrationReturn {
       }
 
       const phoneRes = await endpoints.updatePhone(phoneRef.current);
-      if (!phoneRes.ok && phoneRes.error.kind === 'api' && phoneRes.error.status === 409) {
-        throw new Error('That phone number is already registered.');
+      if (!phoneRes.ok) {
+        if (phoneRes.error.kind === 'api' && phoneRes.error.status === 409) {
+          throw new Error('That phone number is already registered.');
+        }
+        // Non-409 failures (network, 500) are non-fatal — the phone can be
+        // updated later. Log the error but continue creating the profile.
+        console.warn('[useRegistration] updatePhone failed (non-fatal):', phoneRes.error.message);
       }
       const res = await endpoints.updateMe({
         displayName:      usernameRef.current,
