@@ -16,7 +16,7 @@ import {
   Image, Alert, Platform, TextInput, Modal,
   KeyboardAvoidingView, Switch, ActivityIndicator,
 } from 'react-native';
-import DatePicker from 'react-native-date-picker';
+import DateTimePickerModal from 'react-native-modal-datetime-picker';
 import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
@@ -1528,14 +1528,7 @@ export default function ProfileScreen() {
         visible={hoursModalOpen}
         transparent
         animationType="slide"
-        onRequestClose={() => {
-          if (pickerVisible) {
-            setPickerVisible(false);
-            setPickerTarget(null);
-          } else {
-            setHoursModalOpen(false);
-          }
-        }}
+        onRequestClose={() => setHoursModalOpen(false)}
       >
         <View style={styles.modalOverlay}>
           <View style={[styles.modalSheet, { maxHeight: '90%' }]}>
@@ -1641,14 +1634,24 @@ export default function ProfileScreen() {
                           )}
                         </View>
                       </View>
-                    );
-                  })}
-                </ScrollView>
-              </>
-            )}
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            </>
           </View>
         </View>
       </Modal>
+
+      {/* ── Time Picker Modal ── */}
+      <DateTimePickerModal
+        isVisible={pickerVisible}
+        mode="time"
+        date={pickerDate}
+        onConfirm={confirmTime}
+        onCancel={() => { setPickerVisible(false); setPickerTarget(null); }}
+        is24Hour={false}
+      />
 
       {/* ── Catalog Share Sheet ── */}
       {shareItem && (
