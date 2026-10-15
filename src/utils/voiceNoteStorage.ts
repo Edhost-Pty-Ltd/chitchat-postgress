@@ -1,7 +1,7 @@
 // ─── Voice Note Storage ───────────────────────────────────────────────────────
-// Uploads voice notes to Firebase Storage via the REST API using
-// expo-file-system/legacy uploadAsync (PUT with BINARY_CONTENT).
-// This avoids atob() which is not available in Hermes on Android.
+// Uploads voice notes to MinIO via the backend presigned-URL pipeline.
+// This replaces the old Firebase Storage REST path, which embedded expiring
+// auth tokens in the download URL and bypassed the S3 authorization layer.
 
 export interface UploadProgress {
   bytesTransferred: number;
@@ -10,53 +10,31 @@ export interface UploadProgress {
 }
 
 export interface UploadResult {
-  downloadUrl: string;
-  storagePath: string;
+  downloadUrl: string;  // S3 object key — resolved to a signed URL at display time
+  storagePath: string;  // same value, kept for API compatibility
 }
 
-async function uploadVoiceNoteReal(
+export async function uploadVoiceNote(
   uri: string,
   chatId: string,
-  messageId: string,
+  _messageId: string,
   onProgress: (progress: UploadProgress) => void,
 ): Promise<UploadResult> {
-  const storagePath = `voiceNotes/${chatId}/${messageId}.m4a`;
+  const { mediaService, fileSize } = await import('../services/mediaService');
 
-  // Get Firebase auth token (no SDK, just the token from the Auth instance)
-  const { getAuth } = await import('@react-native-firebase/auth');
-  const auth = getAuth();
-  const currentUser = auth.currentUser;
-  if (!currentUser) throw new Error('User not authenticated');
-  const token = await currentUser.getIdToken();
-
-  // Use expo-file-system/legacy uploadAsync — sends the file bytes directly via
-  // a native HTTP PUT, no base64 conversion needed (no atob on Hermes risk).
-  const { uploadAsync, FileSystemUploadType } = await import('expo-file-system/legacy');
-
-  const bucketName = 'chitchatbusiness-880ce.firebasestorage.app';
-  const uploadUrl  = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o?name=${encodeURIComponent(storagePath)}`;
-
-  // expo-file-system does not expose upload progress for this upload type.
-  // Fire a synthetic start event so the UI shows activity.
   onProgress({ bytesTransferred: 0, totalBytes: 1, percentage: 0 });
 
-  const result = await uploadAsync(uploadUrl, uri, {
-    httpMethod:  'POST',
-    uploadType:  FileSystemUploadType.BINARY_CONTENT,
-    headers: {
-      Authorization:  `Bearer ${token}`,
-      'Content-Type': 'audio/mp4',
-    },
+  const objectKey = await mediaService.upload(uri, 'chat-voice', {
+    chatId,
+    sizeBytes: await fileSize(uri),
+    contentType: 'audio/mp4',
+    ext: 'm4a',
   });
-
-  if (result.status < 200 || result.status >= 300) {
-    throw new Error(`Upload failed with status ${result.status}`);
-  }
 
   onProgress({ bytesTransferred: 1, totalBytes: 1, percentage: 100 });
 
-  const downloadUrl = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(storagePath)}?alt=media&token=${token}`;
-  return { downloadUrl, storagePath };
+  // Return the object key as both fields. The caller (ChatScreen) passes
+  // downloadUrl to sendVoiceMessage, which stores it as mediaObjectKey.
+  // resolveMessageMedia will sign it on display since it's not an https:// URL.
+  return { downloadUrl: objectKey, storagePath: objectKey };
 }
-
-export const uploadVoiceNote = uploadVoiceNoteReal;

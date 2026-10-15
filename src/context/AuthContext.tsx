@@ -13,6 +13,7 @@ import { startStatusCleanupService, stopStatusCleanupService } from '../services
 import { writePresence } from '../hooks/usePresence';
 import { socketClient } from '../realtime/socket';
 import { endpoints } from '../api/endpoints';
+import { mediaService } from '../services/mediaService';
 import { FirebaseAuthTypes } from '@react-native-firebase/auth'; // Add this import at the top
 const WEB_SESSION_TIMEOUT_MS = 4 * 60 * 60 * 1000; // 4 hours
 
@@ -205,12 +206,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // — does NOT block navigation.
     const currentUser = getAuth().currentUser;
     if (currentUser) {
-      endpoints.getMe().then((res) => {
+      endpoints.getMe().then(async (res) => {
         if (!res.ok) return;
-        const name  = res.data.displayName || '';
-        const photo = res.data.avatarObjectKey || null;
-        if (name)  { setDisplayNameState(name);  AsyncStorage.setItem(KEYS.displayName, name); }
-        if (photo) { setAvatarUriState(photo);   AsyncStorage.setItem(KEYS.avatarUri, photo); }
+        const name      = res.data.displayName || '';
+        const objectKey = res.data.avatarObjectKey || null;
+        if (name) { setDisplayNameState(name); AsyncStorage.setItem(KEYS.displayName, name); }
+        if (objectKey) {
+          // Resolve the raw S3 object key to a presigned download URL so
+          // components can use it directly as an <Image> source URI.
+          try {
+            const signedUrl = await mediaService.getDownloadUrl(objectKey);
+            const uri = signedUrl ?? objectKey;
+            setAvatarUriState(uri);
+            AsyncStorage.setItem(KEYS.avatarUri, uri);
+          } catch {
+            setAvatarUriState(objectKey);
+            AsyncStorage.setItem(KEYS.avatarUri, objectKey);
+          }
+        }
       }).catch(() => {});
 
       // Mark online and start cleanup — non-blocking

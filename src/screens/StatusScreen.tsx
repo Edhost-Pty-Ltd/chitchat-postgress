@@ -1,7 +1,8 @@
 ﻿// ─── Screen: Status ──────────────────────────────────────────────────────────
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { View, FlatList, TouchableOpacity, StyleSheet, Platform, ActivityIndicator, Image } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useFocusEffect } from '@react-navigation/native';
 import { UserAvatar, StatusViewer, CreateStatusModal } from '../components';
 import { endpoints } from '../api/endpoints';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
@@ -62,7 +63,15 @@ export default function StatusScreen() {
     createStatus,
     markAsViewed,
     deleteStatus,
+    reload: reloadStatuses,
   } = useStatus(userId);
+
+  // Reload whenever this tab comes into focus so the status list is always fresh.
+  useFocusEffect(
+    useCallback(() => {
+      reloadStatuses();
+    }, [reloadStatuses]),
+  );
 
   // ── Prefetch media so the viewer opens without a black frame ─────────────
   // Fire-and-forget: start downloading image URLs into the RN image cache as

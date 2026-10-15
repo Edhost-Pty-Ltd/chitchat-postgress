@@ -455,14 +455,16 @@ export default function ProfileScreen() {
       try {
         // Show local URI immediately for instant feedback
         await setAvatarUri(uri);
-        // Upload to object store, then persist the returned key
+        // Upload to object store, then resolve to a signed URL and persist
         const { mediaService, fileSize } = await import('../services/mediaService');
         const sizeBytes = await fileSize(uri);
         const objectKey = await mediaService.upload(uri, 'avatar', { sizeBytes });
         await endpoints.updateMe({ avatarObjectKey: objectKey });
+        // Replace local URI with the signed download URL so it survives app restarts
+        const signedUrl = await mediaService.getDownloadUrl(objectKey);
+        if (signedUrl) await setAvatarUri(signedUrl);
       } catch (error: any) {
         console.error('[ProfileScreen] Error saving avatar:', error);
-        // Local display is already updated — the next load will re-fetch the stored key
       }
     }
   };

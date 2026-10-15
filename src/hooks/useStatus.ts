@@ -1,7 +1,7 @@
 // ─── Hook: useStatus ──────────────────────────────────────────────────────────
 // Status management via backend REST + Socket.IO.
 
-import { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import type { FireStatus } from '../types';
 import { endpoints, type BackendStatus } from '../api/endpoints';
 import { socketClient } from '../realtime/socket';
@@ -28,9 +28,9 @@ function backendToFireStatus(s: BackendStatus): FireStatus {
     displayName:     s.displayName ?? '',
     userPhone:       s.userPhone ?? null,
     photoURL:        null,
-    mediaUrl:        s.mediaObjectKey,
+    mediaUrl:        s.mediaObjectKey,        // raw key — resolved by resolveStatusMedia
     mediaType:       s.mediaType,
-    thumbnailUrl:    s.thumbnailObjectKey,
+    thumbnailUrl:    s.thumbnailObjectKey,    // raw key — resolved by resolveStatusMedia
     durationMs:      s.durationMs ?? IMAGE_STATUS_DURATION_MS,
     caption:         s.caption,
     backgroundColor: s.backgroundColor,
@@ -42,11 +42,31 @@ function backendToFireStatus(s: BackendStatus): FireStatus {
   };
 }
 
+/** Resolve raw S3 object keys on FireStatus objects to presigned download URLs in-place. */
+async function resolveStatusMedia(statuses: FireStatus[]): Promise<void> {
+  const keys = new Set<string>();
+  for (const s of statuses) {
+    if (s.mediaUrl    && !/^https?:/.test(s.mediaUrl))    keys.add(s.mediaUrl);
+    if (s.thumbnailUrl && !/^https?:/.test(s.thumbnailUrl)) keys.add(s.thumbnailUrl);
+  }
+  if (keys.size === 0) return;
+  const { mediaService } = await import('../services/mediaService');
+  const resolved = await mediaService.getDownloadUrls(Array.from(keys));
+  for (const s of statuses) {
+    if (s.mediaUrl    && resolved[s.mediaUrl])    s.mediaUrl    = resolved[s.mediaUrl];
+    if (s.thumbnailUrl && resolved[s.thumbnailUrl]) s.thumbnailUrl = resolved[s.thumbnailUrl];
+  }
+}
+
 export function useStatus(currentUserId: string | null) {
   const [myStatuses,      setMyStatuses]      = useState<FireStatus[]>([]);
   const [contactStatuses, setContactStatuses] = useState<StatusGroup[]>([]);
   const [loading,         setLoading]         = useState(true);
   const [error,           setError]           = useState<string | null>(null);
+
+  // Keep a stable ref to `load` so createStatus / deleteStatus can call it
+  // without being listed as a useCallback dependency.
+  const loadRef = React.useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     if (!currentUserId) { setLoading(false); return; }
@@ -56,24 +76,29 @@ export function useStatus(currentUserId: string | null) {
       const res = await endpoints.listStatuses();
       if (!active) return;
       if (res.ok) {
-        setMyStatuses(res.data.myStatuses.map(backendToFireStatus));
-        setContactStatuses(
-          res.data.contactStatuses.map((g) => {
-            const statuses = g.statuses.map(backendToFireStatus);
-            return {
-              userId:          g.userId,
-              displayName:     g.displayName ?? '',
-              userPhone:       statuses[0]?.userPhone ?? null,
-              photoURL:        null,
-              statuses,
-              hasUnviewed:     g.hasUnviewed,
-              latestTimestamp: statuses.reduce(
-                (max, s) => (s.createdAt > max ? s.createdAt : max),
-                statuses[0]?.createdAt ?? new Date(0),
-              ),
-            };
-          }),
-        );
+        const mine   = res.data.myStatuses.map(backendToFireStatus);
+        const others = res.data.contactStatuses.map((g) => {
+          const statuses = g.statuses.map(backendToFireStatus);
+          return {
+            userId:          g.userId,
+            displayName:     g.displayName ?? '',
+            userPhone:       statuses[0]?.userPhone ?? null,
+            photoURL:        null,
+            statuses,
+            hasUnviewed:     g.hasUnviewed,
+            latestTimestamp: statuses.reduce(
+              (max, s) => (s.createdAt > max ? s.createdAt : max),
+              statuses[0]?.createdAt ?? new Date(0),
+            ),
+          };
+        });
+
+        // Resolve all raw S3 object keys to presigned download URLs so
+        // StatusViewer receives real https:// URIs, not bare storage keys.
+        await resolveStatusMedia([...mine, ...others.flatMap((g) => g.statuses)]).catch(() => {});
+
+        setMyStatuses(mine);
+        setContactStatuses(others);
       } else {
         setError(String(res.error.code));
       }
@@ -81,11 +106,12 @@ export function useStatus(currentUserId: string | null) {
     };
 
     void socketClient.connect().then(load).catch(() => load());
+    loadRef.current = load;
     const unsubs = [
       socketClient.subscribe('status:update', () => void load()),
       socketClient.subscribe('status:viewed', () => void load()),
     ];
-    return () => { active = false; unsubs.forEach((u) => u()); };
+    return () => { active = false; loadRef.current = null; unsubs.forEach((u) => u()); };
   }, [currentUserId]);
 
   const createStatus = useCallback(
@@ -117,6 +143,8 @@ export function useStatus(currentUserId: string | null) {
         durationMs: finalDuration, visibility: 'everyone',
       });
       if (!res.ok) throw new Error(`createStatus failed: ${res.error.message}`);
+      // Reload immediately so myStatuses updates without waiting for a socket event.
+      void loadRef.current?.();
       return res.data.statusId;
     },
     [currentUserId],
@@ -144,8 +172,12 @@ export function useStatus(currentUserId: string | null) {
     // Server-side scheduled job handles expiry (Slice 7).
   }, []);
 
+  const reload = useCallback(() => {
+    void loadRef.current?.();
+  }, []);
+
   return {
     myStatuses, contactStatuses, loading, error,
-    createStatus, markAsViewed, deleteStatus, deleteExpiredStatuses,
+    createStatus, markAsViewed, deleteStatus, deleteExpiredStatuses, reload,
   };
 }

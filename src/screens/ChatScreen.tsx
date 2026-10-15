@@ -61,7 +61,7 @@ import { clearLocalMessages } from '../hooks/useLocalMessages';
 import { useContacts, AppContact } from '../hooks/useContacts';
 
 import { uploadVoiceNote, UploadProgress } from '../utils/voiceNoteStorage';
-import { sendVoiceMessage, sendImageMessage, sendFileMessage } from '../hooks/useChatActions';
+import { sendVoiceMessage, sendImageMessage, sendVideoMessage, sendFileMessage } from '../hooks/useChatActions';
 import { parseSystemMessage } from '../utils/systemMessageParser';
 import { getDateLabel, groupMessagesByDate } from '../utils/dateUtils';
 import { useTypingIndicator } from '../hooks/useTypingIndicator';
@@ -362,7 +362,7 @@ export default function ChatScreen() {
   const [activeCatalogCol,    setActiveCatalogCol]    = useState<string | null>(null); // 'all' | colId
 
   // ── Messages — real-time Firestore stream ───────────────────────
-  const { messages, loading, sendMessage } = useMessages(chatId, userId);
+  const { messages, loading, sendMessage, addOptimisticMedia, removeOptimistic } = useMessages(chatId, userId);
 
   // ── Filter out blocked messages for recipient ───────────────────
   // If I receive a message that was sent while I was blocked, don't show it
@@ -1188,6 +1188,10 @@ export default function ChatScreen() {
     try {
       console.log('[ChatScreen] Uploading image:', uri);
 
+      // Show the image immediately as an optimistic bubble using the local URI.
+      // The server echo (message:new) will replace it with the resolved signed URL.
+      const optimisticId = addOptimisticMedia('image', uri);
+
       // Compress before upload
       const compressedUri = await compressImage(uri);
 
@@ -1197,11 +1201,11 @@ export default function ChatScreen() {
         compressedUri,
         (progress) => {
           setImageUploadProgress(progress);
-          console.log('[ChatScreen] Image upload progress:', progress);
         }
       );
 
       if (!uploadResult.success) {
+        removeOptimistic(optimisticId);
         Alert.alert('Upload Failed', 'Could not send the image. Please try again.');
       } else {
         await checkAndTriggerAutoResponder();
@@ -1264,17 +1268,23 @@ export default function ChatScreen() {
 
   const openGallery = async () => {
     try {
-      // Request media library permission first
-      const { granted } = mediaLibraryPermission ?? await requestMediaLibraryPermission();
-      if (!granted) {
-        Alert.alert('Permission needed', 'Allow photo access to select images from your gallery.');
-        return;
+      // expo-image-picker v57 on iOS 14+ uses the native PHPickerViewController
+      // which doesn't require a permission prompt — just launch it directly.
+      // On older iOS / Android, request the media library permission first.
+      if (Platform.OS === 'android') {
+        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert('Permission needed', 'Allow photo access to select images and videos from your gallery.');
+          return;
+        }
       }
 
+      // Open gallery with both images and videos — same as WhatsApp
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: 'images',
-        allowsMultipleSelection: true, // Enable multiple selection
+        mediaTypes: ['images', 'videos'],
+        allowsMultipleSelection: true,
         quality: 0.85,
+        videoMaxDuration: 300,      // 5 min cap
       });
 
       if (!result.canceled && result.assets.length > 0 && userId) {
@@ -1282,40 +1292,46 @@ export default function ChatScreen() {
         setUploadingImage(true);
         setImageUploadProgress(0);
 
-        // Upload images sequentially
         for (let i = 0; i < result.assets.length; i++) {
-          const imageUri = result.assets[i].uri;
-          console.log(`[ChatScreen] Uploading image ${i + 1}/${result.assets.length}`);
+          const asset = result.assets[i];
+          const isVideo = asset.type === 'video';
+          console.log(`[ChatScreen] Uploading ${isVideo ? 'video' : 'image'} ${i + 1}/${result.assets.length}`);
 
           try {
-            // Reset progress for each image
             setImageUploadProgress(0);
 
-            const compressedUri = await compressImage(imageUri);
-
-            const uploadResult = await sendImageMessage(
-              chatId,
-              userId,
-              compressedUri,
-              (progress) => {
-                setImageUploadProgress(progress);
-                console.log(`[ChatScreen] Image ${i + 1} upload progress:`, progress);
+            if (isVideo) {
+              const optimisticId = addOptimisticMedia('video', asset.uri);
+              const uploadResult = await sendVideoMessage(
+                chatId,
+                userId,
+                asset.uri,
+                undefined,
+              );
+              if (!uploadResult.success) {
+                removeOptimistic(optimisticId);
+                Alert.alert('Upload Failed', `Video ${i + 1} could not be sent.`);
               }
-            );
-
-            if (!uploadResult.success) {
-              console.error(`[ChatScreen] Image ${i + 1} upload failed`);
-              Alert.alert('Upload Failed', `Image ${i + 1} could not be sent. Continuing with others...`);
             } else {
-              console.log(`[ChatScreen] Image ${i + 1} uploaded successfully`);
+              const optimisticId = addOptimisticMedia('image', asset.uri);
+              const compressedUri = await compressImage(asset.uri);
+              const uploadResult = await sendImageMessage(
+                chatId,
+                userId,
+                compressedUri,
+                (progress) => setImageUploadProgress(progress),
+              );
+              if (!uploadResult.success) {
+                removeOptimistic(optimisticId);
+                Alert.alert('Upload Failed', `Image ${i + 1} could not be sent.`);
+              }
             }
           } catch (error) {
-            console.error(`[ChatScreen] Image ${i + 1} upload error:`, error);
-            Alert.alert('Error', `Failed to upload image ${i + 1}. Continuing with others...`);
+            console.error(`[ChatScreen] Media ${i + 1} upload error:`, error);
+            Alert.alert('Error', `Failed to upload ${isVideo ? 'video' : 'image'} ${i + 1}.`);
           }
         }
 
-        console.log('[ChatScreen] All images processed');
         setUploadingImage(false);
         setImageUploadProgress(0);
         await checkAndTriggerAutoResponder();
@@ -1324,7 +1340,7 @@ export default function ChatScreen() {
       console.error('[ChatScreen] Gallery error:', error);
       setUploadingImage(false);
       setImageUploadProgress(0);
-      Alert.alert('Error', 'Failed to select or upload images.');
+      Alert.alert('Error', 'Failed to open gallery.');
     }
   };
 
@@ -1665,6 +1681,12 @@ export default function ChatScreen() {
                 <AppText fixedColor style={styles.timeIn}>{formatTime(item.timestamp)}</AppText>
               </View>
             </View>
+          ) : item.type === 'image' ? (
+            // Image sent but URL not yet resolved — show a loading placeholder
+            <View style={[styles.bubble, styles.bubbleIn, styles.imageBubble, styles.imagePlaceholder]}>
+              <ActivityIndicator size="small" color={COLORS.blue} />
+              <AppText fixedColor style={styles.timeIn}>{formatTime(item.timestamp)}</AppText>
+            </View>
           ) : (
             <View style={[styles.bubble, styles.bubbleIn]}>
               {item.replyTo && (
@@ -1759,6 +1781,12 @@ export default function ChatScreen() {
                   fixedColor
                 />
               </View>
+            </View>
+          ) : item.type === 'image' ? (
+            // Image uploading or URL not yet resolved — show a loading placeholder
+            <View style={[styles.bubble, styles.bubbleOut, styles.imageBubble, styles.imagePlaceholder]}>
+              <ActivityIndicator size="small" color="#ffffff" />
+              <AppText fixedColor style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
             </View>
           ) : (
             <View style={[styles.bubble, styles.bubbleOut]}>
@@ -2453,8 +2481,9 @@ export default function ChatScreen() {
           <AppText style={[styles.attachTitle, { color: textColor, fontFamily }]}>Share</AppText>
           <View style={styles.attachGrid}>
             {[
-              { icon: 'document-outline' as const, label: 'Files',    action: openDocuments },
-              { icon: 'camera-outline'   as const, label: 'Camera',   action: () => { setShowAttach(false); openCamera(); } },
+              { icon: 'images-outline'   as const, label: 'Photos & Videos', action: () => { setShowAttach(false); openGallery(); } },
+              { icon: 'document-outline' as const, label: 'Files',           action: openDocuments },
+              { icon: 'camera-outline'   as const, label: 'Camera',          action: () => { setShowAttach(false); openCamera(); } },
             ].map((item) => (
               <TouchableOpacity key={item.label} style={[styles.attachItem, bevel]}
                 onPress={item.action} activeOpacity={0.8}>
@@ -3906,6 +3935,13 @@ const styles = StyleSheet.create({
     width: 200,
     height: 200,
     borderRadius: 12,
+  },
+  imagePlaceholder: {
+    width: 200,
+    height: 200,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.08)',
   },
   imageTimeOverlay: {
     position: 'absolute',

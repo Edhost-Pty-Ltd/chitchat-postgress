@@ -25,6 +25,10 @@ const schema = z.object({
   S3_ACCESS_KEY_ID: z.string().min(1),
   S3_SECRET_ACCESS_KEY: z.string().min(1),
   S3_FORCE_PATH_STYLE: booleanish.default(true),
+  // Public-facing MinIO endpoint embedded in presigned URLs. Defaults to
+  // S3_ENDPOINT when unset (fine for localhost dev). Set to the LAN IP when
+  // the phone needs to reach MinIO directly (e.g. http://10.0.0.131:9000).
+  S3_PUBLIC_ENDPOINT: z.string().optional(),
 
   // Firebase Admin: one of PATH or JSON must be present (checked below).
   FIREBASE_SERVICE_ACCOUNT_PATH: z.string().optional(),

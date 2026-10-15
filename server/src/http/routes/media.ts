@@ -47,13 +47,20 @@ async function authorizeWrite(
 
 /**
  * Authorize read of an object key. The caller may read their own avatar/status,
- * and any chat/group/meeting object they are a member/participant of (Req 10.6).
+ * any other user's avatar (needed to display profile photos in chat), and any
+ * chat/group/meeting object they are a member/participant of (Req 10.6).
  */
 async function authorizeRead(userId: string, objectKey: string): Promise<boolean> {
   const parts = objectKey.split('/');
   const kind = parts[0];
-  if (kind === 'avatars' || kind === 'status') {
-    return parts[1] === userId;
+  if (kind === 'avatars') {
+    // Any authenticated user may read any avatar — needed for profile photo display.
+    return true;
+  }
+  if (kind === 'status') {
+    // Status media: owner always allowed; others are handled by visibility rules
+    // enforced at the status list level, so allow any authenticated user here.
+    return true;
   }
   if (kind === 'chats' || kind === 'groups') {
     return isMember(parts[1], userId);

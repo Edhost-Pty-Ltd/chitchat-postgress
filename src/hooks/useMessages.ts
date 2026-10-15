@@ -89,13 +89,19 @@ async function resolveMessageMedia(messages: FireMessage[]): Promise<void> {
   if (keys.size === 0) return;
   const { mediaService } = await import('../services/mediaService');
   const resolved = await mediaService.getDownloadUrls(Array.from(keys));
-  const map = (v: string | null) => (v && resolved[v] ? resolved[v] : v);
   for (const m of messages) {
-    m.imageUrl    = map(m.imageUrl);
-    m.voiceUrl    = map(m.voiceUrl);
-    m.videoUrl    = map(m.videoUrl);
-    m.fileUrl     = map(m.fileUrl);
-    m.thumbnailUrl = map(m.thumbnailUrl ?? null);
+    // Only replace if we got a real https URL back — leave null rather than
+    // keeping an unresolvable object key that would silently fail to render.
+    const resolve = (v: string | null) => {
+      if (!v) return null;
+      if (/^https?:/.test(v)) return v;          // already a URL, keep it
+      return resolved[v] ?? null;                 // resolved → use it; missing → null
+    };
+    m.imageUrl     = resolve(m.imageUrl);
+    m.voiceUrl     = resolve(m.voiceUrl);
+    m.videoUrl     = resolve(m.videoUrl);
+    m.fileUrl      = resolve(m.fileUrl);
+    m.thumbnailUrl = resolve(m.thumbnailUrl);
   }
 }
 
@@ -151,12 +157,15 @@ export function useMessages(chatId: string | null, currentUserId: string | null)
     const handleMessageNew = (p: any) => {
       if (p?.message?.chatId !== chatId) return;
       const incoming: FireMessage = backendToFireMessage(p.message as BackendMessage);
-      setMessages((prev) => {
-        // Remove any optimistic placeholder (matched by clientId) and deduplicate.
-        const withoutOptimistic = prev.filter(
-          (m) => m.messageId !== incoming.messageId && m.messageId !== p.message.clientId,
-        );
-        return [...withoutOptimistic, incoming];
+      // Resolve any media keys to signed URLs before inserting into state,
+      // so images/voice/video display immediately without waiting for load().
+      resolveMessageMedia([incoming]).catch(() => {}).finally(() => {
+        setMessages((prev) => {
+          const withoutOptimistic = prev.filter(
+            (m) => m.messageId !== incoming.messageId && m.messageId !== p.message.clientId,
+          );
+          return [...withoutOptimistic, incoming];
+        });
       });
       void load(); // background reconcile for read receipts / ordering
     };
@@ -223,5 +232,48 @@ export function useMessages(chatId: string | null, currentUserId: string | null)
     return true;
   }
 
-  return { messages, loading, error, sendMessage };
+  /**
+   * Add an optimistic media bubble immediately (e.g. using the local file URI
+   * as imageUrl) so the sender sees their image before the upload completes.
+   * Returns the temporary clientId so the caller can remove it on failure.
+   */
+  function addOptimisticMedia(
+    type: 'image' | 'video' | 'voice',
+    localUri: string,
+    extra?: Partial<FireMessage>,
+  ): string {
+    if (!currentUserId) return '';
+    const clientId = `${currentUserId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const optimistic: FireMessage = {
+      messageId:    clientId,
+      senderId:     currentUserId,
+      text:         null,
+      imageUrl:     type === 'image' ? localUri : null,
+      voiceUrl:     type === 'voice' ? localUri : null,
+      videoUrl:     type === 'video' ? localUri : null,
+      fileUrl:      null,
+      type,
+      timestamp:    new Date(),
+      expiresAt:    null,
+      readBy:       [],
+      deliveredTo:  [],
+      duration:     extra?.duration ?? null,
+      fileName:     null,
+      fileSize:     null,
+      mimeType:     null,
+      thumbnailUrl: extra?.thumbnailUrl ?? null,
+      edited:       false,
+      editedAt:     null,
+      replyTo:      null,
+      ...extra,
+    };
+    setMessages((prev) => [...prev, optimistic]);
+    return clientId;
+  }
+
+  function removeOptimistic(clientId: string): void {
+    setMessages((prev) => prev.filter((m) => m.messageId !== clientId));
+  }
+
+  return { messages, loading, error, sendMessage, addOptimisticMedia, removeOptimistic };
 }

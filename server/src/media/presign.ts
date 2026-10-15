@@ -24,6 +24,9 @@ const LIMITS: Record<MediaCategory, { maxBytes: number; prefixes: string[] }> = 
 };
 
 let client: S3Client | null = null;
+let publicClient: S3Client | null = null;
+
+/** Internal client — used for operations like DeleteObject that run server-side. */
 function s3(): S3Client {
   if (!client) {
     const env = getEnv();
@@ -38,6 +41,29 @@ function s3(): S3Client {
     });
   }
   return client;
+}
+
+/**
+ * Public client — used to sign presigned URLs. When S3_PUBLIC_ENDPOINT is set
+ * (e.g. http://10.0.0.165:9000 for LAN device testing) URLs are signed with
+ * that endpoint so the phone can verify the signature when it uploads directly.
+ * Signing with localhost and then rewriting the host breaks the signature.
+ */
+function s3Public(): S3Client {
+  if (!publicClient) {
+    const env = getEnv();
+    const endpoint = env.S3_PUBLIC_ENDPOINT ?? env.S3_ENDPOINT;
+    publicClient = new S3Client({
+      region: env.S3_REGION,
+      endpoint,
+      forcePathStyle: env.S3_FORCE_PATH_STYLE,
+      credentials: {
+        accessKeyId: env.S3_ACCESS_KEY_ID,
+        secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+      },
+    });
+  }
+  return publicClient;
 }
 
 export class MediaAuthError extends Error {
@@ -112,8 +138,10 @@ export interface UploadTarget {
 /** Issue a presigned PUT URL (expires ≤ 15 min, Req 10.1, 10.4). */
 export async function presignUpload(objectKey: string, contentType: string): Promise<UploadTarget> {
   const env = getEnv();
+  // Sign with the public client so the URL hostname matches what the device
+  // will send in the Host header — a hostname mismatch breaks the signature.
   const url = await getSignedUrl(
-    s3(),
+    s3Public(),
     new PutObjectCommand({ Bucket: env.S3_BUCKET, Key: objectKey, ContentType: contentType }),
     { expiresIn: UPLOAD_URL_TTL_SEC },
   );
@@ -127,9 +155,11 @@ export async function presignUpload(objectKey: string, contentType: string): Pro
 /** Issue a presigned GET URL for a stored object (Req 10.6). */
 export async function presignDownload(objectKey: string): Promise<string> {
   const env = getEnv();
-  return getSignedUrl(s3(), new GetObjectCommand({ Bucket: env.S3_BUCKET, Key: objectKey }), {
-    expiresIn: DOWNLOAD_URL_TTL_SEC,
-  });
+  return getSignedUrl(
+    s3Public(),
+    new GetObjectCommand({ Bucket: env.S3_BUCKET, Key: objectKey }),
+    { expiresIn: DOWNLOAD_URL_TTL_SEC },
+  );
 }
 
 /** Delete an object from the store (Req 10.10). */
