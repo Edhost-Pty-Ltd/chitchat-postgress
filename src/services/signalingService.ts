@@ -172,6 +172,9 @@ export class SignalingService {
         direction,
         status,
         duration,
+        // Missed incoming calls start as unseen so the badge shows on the
+        // Calls tab. CallsScreen marks them seen when the user opens the tab.
+        seen: direction === 'incoming' && status === 'missed' ? false : true,
         timestamp: firestore.FieldValue.serverTimestamp(),
       });
     console.log('[SignalingService] Call saved to history:', { userId, callId });

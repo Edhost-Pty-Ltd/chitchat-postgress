@@ -1517,15 +1517,27 @@ export default function ChatsScreen() {
   // The chat list should only render once names can be resolved. A direct chat
   // is "ready" when its other member is present in firestoreUsersMap (from
   // contacts or the async member fetch). This prevents the flash of "Unknown".
+  // Safety net: never let name resolution block the list indefinitely. If
+  // names haven't resolved within a few seconds (e.g. a member doc is missing
+  // or the network stalls), render anyway — unresolved names fall back to the
+  // phone number.
+  const [forceNamesReady, setForceNamesReady] = useState(false);
+  useEffect(() => {
+    if (!chats.length) return;
+    const t = setTimeout(() => setForceNamesReady(true), 3000);
+    return () => clearTimeout(t);
+  }, [chats.length]);
+
   const namesReady = useMemo(() => {
     if (!userId) return false;
+    if (forceNamesReady) return true;
     for (const chat of chats) {
       if ((chat.type ?? 'direct') === 'group') continue;
       const otherId = chat.members.find((id) => id !== userId);
       if (otherId && !firestoreUsersMap.has(otherId)) return false;
     }
     return true;
-  }, [chats, userId, firestoreUsersMap]);
+  }, [chats, userId, firestoreUsersMap, forceNamesReady]);
 
   useEffect(() => {
     if (!chats.length || !userId) return;
@@ -1559,8 +1571,22 @@ export default function ChatsScreen() {
               photoURL: data.photoURL || null,
             });
             newPrivacy.set(uid, data.privacyProfilePhoto ?? 'Contacts');
+          } else {
+            // Member doc doesn't exist (e.g. a legacy/synthetic chat whose
+            // "member" id is actually a phone number, or a deleted account).
+            // Still record an entry so this member resolves — otherwise
+            // `namesReady` would block the whole chat list forever. Falls back
+            // to showing the id/phone as the name.
+            newInfo.set(uid, {
+              displayName: uid,
+              phone: uid.startsWith('+') ? uid : '',
+              photoURL: null,
+            });
           }
-        } catch (_) {}
+        } catch (_) {
+          // On a fetch error, still record a fallback so the list isn't blocked.
+          newInfo.set(uid, { displayName: uid, phone: uid.startsWith('+') ? uid : '', photoURL: null });
+        }
       }
 
       setMemberInfo(newInfo);
@@ -2053,6 +2079,24 @@ export default function ChatsScreen() {
       });
     }
 
+    // Unsaved contact → offer to add it. Opens the Chat with the add-contact
+    // sheet (name/surname form) so it matches the inbox/profile flow.
+    if (!pc.isGroup && !pc.isSavedContact && pc.otherUserId) {
+      list.push({
+        key: 'addContact', label: 'Add to contacts', icon: 'person-add-outline',
+        onPress: () => {
+          const ref = pc; setPreviewChat(null);
+          setTimeout(() => {
+            navigation.navigate('Chat', {
+              chatId: ref.chatId, displayName: ref.displayName, isGroup: ref.isGroup,
+              otherUserId: ref.otherUserId, otherUserPhoto: ref.otherUserPhoto ?? null,
+              openAddContact: true,
+            } as any);
+          }, 350);
+        },
+      });
+    }
+
     list.push({
       key: 'clear', label: 'Clear chat', icon: 'brush-outline',
       onPress: () => {
@@ -2267,8 +2311,8 @@ export default function ChatsScreen() {
                   } as any);
                 },
               },
-              !actionChat.isSavedContact && !actionChat.isGroup && !!actionChat.otherUserPhone ? {
-                icon: 'person-add-outline', label: 'Create contact', color: COLORS.blue,
+              !actionChat.isSavedContact && !actionChat.isGroup && !!actionChat.otherUserId ? {
+                icon: 'person-add-outline', label: 'Add to contacts', color: COLORS.blue,
                 onPress: () => {
                   const ac = actionChat;
                   setActionChat(null);
@@ -2473,7 +2517,10 @@ export default function ChatsScreen() {
 
       {tab === 'Broadcast' ? (
         <BroadcastScreen />
-      ) : (chatsLoading || !namesReady) ? (
+      ) : (chats.length === 0 && (chatsLoading || !namesReady)) ? (
+        // Only show the spinner when we have nothing cached/loaded yet.
+        // Once there are chats (from cache or the live listener), render the
+        // list immediately — no "Loading chats…" flash on launch.
         <View style={styles.emptyWrap}>
           <ActivityIndicator size="large" color={COLORS.blue} />
           <Text style={styles.emptyText}>Loading chats…</Text>

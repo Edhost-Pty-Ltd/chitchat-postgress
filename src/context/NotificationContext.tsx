@@ -3,10 +3,27 @@
 import React, {
   createContext, useContext, useState, useCallback, useRef, useEffect,
 } from 'react';
-import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 import { useAuth } from '../hooks/useAuth';
 import { useNotificationSync } from '../hooks/useNotificationSync';
+
+// Load expo-notifications defensively. On a mismatched/not-ready native build
+// its top-level `new NativeEventEmitter()` can throw and crash app startup, so
+// we guard the require and fall back to no-op methods.
+let Notifications: any = null;
+try {
+  Notifications = require('expo-notifications');
+} catch (err) {
+  console.warn('[NotificationContext] expo-notifications unavailable:', err);
+  Notifications = {
+    setNotificationChannelAsync: async () => {},
+    getPermissionsAsync: async () => ({ status: 'denied' }),
+    requestPermissionsAsync: async () => ({ status: 'denied' }),
+    scheduleNotificationAsync: async () => {},
+    setBadgeCountAsync: async () => {},
+    AndroidImportance: { MAX: 5 },
+  };
+}
 
 // NOTE: setNotificationHandler is already configured in usePushNotifications.ts.
 // We do NOT call it here again — calling it twice causes a render crash.

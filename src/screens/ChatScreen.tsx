@@ -12,6 +12,8 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy'; // use 'expo-file-system' on Expo SDK < 54
+import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import QRCode from 'react-native-qrcode-svg';
 import { NotificationTestPanel } from '../components/NotificationTestPanel';
@@ -20,17 +22,31 @@ import { NotificationTestPanel } from '../components/NotificationTestPanel';
 let CameraView: any = null;
 let useCameraPermissions: any = null;
 let useMediaLibraryPermissions: any = null;
+let useVideoPlayer: any = (_src: any, _setup?: (p: any) => void) => ({ replace: () => {}, play: () => {}, pause: () => {} });
+let VideoView: any = 'View';
 
 if (Platform.OS !== 'web') {
   try {
     const camera = require('expo-camera');
     CameraView = camera.CameraView;
     useCameraPermissions = camera.useCameraPermissions;
+  } catch (err) {
+    console.warn('[ChatScreen] expo-camera not available:', err);
+  }
 
+  try {
     const mediaLibrary = require('expo-media-library');
     useMediaLibraryPermissions = mediaLibrary.usePermissions;
   } catch (err) {
-    console.warn('[ChatScreen] Native modules not available:', err);
+    console.warn('[ChatScreen] expo-media-library not available:', err);
+  }
+
+  try {
+    const video = require('expo-video');
+    useVideoPlayer = video.useVideoPlayer;
+    VideoView = video.VideoView;
+  } catch (err) {
+    console.warn('[ChatScreen] expo-video not available:', err);
   }
 } else {
   // Web fallbacks
@@ -43,6 +59,10 @@ import { db } from '../config/firebase';
 import { Avatar } from '../components';
 import { VoiceMessageBubble } from '../components/VoiceMessageBubble';
 import { FileMessageBubble } from '../components/FileMessageBubble';
+import { OrderBubble } from '../components/OrderBubble';
+import { ContactBubble } from '../components/ContactBubble';
+import { PollBubble } from '../components/PollBubble';
+import { CreatePollModal } from '../components/CreatePollModal';
 
 import { VoiceRecordingOverlay } from '../components/VoiceRecordingOverlay';
 import { ForwardModal } from '../components/ForwardModal';
@@ -62,7 +82,7 @@ import { fetchUserPrivacySettings } from '../hooks/usePrivacySettings';
 import { useContacts, AppContact } from '../hooks/useContacts';
 
 import { uploadVoiceNote, UploadProgress } from '../utils/voiceNoteStorage';
-import { sendVoiceMessage, sendImageMessage, sendFileMessage } from '../hooks/useChatActions';
+import { sendVoiceMessage, sendImageMessage, sendFileMessage, sendVideoMessage, sendOrderMessage, sendContactMessage, sendContactsMessage, sendPollMessage, votePollOption, getOrCreateDirectChat } from '../hooks/useChatActions';
 import { parseSystemMessage } from '../utils/systemMessageParser';
 import { normalizePhone } from '../utils/phoneUtils';
 import { useConversationAssignment } from '../hooks/useTeamInbox';
@@ -217,6 +237,90 @@ function getTickIcon(status: TickStatus): {
     case 'read':
       return { icon: 'checkmark-done', color: COLORS.blue };
   }
+}
+
+/** iOS media-library asset URIs can carry a "#<base64>" fragment (e.g. IMG_0007.MOV#YnBsaXN0...)
+ *  which makes Firebase Storage putFile report "file-not-found" and pollutes the
+ *  object name / extension. Always strip it from file:// URIs. */
+function stripFragment(uri: string): string {
+  return uri.startsWith('file://') ? uri.split('#')[0] : uri;
+}
+
+/** Return { ok, size } describing whether a file:// URI points at a real,
+ *  non-empty file on disk. Firebase Storage's putFile() on iOS reports
+ *  storage/unknown when it's handed an empty or missing file, so we verify
+ *  every candidate before upload. */
+async function isFileReadable(uri: string): Promise<{ ok: boolean; size: number }> {
+  try {
+    if (!uri || !uri.startsWith('file://')) return { ok: false, size: 0 };
+    const info: any = await FileSystem.getInfoAsync(uri);
+    if (!info || !info.exists) return { ok: false, size: 0 };
+    const size = typeof info.size === 'number' ? info.size : 0;
+    return { ok: size > 0, size };
+  } catch (err) {
+    console.warn('[isFileReadable] getInfoAsync failed:', err);
+    return { ok: false, size: 0 };
+  }
+}
+
+/** Copy picked/captured/library media into the app's cache folder so uploads
+ *  always read a clean, sandboxed path instead of a raw Photos-library path.
+ *
+ *  iOS note: `expo-file-system`'s copyAsync can silently produce a zero-byte
+ *  destination file when the source is a Photos-library cached asset (which
+ *  is exactly what MediaLibrary.getAssetInfoAsync().localUri returns). We
+ *  therefore verify the result and, if it's empty/missing, re-write the bytes
+ *  via a base64 read → write round-trip (which does not rely on native
+ *  file-to-file copy and works reliably in every case). */
+async function toUploadableUri(uri: string, kind: 'image' | 'video'): Promise<string> {
+  const clean = stripFragment(uri);
+  if (!clean) throw new Error('toUploadableUri: empty URI after stripFragment');
+
+  // Already in our cache and non-empty? Use it as-is.
+  if (FileSystem.cacheDirectory && clean.startsWith(FileSystem.cacheDirectory)) {
+    const existing = await isFileReadable(clean);
+    if (existing.ok) return clean;
+    console.warn('[toUploadableUri] cache file is empty, re-copying:', clean);
+  }
+
+  const ext =
+    clean.split('?')[0].match(/\.([a-zA-Z0-9]+)$/)?.[1]?.toLowerCase() ??
+    (kind === 'video' ? 'mp4' : 'jpg');
+  const dest = `${FileSystem.cacheDirectory}upload_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2, 8)}.${ext}`;
+
+  // Attempt #1: native copyAsync (fast, low memory).
+  try {
+    await FileSystem.copyAsync({ from: clean, to: dest });
+    const check = await isFileReadable(dest);
+    if (check.ok) {
+      console.log('[toUploadableUri] copyAsync OK →', dest, 'size=', check.size);
+      return dest;
+    }
+    console.warn('[toUploadableUri] copyAsync produced empty file (size=' + check.size + '), retrying with base64');
+  } catch (err) {
+    console.warn('[toUploadableUri] copyAsync threw, retrying with base64:', err);
+  }
+
+  // Attempt #2: base64 read → write. Reliable on iOS for Photos-library assets.
+  const base64 = await FileSystem.readAsStringAsync(clean, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+  if (!base64 || base64.length === 0) {
+    throw new Error('toUploadableUri: source file could not be read (empty base64)');
+  }
+  await FileSystem.writeAsStringAsync(dest, base64, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+  const finalCheck = await isFileReadable(dest);
+  if (!finalCheck.ok) {
+    throw new Error(
+      `toUploadableUri: base64 fallback produced invalid file (size=${finalCheck.size})`,
+    );
+  }
+  console.log('[toUploadableUri] base64 fallback OK →', dest, 'size=', finalCheck.size);
+  return dest;
 }
 
 /** Load muted state from AsyncStorage */
@@ -473,7 +577,7 @@ export default function ChatScreen() {
   const userId = user?.uid ?? null;
 
   // ── Cart ────────────────────────────────────────────────────────
-  const { totalItems, formatOrderSummary, clearCart } = useCart();
+  const { items: cartItems, totalItems, totalPrice, clearCart } = useCart();
   const [cartSheetVisible, setCartSheetVisible] = useState(false);
 
   // ── Seller catalog (loaded on mount for 1-on-1 chats) ──
@@ -491,7 +595,7 @@ export default function ChatScreen() {
   const [activeCatalogCol,    setActiveCatalogCol]    = useState<string | null>(null); // 'all' | colId
 
   // ── Messages — real-time Firestore stream ───────────────────────
-  const { messages, loading, sendMessage, clearMessages, deleteMessage } = useMessages(chatId, userId);
+  const { messages, loading, sendMessage, clearMessages, deleteMessage, addOptimisticMessage } = useMessages(chatId, userId);
 
   // ── Filter out blocked messages for recipient ───────────────────
   // If I receive a message that was sent while I was blocked, don't show it
@@ -596,11 +700,27 @@ export default function ChatScreen() {
     : (livePhotoURL === undefined ? otherUserPhoto : livePhotoURL);
 
   // ── Contacts (for share contact feature) ──────────────────────────────────
-  const { contacts: phoneContacts, loading: contactsLoading, hasPermission: contactsPermission } = useContacts();
+  const {
+    contacts: phoneContacts,
+    loading: contactsLoading,
+    hasPermission: contactsPermission,
+    error: contactsError,
+    reload: reloadContacts,
+  } = useContacts();
 
   // The other user's phone number (from their Firestore profile) and whether it
   // is already saved in this device's address book.
-  const otherUserPhone = businessProfile?.phone || '';
+  // Prefer the business profile's phone; fall back to a phone fetched up front
+  // from the other user's doc (so "Add to Contacts" works even before the full
+  // business profile loads, or for users with no business profile).
+  const [resolvedPhone, setResolvedPhone] = useState('');
+  // Lets the user dismiss the "Add contact" banner for this chat ("Not now").
+  const [addContactBannerDismissed, setAddContactBannerDismissed] = useState(false);
+  // Some (legacy/synthetic) chats store the other member as a phone number
+  // rather than a Firebase UID. In that case `otherUserId` IS the phone, so use
+  // it directly as a last-resort source for the phone number.
+  const otherUserIdPhone = otherUserId && otherUserId.startsWith('+') ? otherUserId : '';
+  const otherUserPhone = businessProfile?.phone || resolvedPhone || otherUserIdPhone || '';
   const savedContactName = useMemo(() => {
     if (isGroup || !otherUserPhone) return null;
     return contactsMap.get(normalizePhone(otherUserPhone)) ?? null;
@@ -631,6 +751,7 @@ export default function ChatScreen() {
         if (cancelled || !snap.exists()) return;
         const phone: string = snap.data()?.phone || '';
         if (!phone) return;
+        if (!cancelled) setResolvedPhone(phone);
         const resolved = resolveName(normalizePhone(phone), phone);
         if (!cancelled && resolved) setDisplayName(resolved);
       } catch (err) {
@@ -656,10 +777,18 @@ export default function ChatScreen() {
   const [showEmoji, setShowEmoji] = useState(false);
   const [showAttach, setShowAttach] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
+  // Which way the in-app camera faces. Toggled by the flip button.
+  const [cameraFacing, setCameraFacing] = useState<'back' | 'front'>('back');
+  // Recent device photos shown as a strip under the live camera (WhatsApp-style).
+  const [recentPhotos, setRecentPhotos] = useState<{ id: string; uri: string; isVideo?: boolean }[]>([]);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [muted, setMuted] = useState(false);
   const [addContactOpen, setAddContactOpen] = useState(false);
+  // When saving a *shared* contact (from a contact card), the Add-Contact sheet
+  // should use that contact's details, not the chat partner's. Null = use the
+  // chat partner (the default "add this chat to contacts" flow).
+  const [pendingSaveContact, setPendingSaveContact] = useState<{ phone: string; name: string } | null>(null);
 
   // Honor deep-link params from the chat-list actions menu
   useEffect(() => {
@@ -733,6 +862,15 @@ export default function ChatScreen() {
   const [viewerVisible, setViewerVisible] = useState(false);
   const [viewerImageUrl, setViewerImageUrl] = useState<string | null>(null);
 
+  // ── Captured/selected media awaiting a caption before sending ────
+  // Holds a photo or video the user just captured/picked. We show a preview
+  // with a caption field (WhatsApp style) instead of sending immediately.
+  const [pendingMedia, setPendingMedia] = useState<{ uri: string; kind: 'image' | 'video' } | null>(null);
+  const [mediaCaption, setMediaCaption] = useState('');
+
+  // ── Full-screen video viewer ─────────────────────────────────────
+  const [videoViewerUrl, setVideoViewerUrl] = useState<string | null>(null);
+
   // ── Selected message state (for long-press actions) ────────────
   // Multi-select (WhatsApp style): long-press enters selection mode, then
   // tapping messages toggles them. `selectedIds` holds all selected message ids.
@@ -757,6 +895,13 @@ export default function ChatScreen() {
   const [contactPickerOpen, setContactPickerOpen] = useState(false);
   const [contactQuery, setContactQuery] = useState('');
 
+  // ── Poll composer state ─────────────────────────────────────────
+  const [pollModalOpen, setPollModalOpen] = useState(false);
+
+  // ── Multi-select for the share-contact picker ───────────────────
+  // Keyed by `userId || phone` (the same key used for list rows).
+  const [selectedContactKeys, setSelectedContactKeys] = useState<string[]>([]);
+
   // Debug log for contacts
   useEffect(() => {
     if (contactPickerOpen) {
@@ -766,6 +911,30 @@ export default function ChatScreen() {
 
   // ── Camera ref ──────────────────────────────────────────────────
   const cameraRef = useRef<any>(null);
+
+  // ── Video players (preview + full-screen viewer) ─────────────────
+  // Created once; the source is swapped via player.replace() when the
+  // relevant URL changes (same pattern as StatusViewer).
+  const previewVideoPlayer = useVideoPlayer(null, (p: any) => { p.loop = true; });
+  const viewerVideoPlayer  = useVideoPlayer(null, (p: any) => { p.loop = false; });
+
+  useEffect(() => {
+    if (pendingMedia?.kind === 'video' && pendingMedia.uri) {
+      try { previewVideoPlayer.replace(pendingMedia.uri); previewVideoPlayer.play(); } catch {}
+    } else {
+      try { previewVideoPlayer.pause(); } catch {}
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingMedia?.uri, pendingMedia?.kind]);
+
+  useEffect(() => {
+    if (videoViewerUrl) {
+      try { viewerVideoPlayer.replace(videoViewerUrl); viewerVideoPlayer.play(); } catch {}
+    } else {
+      try { viewerVideoPlayer.pause(); } catch {}
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoViewerUrl]);
 
   // ── Permission message state ────────────────────────────────────
   const [permissionMessage, setPermissionMessage] = useState<string | null>(null);
@@ -1397,11 +1566,11 @@ export default function ChatScreen() {
 
     Alert.alert(
       n === 1 ? 'Delete Message' : 'Delete Messages',
-      `Are you sure you want to delete ${n === 1 ? 'this message' : `these ${n} messages`}?`,
+      `Delete ${n === 1 ? 'this message' : `these ${n} messages`} for you? The other person will still see ${n === 1 ? 'it' : 'them'}.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Delete',
+          text: 'Delete for me',
           style: 'destructive',
           onPress: async () => {
             handleClearSelection();
@@ -1429,11 +1598,14 @@ export default function ChatScreen() {
 
   const handleForwardMessage = () => {
     if (selectedIds.length === 0) return;
-    // Preserve chat order (oldest → newest) for the forwarded batch
-    const selected = messages.filter((m) => selectedIds.includes(m.messageId));
+    // Preserve chat order (oldest → newest) for the forwarded batch.
+    // Polls are live, chat-bound objects and are never forwardable.
+    const selected = messages.filter((m) => selectedIds.includes(m.messageId) && m.type !== 'poll');
     if (selected.length > 0) {
       setMessagesToForward(selected);
       setForwardModalVisible(true);
+      handleClearSelection();
+    } else {
       handleClearSelection();
     }
   };
@@ -1441,7 +1613,8 @@ export default function ChatScreen() {
   // Share the selected messages' text via the native share sheet
   const handleShareMessages = async () => {
     if (selectedIds.length === 0) return;
-    const selected = messages.filter((m) => selectedIds.includes(m.messageId));
+    // Polls are never shareable.
+    const selected = messages.filter((m) => selectedIds.includes(m.messageId) && m.type !== 'poll');
     const body = selected
       .map((m) => {
         if (m.text) return m.text;
@@ -1504,8 +1677,13 @@ export default function ChatScreen() {
       m.type === 'text'  ? (m.text ?? 'Message')
       : m.type === 'voice' ? '🎤 Voice message'
       : m.type === 'image' ? '📷 Image'
+      : m.type === 'video' ? '🎥 Video'
       : m.type === 'file'  ? `📎 ${m.fileName || 'File'}`
       : m.type === 'location' ? '📍 Location'
+      : m.type === 'catalog' ? `🛍️ ${m.catalogItem?.name || 'Product'}`
+      : m.type === 'order' ? '🛒 Order'
+      : m.type === 'contact' ? `👤 ${m.contact?.name || 'Contact'}`
+      : m.type === 'poll' ? `📊 ${m.poll?.question || 'Poll'}`
       : 'Message';
 
     try {
@@ -1531,6 +1709,10 @@ export default function ChatScreen() {
           } else if (src.type === 'image' && src.imageUrl) {
             messageData.imageUrl = src.imageUrl;
             messageData.text = src.text || null;
+          } else if (src.type === 'video' && src.videoUrl) {
+            messageData.videoUrl = src.videoUrl;
+            messageData.thumbnailUrl = src.thumbnailUrl ?? null;
+            messageData.text = src.text || null;
           } else if (src.type === 'voice' && src.voiceUrl) {
             messageData.voiceUrl = src.voiceUrl;
             messageData.duration = src.duration;
@@ -1539,6 +1721,23 @@ export default function ChatScreen() {
             messageData.fileName = src.fileName;
             messageData.fileSize = src.fileSize;
             messageData.mimeType = src.mimeType;
+          } else if (src.type === 'catalog' && src.catalogItem) {
+            messageData.catalogItem = src.catalogItem;
+          } else if (src.type === 'order' && src.order) {
+            messageData.order = src.order;
+          } else if (src.type === 'contact' && src.contact) {
+            messageData.contact = src.contact;
+          } else if (src.type === 'poll' && src.poll) {
+            // Forward the poll fresh (reset votes so the new chat starts clean).
+            messageData.poll = {
+              question: src.poll.question,
+              options: src.poll.options,
+              votes: Object.fromEntries(src.poll.options.map((o) => [o.id, []])),
+              multiple: src.poll.multiple,
+            };
+          } else {
+            // Unknown/unsupported type for forwarding — skip to avoid an empty bubble.
+            continue;
           }
 
           await fsDbFwd.collection('chats').doc(targetChatId).collection('messages').add(messageData);
@@ -1721,57 +1920,96 @@ export default function ChatScreen() {
 
   // ── Image compression helper ────────────────────────────────────
   const compressImage = async (uri: string): Promise<string> => {
+    // Always re-encode to JPEG. Firebase Storage's native putFile rejects raw
+    // HEIC uploads with "storage/unknown", so no .heic may ever reach Storage.
+    // Uses the SDK 57 contextual ImageManipulator API (manipulateAsync is deprecated).
+    //
+    // IMPORTANT: we verify the output file is a valid, non-empty file before
+    // returning it. If ImageManipulator silently produces a 0-byte file (which
+    // happens on iOS for certain Photos-library assets), we fall back to the
+    // original URI (which has already been verified by toUploadableUri).
+
     try {
-      console.log('[ChatScreen] Attempting to compress image:', uri);
+      console.log('[ChatScreen] Compressing image:', uri);
+      const context = ImageManipulator.manipulate(uri);
+      context.resize({ width: 1200 }); // max 1200px wide, aspect ratio preserved
+      const rendered = await context.renderAsync();
+      const result = await rendered.saveAsync({
+        compress: 0.8,
+        format: SaveFormat.JPEG,
+      });
 
-      // Dynamic import to avoid crash if module not available
-      const { manipulateAsync, SaveFormat } = await import('expo-image-manipulator');
+      const check = await isFileReadable(result.uri);
+      if (check.ok) {
+        console.log('[ChatScreen] Compressed OK →', result.uri, 'size=', check.size);
+        return result.uri;
+      }
+      console.warn('[ChatScreen][diag] Resize produced empty file, trying plain JPEG re-encode');
+    } catch (error: any) {
+      console.warn('[ChatScreen][diag] Resize failed, retrying as plain JPEG re-encode:', error?.message, error);
+    }
 
-      const compressed = await manipulateAsync(
-        uri,
-        [{ resize: { width: 1200 } }], // Resize to max 1200px width, maintain aspect ratio
-        { compress: 0.8, format: SaveFormat.JPEG }
+    // Fallback: re-encode to JPEG without resizing.
+    try {
+      const context = ImageManipulator.manipulate(uri);
+      const rendered = await context.renderAsync();
+      const result = await rendered.saveAsync({ format: SaveFormat.JPEG });
+
+      const check = await isFileReadable(result.uri);
+      if (check.ok) {
+        console.log('[ChatScreen] JPEG re-encode fallback OK →', result.uri, 'size=', check.size);
+        return result.uri;
+      }
+      console.warn('[ChatScreen][diag] JPEG fallback produced empty file');
+    } catch (fallbackError: any) {
+      console.error('[ChatScreen][diag] JPEG re-encode fallback failed:', fallbackError?.message, fallbackError);
+    }
+
+    // Last resort: return the input URI (already verified by toUploadableUri).
+    console.warn('[ChatScreen][diag] Using original URI (image manipulation failed):', uri);
+    return uri;
+  };
+
+  // ── Load the most recent device photos for the camera roll strip ─
+  const loadRecentPhotos = async () => {
+    try {
+      if (Platform.OS === 'web') return;
+      const MediaLibrary = require('expo-media-library/legacy');
+      const perm = await MediaLibrary.getPermissionsAsync();
+      let granted = perm.granted;
+      if (!granted) {
+        const req = await MediaLibrary.requestPermissionsAsync();
+        granted = req.granted;
+      }
+      if (!granted) { setRecentPhotos([]); return; }
+      const res = await MediaLibrary.getAssetsAsync({
+        first: 30,
+        mediaType: ['photo', 'video'],
+        sortBy: [[MediaLibrary.SortBy.creationTime, false]],
+      });
+      // On iOS, ph:// asset URIs may not render directly; resolve to a localUri.
+      const items = await Promise.all(
+        res.assets.map(async (a: any) => {
+          let uri = a.uri;
+          if (Platform.OS === 'ios') {
+            try {
+              const info = await MediaLibrary.getAssetInfoAsync(a);
+              uri = stripFragment(info.localUri || info.uri || a.uri);
+            } catch {}
+          }
+          // Keep the real media type from the library so videos are never mistaken for images
+          // (the "#fragment" on iOS video URIs used to defeat the extension check).
+          return { id: a.id, uri: stripFragment(uri), isVideo: a.mediaType === 'video' };
+        }),
       );
-
-      console.log('[ChatScreen] Compressed successfully');
-      return compressed.uri;
-    } catch (error) {
-      console.warn('[ChatScreen] Compression not available or failed, using original:', error);
-      return uri; // Fallback to original if compression fails or module unavailable
+      setRecentPhotos(items);
+    } catch (err) {
+      console.warn('[ChatScreen] Failed to load recent photos:', err);
+      setRecentPhotos([]);
     }
   };
 
   // ── Upload single image helper ─────────────────────────────────
-  const uploadSingleImage = async (uri: string) => {
-    if (!userId) return;
-
-    try {
-      console.log('[ChatScreen] Uploading image:', uri);
-
-      // Compress before upload
-      const compressedUri = await compressImage(uri);
-
-      const uploadResult = await sendImageMessage(
-        chatId,
-        userId,
-        compressedUri,
-        (progress) => {
-          setImageUploadProgress(progress);
-          console.log('[ChatScreen] Image upload progress:', progress);
-        }
-      );
-
-      if (!uploadResult.success) {
-        Alert.alert('Upload Failed', 'Could not send the image. Please try again.');
-      } else {
-        await checkAndTriggerAutoResponder();
-      }
-    } catch (error) {
-      console.error('[ChatScreen] Upload error:', error);
-      Alert.alert('Error', 'Failed to upload image.');
-    }
-  };
-
   // ── Camera / gallery / documents ────────────────────────────────
   const openCamera = async () => {
     if (Platform.OS === 'web') {
@@ -1782,6 +2020,7 @@ export default function ChatScreen() {
     // Check if permission is already granted
     if (cameraPermission?.granted) {
       setCameraOpen(true);
+      loadRecentPhotos();
       return;
     }
 
@@ -1789,6 +2028,7 @@ export default function ChatScreen() {
     const { granted } = await requestCameraPermission();
     if (granted) {
       setCameraOpen(true);
+      loadRecentPhotos();
     } else {
       Alert.alert('Permission needed', 'Allow camera access to take photos.');
     }
@@ -1805,18 +2045,69 @@ export default function ChatScreen() {
 
       console.log('[ChatScreen] Picture taken:', photo.uri);
       setCameraOpen(false);
-
-      setUploadingImage(true);
-      setImageUploadProgress(0);
-
-      await uploadSingleImage(photo.uri);
-
-      setUploadingImage(false);
-      setImageUploadProgress(0);
-      console.log('[ChatScreen] Picture uploaded successfully');
+      // Show the preview + caption screen instead of sending immediately.
+      setMediaCaption('');
+      setPendingMedia({ uri: photo.uri, kind: 'image' });
     } catch (error) {
       console.error('[ChatScreen] Camera error:', error);
-      Alert.alert('Error', 'Failed to take or upload picture.');
+      Alert.alert('Error', 'Failed to take picture.');
+    }
+  };
+
+  // Send whatever media is sitting in the preview, with its caption.
+  const sendPendingMedia = async () => {
+    if (!pendingMedia || !userId) return;
+    const { uri, kind } = pendingMedia;
+    const caption = mediaCaption.trim() || null;
+
+    // Close the preview up front so the UI feels responsive.
+    setPendingMedia(null);
+    setMediaCaption('');
+
+    setUploadingImage(true);
+    setImageUploadProgress(0);
+    try {
+      // Copy into the app cache first so Storage never reads a raw Photos-library path.
+      const localUri = await toUploadableUri(uri, kind);
+
+      // Final safety net: make sure we're about to hand a valid file to Storage.
+      const preflight = await isFileReadable(localUri);
+      if (!preflight.ok) {
+        throw new Error(`Media file is not readable (size=${preflight.size})`);
+      }
+
+      if (kind === 'video') {
+        const result = await sendVideoMessage(
+          chatId, userId, localUri, undefined,
+          (progress) => setImageUploadProgress(progress),
+          caption,
+        );
+        if (!result.success) {
+          Alert.alert('Upload Failed', 'Could not send the video. Please try again.');
+        } else {
+          await checkAndTriggerAutoResponder();
+        }
+      } else {
+        const compressedUri = await compressImage(localUri);
+        // Verify once more — compressImage can fall back to the original URI,
+        // which is fine, but let's confirm it still exists.
+        const finalCheck = await isFileReadable(compressedUri);
+        const uploadUri = finalCheck.ok ? compressedUri : localUri;
+        const uploadResult = await sendImageMessage(
+          chatId, userId, uploadUri,
+          (progress) => setImageUploadProgress(progress),
+          caption,
+        );
+        if (!uploadResult.success) {
+          Alert.alert('Upload Failed', 'Could not send the image. Please try again.');
+        } else {
+          await checkAndTriggerAutoResponder();
+        }
+      }
+    } catch (error: any) {
+      console.error('[ChatScreen] Pending media upload error:', error);
+      Alert.alert('Error', error?.message || 'Failed to send media.');
+    } finally {
       setUploadingImage(false);
       setImageUploadProgress(0);
     }
@@ -1824,62 +2115,76 @@ export default function ChatScreen() {
 
   const openGallery = async () => {
     try {
-      // Request media library permission first
-      const { granted } = mediaLibraryPermission ?? await requestMediaLibraryPermission();
-      if (!granted) {
+      // expo-image-picker's system gallery manages its own access prompt, so we
+      // only need the picker's own permission (not media-library read access).
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
         Alert.alert('Permission needed', 'Allow photo access to select images from your gallery.');
         return;
       }
 
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: 'images',
-        allowsMultipleSelection: true, // Enable multiple selection
+        mediaTypes: ['images', 'videos'], // allow photos AND videos
+        allowsMultipleSelection: true,    // multiple selection
         quality: 0.85,
       });
 
-      if (!result.canceled && result.assets.length > 0 && userId) {
-        setShowAttach(false);
-        setUploadingImage(true);
-        setImageUploadProgress(0);
+      if (result.canceled || result.assets.length === 0 || !userId) return;
+      setShowAttach(false);
 
-        // Upload images sequentially
-        for (let i = 0; i < result.assets.length; i++) {
-          const imageUri = result.assets[i].uri;
-          console.log(`[ChatScreen] Uploading image ${i + 1}/${result.assets.length}`);
-
-          try {
-            // Reset progress for each image
-            setImageUploadProgress(0);
-
-            const compressedUri = await compressImage(imageUri);
-
-            const uploadResult = await sendImageMessage(
-              chatId,
-              userId,
-              compressedUri,
-              (progress) => {
-                setImageUploadProgress(progress);
-                console.log(`[ChatScreen] Image ${i + 1} upload progress:`, progress);
-              }
-            );
-
-            if (!uploadResult.success) {
-              console.error(`[ChatScreen] Image ${i + 1} upload failed`);
-              Alert.alert('Upload Failed', `Image ${i + 1} could not be sent. Continuing with others...`);
-            } else {
-              console.log(`[ChatScreen] Image ${i + 1} uploaded successfully`);
-            }
-          } catch (error) {
-            console.error(`[ChatScreen] Image ${i + 1} upload error:`, error);
-            Alert.alert('Error', `Failed to upload image ${i + 1}. Continuing with others...`);
-          }
-        }
-
-        console.log('[ChatScreen] All images processed');
-        setUploadingImage(false);
-        setImageUploadProgress(0);
-        await checkAndTriggerAutoResponder();
+      // Single selection → show the caption preview (WhatsApp style).
+      if (result.assets.length === 1) {
+        const asset = result.assets[0];
+        const kind: 'image' | 'video' = asset.type === 'video' ? 'video' : 'image';
+        setMediaCaption('');
+        setPendingMedia({ uri: asset.uri, kind });
+        return;
       }
+
+      // Multiple selection → send each sequentially (no per-item caption).
+      setUploadingImage(true);
+      setImageUploadProgress(0);
+      for (let i = 0; i < result.assets.length; i++) {
+        const asset = result.assets[i];
+        const isVideo = asset.type === 'video';
+        console.log(`[ChatScreen] Uploading media ${i + 1}/${result.assets.length} (${isVideo ? 'video' : 'image'})`);
+
+        try {
+          setImageUploadProgress(0);
+          const localUri = await toUploadableUri(asset.uri, isVideo ? 'video' : 'image');
+          const preflight = await isFileReadable(localUri);
+          if (!preflight.ok) throw new Error(`Media file is not readable (size=${preflight.size})`);
+
+          let uploadResult;
+          if (isVideo) {
+            uploadResult = await sendVideoMessage(
+              chatId, userId, localUri, undefined,
+              (progress) => setImageUploadProgress(progress),
+            );
+          } else {
+            const compressedUri = await compressImage(localUri);
+            const finalCheck = await isFileReadable(compressedUri);
+            const uploadUri = finalCheck.ok ? compressedUri : localUri;
+            uploadResult = await sendImageMessage(
+              chatId, userId, uploadUri,
+              (progress) => setImageUploadProgress(progress),
+            );
+          }
+
+          if (!uploadResult.success) {
+            console.error(`[ChatScreen] Media ${i + 1} upload failed`);
+            Alert.alert('Upload Failed', `Item ${i + 1} could not be sent. Continuing with others...`);
+          }
+        } catch (error) {
+          console.error(`[ChatScreen] Media ${i + 1} upload error:`, error);
+          Alert.alert('Error', `Failed to upload item ${i + 1}. Continuing with others...`);
+        }
+      }
+
+      console.log('[ChatScreen] All media processed');
+      setUploadingImage(false);
+      setImageUploadProgress(0);
+      await checkAndTriggerAutoResponder();
     } catch (error) {
       console.error('[ChatScreen] Gallery error:', error);
       setUploadingImage(false);
@@ -1908,10 +2213,14 @@ export default function ChatScreen() {
             // Reset progress for each file
             setImageUploadProgress(0);
 
+            // DocumentPicker returns a readable file:// in the app's tmp/cache.
+            // Still normalise (strip iOS fragments) before handing it to Storage.
+            const cleanUri = stripFragment(file.uri);
+
             const uploadResult = await sendFileMessage(
               chatId,
               userId,
-              file.uri,
+              cleanUri,
               file.name,
               file.size || 0,
               file.mimeType || 'application/octet-stream',
@@ -1962,10 +2271,11 @@ export default function ChatScreen() {
         setImageUploadProgress(0);
 
         try {
+          const cleanUri = stripFragment(audioFile.uri);
           const uploadResult = await sendFileMessage(
             chatId,
             userId,
-            audioFile.uri,
+            cleanUri,
             audioFile.name,
             audioFile.size || 0,
             audioFile.mimeType || 'audio/mpeg',
@@ -1993,6 +2303,64 @@ export default function ChatScreen() {
       console.error('[ChatScreen] Audio picker error:', error);
       Alert.alert('Error', 'Failed to select audio file.');
     }
+  };
+
+  // Open the Add-Contact sheet prefilled for a shared contact card.
+  const handleSaveSharedContact = useCallback((name: string, phone: string) => {
+    setPendingSaveContact({ name, phone });
+    setAddContactOpen(true);
+  }, []);
+
+  // Toggle a contact in the share-contact multi-select.
+  const toggleContactSelect = (key: string) => {
+    setSelectedContactKeys((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+    );
+  };
+
+  // Send every selected contact as its own contact card.
+  const sendSelectedContacts = async () => {
+    if (!userId || selectedContactKeys.length === 0) return;
+    const chosen = phoneContacts.filter((c) => selectedContactKeys.includes(c.userId || c.phone));
+    setContactPickerOpen(false);
+    setSelectedContactKeys([]);
+    setContactQuery('');
+
+    const sharedContacts = chosen.map((c) => ({
+      name: c.displayName,
+      phone: c.phone,
+      userId: c.isSaved ? c.userId : null,
+      registered: !!c.isSaved,
+      photoURL: c.firebasePhotoURL ?? null,
+    }));
+
+    try {
+      if (sharedContacts.length === 1) {
+        const result = await sendContactMessage(chatId, userId, sharedContacts[0]);
+        if (result.success) {
+          addOptimisticMessage({
+            messageId: result.messageId,
+            senderId: userId,
+            type: 'contact',
+            contact: sharedContacts[0],
+          });
+        }
+      } else {
+        // Multiple → one grouped bubble with a "View all" sheet.
+        const result = await sendContactsMessage(chatId, userId, sharedContacts);
+        if (result.success) {
+          addOptimisticMessage({
+            messageId: result.messageId,
+            senderId: userId,
+            type: 'contact',
+            contact: { ...sharedContacts[0], contacts: sharedContacts },
+          });
+        }
+      }
+    } catch (err) {
+      console.error('[ChatScreen] Failed to share contacts:', err);
+    }
+    await checkAndTriggerAutoResponder();
   };
 
 
@@ -2274,6 +2642,75 @@ export default function ChatScreen() {
       );
     }
 
+    // ── Order card — standalone render (bypasses msgRow bubble) ──
+    if (item.type === 'order' && item.order) {
+      return (
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={onBubblePress}
+          onLongPress={() => handleLongPressMessage(item.messageId)}
+          delayLongPress={300}
+        >
+          <View style={[isSelected && styles.selectedMessage]}>
+            <OrderBubble
+              order={item.order}
+              isOutgoing={isOut}
+              timestamp={formatTime(item.timestamp)}
+              tickIcon={tickIcon}
+            />
+          </View>
+        </TouchableOpacity>
+      );
+    }
+
+    // ── Shared contact card — standalone render ──
+    if (item.type === 'contact' && item.contact) {
+      return (
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={onBubblePress}
+          onLongPress={() => handleLongPressMessage(item.messageId)}
+          delayLongPress={300}
+        >
+          <View style={[isSelected && styles.selectedMessage]}>
+            <ContactBubble
+              contact={item.contact}
+              isOutgoing={isOut}
+              timestamp={formatTime(item.timestamp)}
+              tickIcon={tickIcon}
+              onSaveContact={handleSaveSharedContact}
+            />
+          </View>
+        </TouchableOpacity>
+      );
+    }
+
+    // ── Poll card — standalone render ──
+    if (item.type === 'poll' && item.poll) {
+      return (
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={onBubblePress}
+          onLongPress={() => handleLongPressMessage(item.messageId)}
+          delayLongPress={300}
+        >
+          <View style={[isSelected && styles.selectedMessage]}>
+            <PollBubble
+              poll={item.poll}
+              isOutgoing={isOut}
+              currentUserId={userId}
+              onVote={(optionId) => {
+                if (!userId) return;
+                votePollOption(chatId, item.messageId, userId, optionId).catch(() => {});
+              }}
+              timestamp={formatTime(item.timestamp)}
+              tickIcon={tickIcon}
+            />
+          </View>
+        </TouchableOpacity>
+      );
+    }
+
     // Debug logging for file messages
     if (item.type === 'file') {
       console.log('[ChatScreen] Rendering file message:', {
@@ -2314,6 +2751,28 @@ export default function ChatScreen() {
               mimeType={item.mimeType ?? undefined}
               isOutgoing={false}
             />
+          ) : item.type === 'video' && item.videoUrl ? (
+            <LinearGradient colors={GRADIENTS.chatSent} style={[styles.bubble, styles.bubbleIn, styles.imageBubble]}>
+              <TouchableOpacity
+                activeOpacity={0.9}
+                onPress={() => setVideoViewerUrl(item.videoUrl!)}
+              >
+                <View style={styles.videoThumbWrap}>
+                  {item.thumbnailUrl ? (
+                    <Image source={{ uri: item.thumbnailUrl }} style={styles.messageImage} resizeMode="cover" />
+                  ) : (
+                    <View style={[styles.messageImage, styles.videoPlaceholder]} />
+                  )}
+                  <View style={styles.videoPlayOverlay}>
+                    <AppIcon name="play" size={30} color="#fff" fixedColor />
+                  </View>
+                </View>
+              </TouchableOpacity>
+              {item.text ? <AppText fixedColor style={styles.mediaCaptionIn}>{item.text}</AppText> : null}
+              <View style={styles.imageTimeOverlay}>
+                <AppText fixedColor style={styles.timeIn}>{formatTime(item.timestamp)}</AppText>
+              </View>
+            </LinearGradient>
           ) : item.type === 'image' && item.imageUrl ? (
             <LinearGradient colors={GRADIENTS.chatSent} style={[styles.bubble, styles.bubbleIn, styles.imageBubble]}>
               <TouchableOpacity
@@ -2329,6 +2788,7 @@ export default function ChatScreen() {
                   resizeMode="cover"
                 />
               </TouchableOpacity>
+              {item.text ? <AppText fixedColor style={styles.mediaCaptionIn}>{item.text}</AppText> : null}
               <View style={styles.imageTimeOverlay}>
                 <AppText fixedColor style={styles.timeIn}>{formatTime(item.timestamp)}</AppText>
               </View>
@@ -2414,6 +2874,29 @@ export default function ChatScreen() {
               mimeType={item.mimeType ?? undefined}
               isOutgoing={true}
             />
+          ) : item.type === 'video' && item.videoUrl ? (
+            <View style={[styles.bubble, styles.bubbleOut, styles.imageBubble]}>
+              <TouchableOpacity
+                activeOpacity={0.9}
+                onPress={() => setVideoViewerUrl(item.videoUrl!)}
+              >
+                <View style={styles.videoThumbWrap}>
+                  {item.thumbnailUrl ? (
+                    <Image source={{ uri: item.thumbnailUrl }} style={styles.messageImage} resizeMode="cover" />
+                  ) : (
+                    <View style={[styles.messageImage, styles.videoPlaceholder]} />
+                  )}
+                  <View style={styles.videoPlayOverlay}>
+                    <AppIcon name="play" size={30} color="#fff" fixedColor />
+                  </View>
+                </View>
+              </TouchableOpacity>
+              {item.text ? <AppText style={[styles.mediaCaptionOut, { color: textColor }]}>{item.text}</AppText> : null}
+              <View style={styles.imageTimeOverlay}>
+                <AppText style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
+                <AppIcon name={tickIcon.icon} size={13} color={tickIcon.color} fixedColor />
+              </View>
+            </View>
           ) : item.type === 'image' && item.imageUrl ? (
             <View style={[styles.bubble, styles.bubbleOut, styles.imageBubble]}>
               <TouchableOpacity
@@ -2429,6 +2912,7 @@ export default function ChatScreen() {
                   resizeMode="cover"
                 />
               </TouchableOpacity>
+              {item.text ? <AppText style={[styles.mediaCaptionOut, { color: textColor }]}>{item.text}</AppText> : null}
               <View style={styles.imageTimeOverlay}>
                 <AppText style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
                 <AppIcon
@@ -2691,6 +3175,37 @@ export default function ChatScreen() {
           </View>
           )}{/* end searchOpen ternary */}
 
+          {/* ── "Add contact" banner — shown when the chat partner isn't saved ── */}
+          {!isGroup && isUnsavedContact && !addContactBannerDismissed && !searchOpen && (
+            <View style={[styles.addContactBanner, bevel]}>
+              <View style={styles.addContactBannerIcon}>
+                <AppIcon name="person-add-outline" size={18} color={COLORS.blue} fixedColor />
+              </View>
+              <View style={{ flex: 1 }}>
+                <AppText style={[styles.addContactBannerTitle, { color: textColor }]} numberOfLines={1}>
+                  {otherUserPhone}
+                </AppText>
+                <AppText style={[styles.addContactBannerSub, { color: FG.secondary }]} numberOfLines={1}>
+                  Not in your contacts
+                </AppText>
+              </View>
+              <TouchableOpacity
+                style={styles.addContactBannerGhost}
+                onPress={() => setAddContactBannerDismissed(true)}
+                activeOpacity={0.8}
+              >
+                <AppText style={[styles.addContactBannerGhostTxt, { color: FG.secondary }]}>Not now</AppText>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.addContactBannerAdd}
+                onPress={() => { setPendingSaveContact(null); setAddContactOpen(true); }}
+                activeOpacity={0.85}
+              >
+                <AppText style={styles.addContactBannerAddTxt} fixedColor>Add contact</AppText>
+              </TouchableOpacity>
+            </View>
+          )}
+
           {/* ── 3-dot menu dropdown ── */}
           <Modal visible={menuOpen} transparent animationType="none" onRequestClose={() => setMenuOpen(false)}>
             <TouchableOpacity
@@ -2935,10 +3450,13 @@ export default function ChatScreen() {
                       );
                     })()}
 
-                    <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleCopyMessage}>
-                      <AppIcon name="copy-outline" size={22} color={COLORS.blue} />
-                      <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Copy</AppText>
-                    </TouchableOpacity>
+                    {/* Polls can't be copied — no text content to copy. */}
+                    {!messages.some(m => selectedIds.includes(m.messageId) && m.type === 'poll') && (
+                      <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleCopyMessage}>
+                        <AppIcon name="copy-outline" size={22} color={COLORS.blue} />
+                        <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Copy</AppText>
+                      </TouchableOpacity>
+                    )}
 
                     <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleShowMessageInfo}>
                       <AppIcon name="information-circle-outline" size={22} color={COLORS.blue} />
@@ -2947,16 +3465,22 @@ export default function ChatScreen() {
                   </>
                 )}
 
-                {/* Multi-selection-capable actions */}
-                <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleForwardMessage}>
-                  <AppIcon name="arrow-redo-outline" size={22} color={COLORS.blue} />
-                  <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Forward</AppText>
-                </TouchableOpacity>
+                {/* Multi-selection-capable actions. Polls are live, interactive
+                    objects tied to this chat, so they can't be forwarded or
+                    shared — hide both when any selected message is a poll. */}
+                {!messages.some(m => selectedIds.includes(m.messageId) && m.type === 'poll') && (
+                  <>
+                    <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleForwardMessage}>
+                      <AppIcon name="arrow-redo-outline" size={22} color={COLORS.blue} />
+                      <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Forward</AppText>
+                    </TouchableOpacity>
 
-                <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleShareMessages}>
-                  <AppIcon name="share-social-outline" size={22} color={COLORS.blue} />
-                  <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Share</AppText>
-                </TouchableOpacity>
+                    <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleShareMessages}>
+                      <AppIcon name="share-social-outline" size={22} color={COLORS.blue} />
+                      <AppText style={[styles.actionToolbarLabel, { color: textColor }]}>Share</AppText>
+                    </TouchableOpacity>
+                  </>
+                )}
 
                 <TouchableOpacity style={styles.actionToolbarBtn} onPress={handleDeleteMessage}>
                   <AppIcon name="trash-outline" size={22} color={COLORS.missed} fixedColor />
@@ -3212,8 +3736,11 @@ export default function ChatScreen() {
           <AppText style={[styles.attachTitle, { color: textColor, fontFamily }]}>Share</AppText>
           <View style={styles.attachGrid}>
             {[
-              { icon: 'document-outline' as const, label: 'Files',    action: openDocuments },
-              { icon: 'camera-outline'   as const, label: 'Camera',   action: () => { setShowAttach(false); openCamera(); } },
+              { icon: 'image-outline'    as const, label: 'Photos',   action: () => { setShowAttach(false); setTimeout(() => openGallery(), 350); } },
+              { icon: 'camera-outline'   as const, label: 'Camera',   action: () => { setShowAttach(false); setTimeout(() => openCamera(), 350); } },
+              { icon: 'document-outline' as const, label: 'Files',    action: () => { setShowAttach(false); setTimeout(() => openDocuments(), 350); } },
+              { icon: 'person-outline'   as const, label: 'Contact',  action: () => { setShowAttach(false); setSelectedContactKeys([]); setContactQuery(''); setTimeout(() => setContactPickerOpen(true), 350); } },
+              { icon: 'stats-chart-outline' as const, label: 'Poll',  action: () => { setShowAttach(false); setTimeout(() => setPollModalOpen(true), 350); } },
             ].map((item) => (
               <TouchableOpacity key={item.label} style={[styles.attachItem, bevel]}
                 onPress={item.action} activeOpacity={0.8}>
@@ -3228,16 +3755,17 @@ export default function ChatScreen() {
       </Modal>
 
       {/* ── Contact Picker Modal ── */}
-      <Modal visible={contactPickerOpen} transparent animationType="slide" onRequestClose={() => setContactPickerOpen(false)}>
+      <Modal visible={contactPickerOpen} transparent animationType="slide" onRequestClose={() => { setContactPickerOpen(false); setSelectedContactKeys([]); }}>
+        <TouchableOpacity style={styles.attachOverlay} activeOpacity={1} onPress={() => { setContactPickerOpen(false); setSelectedContactKeys([]); }} />
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         >
-          <TouchableOpacity style={styles.attachOverlay} activeOpacity={1} onPress={() => setContactPickerOpen(false)} />
           <View style={[styles.contactPickerSheet, { backgroundColor: FG.glassBg }]}>
             <AppBg />
             <View style={styles.attachHandle} />
-            <AppText style={[styles.attachTitle, { color: textColor, fontFamily }]}>Share Contact</AppText>
+            <AppText style={[styles.attachTitle, { color: textColor, fontFamily }]}>
+              {selectedContactKeys.length > 0 ? `${selectedContactKeys.length} selected` : 'Share Contacts'}
+            </AppText>
 
             {/* Search */}
             <View style={[styles.contactSearchWrap, bevel]}>
@@ -3268,73 +3796,65 @@ export default function ChatScreen() {
                   <ActivityIndicator size="large" color={COLORS.blue} />
                   <AppText style={{ color: COLORS.sub, fontSize: 14 }}>Loading contacts...</AppText>
                 </View>
-              ) : !contactsPermission ? (
-                <View style={{ alignItems: 'center', paddingTop: 60, gap: 12 }}>
-                  <AppIcon name="lock-closed-outline" size={48} color={COLORS.sub} />
-                  <AppText style={{ color: textColor, fontSize: 16, fontWeight: '600', textAlign: 'center' }}>
-                    Contacts Permission Required
-                  </AppText>
-                  <AppText style={{ color: COLORS.sub, fontSize: 13, textAlign: 'center', paddingHorizontal: 40 }}>
-                    Please grant contacts permission in your device settings to share contacts
-                  </AppText>
-                </View>
-              ) : !phoneContacts || phoneContacts.length === 0 ? (
+              ) : (!phoneContacts || phoneContacts.length === 0) ? (
                 <View style={{ alignItems: 'center', paddingTop: 60, gap: 12 }}>
                   <AppIcon name="people-outline" size={48} color={COLORS.sub} />
                   <AppText style={{ color: textColor, fontSize: 16, fontWeight: '600', textAlign: 'center' }}>
-                    No Contacts Found
+                    {contactsPermission ? 'No Contacts Found' : 'Contacts Permission Needed'}
                   </AppText>
                   <AppText style={{ color: COLORS.sub, fontSize: 13, textAlign: 'center', paddingHorizontal: 40 }}>
-                    None of your contacts are using ChitChat yet
+                    {contactsError
+                      ? contactsError
+                      : contactsPermission
+                        ? 'Add contacts to your phone to share them here'
+                        : 'Allow contacts access to share people from your phone'}
                   </AppText>
+                  <TouchableOpacity style={{ marginTop: 6, borderRadius: 999, overflow: 'hidden' }} onPress={() => reloadContacts()} activeOpacity={0.85}>
+                    <LinearGradient colors={GRADIENTS.primary} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 10, paddingHorizontal: 20 }}>
+                      <AppIcon name="refresh" size={16} color="#fff" fixedColor />
+                      <AppText style={{ color: '#fff', fontSize: 14, fontWeight: '700' }} fixedColor>
+                        {contactsPermission ? 'Reload' : 'Grant Permission'}
+                      </AppText>
+                    </LinearGradient>
+                  </TouchableOpacity>
                 </View>
               ) : (
                 <>
                   {phoneContacts
                     .filter(c => !contactQuery.trim() || c.displayName.toLowerCase().includes(contactQuery.toLowerCase()) || c.phone.includes(contactQuery))
-                    .map((c) => (
-                      <TouchableOpacity
-                        key={c.userId || c.phone}
-                        style={[styles.contactPickerRow, bevel]}
-                        activeOpacity={0.75}
-                        onPress={async () => {
-                          setContactPickerOpen(false);
-                          if (!userId) return;
-                          // Send contact as a text message with contact card format
-                          const contactText = `📇 *${c.displayName}*\n📞 ${c.phone}`;
-                          try {
-                            const fsDbContact = db as ReturnType<typeof firestore>;
-                            await fsDbContact.collection('chats').doc(chatId).collection('messages').add({
-                              senderId: userId,
-                              text: contactText,
-                              type: 'text',
-                              timestamp: firestore.FieldValue.serverTimestamp(),
-                              readBy: [userId],
-                              deliveredTo: [],
-                            });
-                            await fsDbContact.collection('chats').doc(chatId).update({
-                              'lastMessage.text': `📇 ${c.displayName}`,
-                              'lastMessage.senderId': userId,
-                              'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-                            });
-                          } catch (err) {
-                            console.error('[ChatScreen] Failed to send contact:', err);
-                          }
-                        }}
-                      >
-                        <Avatar
-                          initials={c.displayName.slice(0, 2).toUpperCase()}
-                          color={COLORS.blue}
-                          size={44}
-                          imageUrl={c.photoUri || c.firebasePhotoURL || null}
-                        />
-                        <View style={{ flex: 1, marginLeft: 12 }}>
-                          <AppText style={[{ fontSize: 14, fontWeight: '600' }, { color: textColor }]}>{c.displayName}</AppText>
-                          <AppText style={{ fontSize: 12, color: COLORS.sub, marginTop: 2 }}>{c.phone}</AppText>
-                        </View>
-                        <AppIcon name="share-outline" size={18} color={COLORS.blue} fixedColor />
-                      </TouchableOpacity>
-                    ))}
+                    .map((c) => {
+                      const key = c.userId || c.phone;
+                      const selected = selectedContactKeys.includes(key);
+                      return (
+                        <TouchableOpacity
+                          key={key}
+                          style={[styles.contactPickerRow, bevel, selected && { borderColor: COLORS.blue, borderWidth: 1.5 }]}
+                          activeOpacity={0.75}
+                          onPress={() => toggleContactSelect(key)}
+                        >
+                          <Avatar
+                            initials={c.displayName.slice(0, 2).toUpperCase()}
+                            color={COLORS.blue}
+                            size={44}
+                            imageUrl={c.photoUri || c.firebasePhotoURL || null}
+                          />
+                          <View style={{ flex: 1, marginLeft: 12 }}>
+                            <AppText style={[{ fontSize: 14, fontWeight: '600' }, { color: textColor }]}>{c.displayName}</AppText>
+                            <AppText style={{ fontSize: 12, color: COLORS.sub, marginTop: 2 }}>{c.phone}</AppText>
+                            {c.isSaved && (
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 2 }}>
+                                <AppIcon name="checkmark-circle" size={11} color={COLORS.green} fixedColor />
+                                <AppText style={{ fontSize: 10.5, color: COLORS.green, fontWeight: '600' }}>On ChitChatBusiness</AppText>
+                              </View>
+                            )}
+                          </View>
+                          {/* Selection checkbox */}
+                          <View style={[styles.contactCheckbox, selected && styles.contactCheckboxOn]}>
+                            {selected && <AppIcon name="checkmark" size={14} color="#fff" fixedColor />}
+                          </View>
+                        </TouchableOpacity>
+                      );
+                    })}
                   {phoneContacts.filter(c => !contactQuery.trim() || c.displayName.toLowerCase().includes(contactQuery.toLowerCase()) || c.phone.includes(contactQuery)).length === 0 && contactQuery.trim() && (
                     <View style={{ alignItems: 'center', paddingTop: 40, gap: 10 }}>
                       <AppIcon name="search-outline" size={44} color={COLORS.sub} />
@@ -3344,6 +3864,18 @@ export default function ChatScreen() {
                 </>
               )}
             </ScrollView>
+
+            {/* Send button — appears once one or more contacts are selected */}
+            {selectedContactKeys.length > 0 && (
+              <TouchableOpacity activeOpacity={0.85} onPress={sendSelectedContacts} style={styles.contactSendBtn}>
+                <LinearGradient colors={GRADIENTS.primary} style={styles.contactSendBtnGrad}>
+                  <AppIcon name="send" size={18} color="#fff" fixedColor />
+                  <AppText style={styles.contactSendBtnText} fixedColor>
+                    Send {selectedContactKeys.length} contact{selectedContactKeys.length === 1 ? '' : 's'}
+                  </AppText>
+                </LinearGradient>
+              </TouchableOpacity>
+            )}
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -3352,17 +3884,132 @@ export default function ChatScreen() {
       {cameraOpen && Platform.OS !== 'web' && (
         <Modal visible animationType="slide" onRequestClose={() => setCameraOpen(false)}>
           <View style={{ flex: 1, backgroundColor: '#000' }}>
-            <CameraView ref={cameraRef} style={{ flex: 1 }} facing="back">
+            <CameraView ref={cameraRef} style={{ flex: 1 }} facing={cameraFacing}>
+              {/* Close (X) — top-right corner */}
+              <TouchableOpacity
+                onPress={() => setCameraOpen(false)}
+                style={styles.cameraTopCloseBtn}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <AppIcon name="close" size={26} color="#fff" fixedColor />
+              </TouchableOpacity>
+
+              {/* Recent photos strip — tap one to caption & send (WhatsApp-style) */}
+              {recentPhotos.length > 0 && (
+                <View style={styles.cameraRollStrip}>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.cameraRollContent}
+                  >
+                    {recentPhotos.map((p) => (
+                      <TouchableOpacity
+                        key={p.id}
+                        activeOpacity={0.85}
+                        style={styles.cameraRollThumbWrap}
+                        onPress={() => {
+                          setCameraOpen(false);
+                          setMediaCaption('');
+                          const isVid = p.isVideo ?? /\.(mp4|mov|m4v|3gp|avi)$/i.test(p.uri);
+                          setPendingMedia({ uri: p.uri, kind: isVid ? 'video' : 'image' });
+                        }}
+                      >
+                        <Image source={{ uri: p.uri }} style={styles.cameraRollThumb} resizeMode="cover" />
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+                </View>
+              )}
               <View style={styles.cameraControls}>
-                <TouchableOpacity onPress={() => setCameraOpen(false)} style={styles.cameraCloseBtn}>
-                  <AppIcon name="close" size={28} color="#fff" fixedColor />
+                {/* Gallery — opens the photo/video picker */}
+                <TouchableOpacity
+                  onPress={() => { setCameraOpen(false); setTimeout(() => openGallery(), 350); }}
+                  style={styles.cameraCloseBtn}
+                >
+                  <AppIcon name="images-outline" size={26} color="#fff" fixedColor />
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.cameraShutterBtn} onPress={takePicture}>
                   <View style={styles.cameraShutter} />
                 </TouchableOpacity>
-                <View style={{ width: 52 }} />
+                <TouchableOpacity
+                  onPress={() => setCameraFacing((f) => (f === 'back' ? 'front' : 'back'))}
+                  style={styles.cameraFlipBtn}
+                >
+                  <AppIcon name="camera-reverse-outline" size={28} color="#fff" fixedColor />
+                </TouchableOpacity>
               </View>
             </CameraView>
+          </View>
+        </Modal>
+      )}
+
+      {/* ── Media preview + caption (before sending) ── */}
+      {pendingMedia && (
+        <Modal visible animationType="slide" onRequestClose={() => { setPendingMedia(null); setMediaCaption(''); }}>
+          <KeyboardAvoidingView
+            style={{ flex: 1, backgroundColor: '#000' }}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          >
+            {/* Close button */}
+            <TouchableOpacity
+              style={styles.mediaPreviewClose}
+              onPress={() => { setPendingMedia(null); setMediaCaption(''); }}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <AppIcon name="close" size={28} color="#fff" fixedColor />
+            </TouchableOpacity>
+
+            {/* Preview */}
+            <View style={styles.mediaPreviewBody}>
+              {pendingMedia.kind === 'video' ? (
+                <VideoView
+                  player={previewVideoPlayer}
+                  style={styles.mediaPreviewMedia}
+                  contentFit="contain"
+                  nativeControls
+                />
+              ) : (
+                <Image source={{ uri: pendingMedia.uri }} style={styles.mediaPreviewMedia} resizeMode="contain" />
+              )}
+            </View>
+
+            {/* Caption + send */}
+            <View style={styles.mediaPreviewBar}>
+              <View style={styles.mediaPreviewInputWrap}>
+                <TextInput
+                  style={styles.mediaPreviewInput}
+                  placeholder="Add a caption..."
+                  placeholderTextColor="rgba(255,255,255,0.6)"
+                  value={mediaCaption}
+                  onChangeText={setMediaCaption}
+                  multiline
+                  maxLength={1024}
+                />
+              </View>
+              <TouchableOpacity style={styles.mediaPreviewSendBtn} onPress={sendPendingMedia}>
+                <AppIcon name="send" size={22} color="#fff" fixedColor />
+              </TouchableOpacity>
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
+      )}
+
+      {/* ── Full-screen video viewer ── */}
+      {videoViewerUrl && (
+        <Modal visible transparent animationType="fade" onRequestClose={() => setVideoViewerUrl(null)}>
+          <View style={styles.videoViewerContainer}>
+            <VideoView
+              player={viewerVideoPlayer}
+              style={StyleSheet.absoluteFill}
+              contentFit="contain"
+              nativeControls
+            />
+            <TouchableOpacity
+              style={styles.imageViewerCloseBtn}
+              onPress={() => setVideoViewerUrl(null)}
+            >
+              <AppIcon name="close" size={32} color="#fff" fixedColor />
+            </TouchableOpacity>
           </View>
         </Modal>
       )}
@@ -3407,14 +4054,60 @@ export default function ChatScreen() {
         <CartSheet
           onClose={() => setCartSheetVisible(false)}
           onSendOrder={async () => {
-            const summary = formatOrderSummary();
-            if (!summary || !userId) return;
+            if (!userId || cartItems.length === 0) return;
             setCartSheetVisible(false);
-            await sendMessage(summary);
+            // Derive the currency prefix from the first item's price (e.g. "R", "$").
+            const currency = cartItems[0]?.item.price.match(/^[^0-9]*/)?.[0] ?? '';
+            const orderItems = cartItems.map((c) => ({
+              id: c.item.id,
+              name: c.item.name,
+              price: c.item.price,
+              imageUri: c.item.imageUri ?? null,
+              quantity: c.quantity,
+            }));
+            const totalStr = totalPrice != null ? totalPrice.toFixed(2) : null;
+            const result = await sendOrderMessage(chatId, userId, orderItems, totalStr, currency);
+            if (!result.success) {
+              Alert.alert('Error', 'Could not send the order. Please try again.');
+              return;
+            }
+            addOptimisticMessage({
+              messageId: result.messageId,
+              senderId: userId,
+              type: 'order',
+              order: { items: orderItems, total: totalStr, currency },
+            });
             clearCart();
+            await checkAndTriggerAutoResponder();
           }}
         />
       </Modal>
+
+      {/* ── Create Poll Modal ── */}
+      <CreatePollModal
+        visible={pollModalOpen}
+        onClose={() => setPollModalOpen(false)}
+        onCreate={async (question, options, multiple) => {
+          setPollModalOpen(false);
+          if (!userId) return;
+          const result = await sendPollMessage(chatId, userId, { question, options, multiple });
+          if (!result.success) {
+            Alert.alert('Error', 'Could not create the poll. Please try again.');
+            return;
+          }
+          // Show the poll immediately (before the Firestore snapshot arrives).
+          const optionObjs = options.map((t, i) => ({ id: `opt${i}`, text: t.trim() })).filter((o) => o.text);
+          const votes: Record<string, string[]> = {};
+          optionObjs.forEach((o) => { votes[o.id] = []; });
+          addOptimisticMessage({
+            messageId: result.messageId,
+            senderId: userId,
+            type: 'poll',
+            poll: { question: question.trim(), options: optionObjs, votes, multiple },
+          });
+          await checkAndTriggerAutoResponder();
+        }}
+      />
 
       {/* ── Catalog Sheet ── */}
       <Modal
@@ -3481,7 +4174,7 @@ export default function ChatScreen() {
                 {!isGroup && !!savedContactName && (
                   <TouchableOpacity
                     style={profileHeroStyles.editBtn}
-                    onPress={() => { setProfileModalOpen(false); setAddContactOpen(true); }}
+                    onPress={() => { setPendingSaveContact(null); setProfileModalOpen(false); setAddContactOpen(true); }}
                     hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                   >
                     <AppIcon name="create-outline" size={18} color="#fff" fixedColor />
@@ -3557,7 +4250,7 @@ export default function ChatScreen() {
                   <TouchableOpacity
                     style={[profileHeroStyles.addContactBtn, bevel]}
                     activeOpacity={0.85}
-                    onPress={() => { setProfileModalOpen(false); setAddContactOpen(true); }}
+                    onPress={() => { setPendingSaveContact(null); setProfileModalOpen(false); setAddContactOpen(true); }}
                   >
                     <AppIcon name="person-add-outline" size={18} color={COLORS.blue} fixedColor />
                     <AppText style={[profileHeroStyles.addContactText, { color: COLORS.blue }]}>
@@ -3866,11 +4559,11 @@ export default function ChatScreen() {
       {/* ── Add / Edit contact sheet ── */}
       <AddContactSheet
         visible={addContactOpen}
-        onClose={() => setAddContactOpen(false)}
-        phone={otherUserPhone}
-        suggestedName={displayName}
-        existingName={savedContactName}
-        onSaved={() => { setAddContactOpen(false); reloadPhoneBook(); }}
+        onClose={() => { setAddContactOpen(false); setPendingSaveContact(null); }}
+        phone={pendingSaveContact ? pendingSaveContact.phone : otherUserPhone}
+        suggestedName={pendingSaveContact ? pendingSaveContact.name : displayName}
+        existingName={pendingSaveContact ? null : savedContactName}
+        onSaved={() => { setAddContactOpen(false); setPendingSaveContact(null); reloadPhoneBook(); }}
       />
 
       {/* ── Forward Modal ── */}
@@ -5211,6 +5904,29 @@ const styles = StyleSheet.create({
   contactInfo: { flex: 1 },
   contactName: { fontSize: 15, fontWeight: '700' },
   onlineText: { fontSize: 12, marginTop: 2 },
+
+  // "Add contact" banner (inbox, unsaved contact)
+  addContactBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    marginHorizontal: 12, marginBottom: 8,
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderRadius: RADIUS.lg,
+    backgroundColor: 'rgba(255,255,255,0.65)',
+  },
+  addContactBannerIcon: {
+    width: 34, height: 34, borderRadius: 17,
+    backgroundColor: 'rgba(30,156,240,0.12)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  addContactBannerTitle: { fontSize: 14, fontWeight: '700' },
+  addContactBannerSub: { fontSize: 12, marginTop: 1 },
+  addContactBannerGhost: { paddingHorizontal: 10, paddingVertical: 8 },
+  addContactBannerGhostTxt: { fontSize: 13, fontWeight: '600' },
+  addContactBannerAdd: {
+    backgroundColor: COLORS.blue, borderRadius: RADIUS.full,
+    paddingHorizontal: 14, paddingVertical: 8,
+  },
+  addContactBannerAddTxt: { color: '#fff', fontSize: 13, fontWeight: '700' },
   iconBtn: { padding: 4 },
 
   // ── Center states (loading / empty) ───────────────────────────────────────
@@ -5407,6 +6123,64 @@ const styles = StyleSheet.create({
     flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center',
   },
   cameraCloseBtn: { width: 52, height: 52, borderRadius: 26, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
+  cameraFlipBtn: { width: 52, height: 52, borderRadius: 26, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
+  cameraTopCloseBtn: {
+    position: 'absolute', top: 52, right: 18, zIndex: 10,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center',
+  },
+
+  // Camera roll strip (recent photos under the live camera)
+  cameraRollStrip: {
+    position: 'absolute', left: 0, right: 0, bottom: 118,
+    paddingVertical: 6,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  cameraRollContent: { paddingHorizontal: 10, gap: 8 },
+  cameraRollThumbWrap: {
+    borderRadius: 10, overflow: 'hidden',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.35)',
+  },
+  cameraRollThumb: { width: 60, height: 60 },
+
+  // ── Video message bubble ────────────────────────────────────────────────────
+  videoThumbWrap: { width: 200, height: 200, borderRadius: 12, overflow: 'hidden', position: 'relative' },
+  videoPlaceholder: { backgroundColor: '#1c2733', alignItems: 'center', justifyContent: 'center' },
+  videoPlayOverlay: {
+    ...StyleSheet.absoluteFill,
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  // ── Media caption (shown under image/video bubbles) ─────────────────────────
+  mediaCaptionIn: { color: '#fff', fontSize: 15, paddingHorizontal: 4, paddingTop: 6 },
+  mediaCaptionOut: { fontSize: 15, paddingHorizontal: 4, paddingTop: 6 },
+
+  // ── Media preview + caption screen ──────────────────────────────────────────
+  mediaPreviewClose: {
+    position: 'absolute', top: 48, left: 16, zIndex: 10,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center',
+  },
+  mediaPreviewBody: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  mediaPreviewMedia: { width: '100%', height: '100%' },
+  mediaPreviewBar: {
+    flexDirection: 'row', alignItems: 'flex-end', gap: 10,
+    paddingHorizontal: 12, paddingVertical: 12, paddingBottom: 28,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+  },
+  mediaPreviewInputWrap: {
+    flex: 1, backgroundColor: 'rgba(255,255,255,0.12)', borderRadius: 24,
+    paddingHorizontal: 16, paddingVertical: Platform.OS === 'ios' ? 10 : 4,
+    maxHeight: 120, justifyContent: 'center',
+  },
+  mediaPreviewInput: { color: '#fff', fontSize: 16, maxHeight: 100 },
+  mediaPreviewSendBtn: {
+    width: 48, height: 48, borderRadius: 24, backgroundColor: COLORS.blue,
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  // ── Full-screen video viewer ────────────────────────────────────────────────
+  videoViewerContainer: { flex: 1, backgroundColor: '#000' },
   cameraShutterBtn: { alignItems: 'center', justifyContent: 'center' },
   cameraShutter: { width: 72, height: 72, borderRadius: 36, backgroundColor: 'rgba(255,255,255,0.95)', borderWidth: 4, borderColor: 'rgba(255,255,255,0.60)' },
 
@@ -6107,9 +6881,21 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24, borderTopRightRadius: 24,
     paddingBottom: Platform.OS === 'ios' ? 20 : 20,
     paddingHorizontal: 20, paddingTop: 12,
-    maxHeight: '85%',
+    height: '85%',
     ...SHADOW.glow,
   },
+  contactCheckbox: {
+    width: 24, height: 24, borderRadius: 12,
+    borderWidth: 2, borderColor: COLORS.sub,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  contactCheckboxOn: { backgroundColor: COLORS.blue, borderColor: COLORS.blue },
+  contactSendBtn: { marginTop: 10, borderRadius: RADIUS.full, overflow: 'hidden' },
+  contactSendBtnGrad: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 13, borderRadius: RADIUS.full,
+  },
+  contactSendBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
   contactSearchWrap: {
     flexDirection: 'row',
     alignItems: 'center',

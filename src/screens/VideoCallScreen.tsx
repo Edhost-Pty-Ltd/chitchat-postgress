@@ -24,6 +24,8 @@ import { useIncomingCallAnswer } from '../hooks/useIncomingCallAnswer';
 import { useAuth } from '../hooks/useAuth';
 import { useFloatingCall } from '../context/FloatingCallContext';
 import { useContacts } from '../hooks/useContacts';
+import { usePhoneBook } from '../hooks/usePhoneBook';
+import { normalizePhone } from '../utils/phoneUtils';
 import { useMeetingRoom } from '../hooks/useMeetingRoom';
 import firestore from '@react-native-firebase/firestore';
 import storage from '@react-native-firebase/storage';
@@ -208,6 +210,18 @@ export default function VideoCallScreen() {
   const [callStatus, setCallStatus]     = useState<string>('connecting');
   const [showQuality, setShowQuality]   = useState(false);
   const [switchingCamera, setSwitchingCamera] = useState(false);
+
+  // Live other-party info (name/photo/presence) + Firestore call status, used
+  // for the "Ringing"/"Calling" label and to show the callee's photo. Only
+  // meaningful for 1:1 calls (not the meeting-room mode).
+  const [liveName,   setLiveName]   = useState<string | null>(null);
+  const [livePhoto,  setLivePhoto]  = useState<string | null>(null);
+  const [livePhone,  setLivePhone]  = useState<string | null>(null);
+  const [peerOnline, setPeerOnline] = useState<boolean | null>(null);
+  const [remoteCallStatus, setRemoteCallStatus] = useState<string>(isOutgoing ? 'ringing' : 'accepted');
+  // Shared answer timestamp (ms). Both sides derive 1:1 call duration from this
+  // so caller and receiver always show the exact same elapsed time.
+  const [startTimeMs, setStartTimeMs] = useState<number | null>(null);
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [showCameraToggle, setShowCameraToggle] = useState(false);
 
@@ -266,6 +280,7 @@ export default function VideoCallScreen() {
   const { initiateCall: initiateOutgoingCall } = useOutgoingCall();
   const { answerCall } = useIncomingCallAnswer();
   const { contacts } = useContacts();
+  const { resolveName } = usePhoneBook();
 
   // The actual stream that should be displayed locally
   const activeLocalStream = screenSharing && screenShareStreamRef.current 
@@ -286,14 +301,30 @@ export default function VideoCallScreen() {
   }, [networkQuality]);
 
   // ── Contact build (other party) ─────────────────────────────────
-  const otherContact: Contact = useMemo(() => ({
-    id: parseInt(otherParty.userId) || -2,
-    name: meetingTitleFallback(routeMeetingTitle, otherParty.displayName),
-    avatar: (otherParty.displayName || 'XX').split(' ').map((n: string) => n[0]).join('').toUpperCase(),
-    color: COLORS.blue,
-    status: 'online',
-    lastMsg: '', time: '', unread: 0,
-  }), [otherParty, routeMeetingTitle]);
+  // Prefer live Firestore name/photo, falling back to the navigation params.
+  const otherContact: Contact & { photoUrl: string | null } = useMemo(() => {
+    const rawName = (liveName ?? otherParty.displayName ?? '').trim();
+    // Resolve against this device's phone book so a saved contact's name shows.
+    const phoneToResolve = livePhone
+      ?? (/^\+?[0-9\s()-]{6,}$/.test(rawName) ? rawName : null);
+    const nameRule = phoneToResolve
+      ? resolveName(normalizePhone(phoneToResolve), rawName || 'Unknown')
+      : (rawName || 'Unknown');
+    const displayName = meetingTitleFallback(routeMeetingTitle, nameRule || otherParty.displayName);
+    const parts = (nameRule || 'XX').split(/\s+/).filter(Boolean);
+    const initials = parts.length >= 2
+      ? (parts[0][0] + parts[1][0]).toUpperCase()
+      : (parts[0] || 'XX').slice(0, 2).toUpperCase();
+    return {
+      id: parseInt(otherParty.userId) || -2,
+      name: displayName,
+      avatar: initials,
+      color: COLORS.blue,
+      status: 'online',
+      lastMsg: '', time: '', unread: 0,
+      photoUrl: livePhoto ?? otherParty.photoUrl ?? null,
+    };
+  }, [otherParty, routeMeetingTitle, liveName, livePhoto, livePhone, resolveName]);
 
   const [participants, setParticipants] = useState<Participant[]>([
     { id: `remote-${otherParty.userId}`, contact: otherContact, isLocal: false },
@@ -304,6 +335,29 @@ export default function VideoCallScreen() {
   const unsubscribeCallRef = useRef<(() => void) | null>(null);
   const remoteStreamRef = useRef<any>(null);
   useEffect(() => { remoteStreamRef.current = remoteStream; }, [remoteStream]);
+
+  // ── Live subscribe to the other party's user doc (1:1 calls only) ───────────
+  useEffect(() => {
+    if (isMeeting || !otherParty.userId) return;
+    const fsDb = db as ReturnType<typeof firestore>;
+    const unsub = fsDb.collection('users').doc(otherParty.userId).onSnapshot((snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data() ?? {};
+      if (typeof data.displayName === 'string' && data.displayName.trim()) {
+        setLiveName(data.displayName.trim());
+      }
+      if (typeof data.photoURL === 'string' && data.photoURL) {
+        setLivePhoto(data.photoURL);
+      }
+      if (typeof data.phone === 'string' && data.phone) {
+        setLivePhone(data.phone);
+      }
+      setPeerOnline(!!data.online);
+    }, (err) => {
+      console.warn('[VideoCall] user presence subscription failed:', err);
+    });
+    return () => unsub();
+  }, [isMeeting, otherParty.userId]);
 
   // ── Fetch meeting schedule (end time for countdown) ─────────────
   useEffect(() => {
@@ -444,10 +498,19 @@ export default function VideoCallScreen() {
           if (data?.videoUpgradeRequest && data.videoUpgradeRequest.requestedBy !== user?.uid) {
             setShowCameraToggle(true);
           }
-          if (data?.status === 'ended') navigation.goBack();
+          if (typeof data?.status === 'string') setRemoteCallStatus(data.status);
+          const st = data?.startTime ?? data?.startedAt;
+          if (st) {
+            const ms = typeof st.toDate === 'function' ? st.toDate().getTime() : new Date(st).getTime();
+            if (!Number.isNaN(ms)) setStartTimeMs(ms);
+          }
+          if (data?.status === 'ended' || data?.status === 'rejected' || data?.status === 'missed') {
+            navigation.goBack();
+          }
         });
 
-        timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
+        // Duration timer is driven by a separate effect off the shared
+        // startTime (1:1) or on join (meetings).
       } catch (error) {
         console.error('[VideoCall] Setup failed:', error);
         setCallStatus('failed');
@@ -466,6 +529,36 @@ export default function VideoCallScreen() {
   useEffect(() => {
     if (connectionState === 'connected') startNetworkMonitoring();
   }, [connectionState, startNetworkMonitoring]);
+
+  // ── Duration timer ──────────────────────────────────────────────
+  // Meetings start counting on join. 1:1 calls derive the duration from the
+  // SHARED startTime written when the callee answered, so both the caller and
+  // the receiver always show identical elapsed time, and nothing counts while
+  // the call is still ringing.
+  const videoConnected = isMeeting ? callStatus === 'connected' : startTimeMs != null;
+  useEffect(() => {
+    if (isMeeting) {
+      // Local incrementing timer for meetings (joined immediately).
+      if (!timerRef.current) {
+        timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
+      }
+      return () => {
+        if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      };
+    }
+    // 1:1 path — compute from the shared startTime.
+    if (startTimeMs == null) {
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      setDuration(0);
+      return;
+    }
+    const tick = () => setDuration(Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000)));
+    tick();
+    timerRef.current = setInterval(tick, 1000);
+    return () => {
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    };
+  }, [isMeeting, startTimeMs]);
 
   // ── React to being muted by organizer ───────────────────────────
   useEffect(() => {
@@ -1126,9 +1219,25 @@ export default function VideoCallScreen() {
       : 'Time is up'
     : null;
 
+  // 1:1 ringing/calling label (mirrors AudioCallScreen):
+  //  connected → duration · participants; outgoing & ringing → Ringing/Calling
+  //  depending on whether the callee is online; accepted → Connecting…
+  const oneToOneStatusLabel = (() => {
+    if (startTimeMs != null) return fmt(duration);
+    if (callStatus === 'failed' || callStatus === 'disconnected'
+        || remoteCallStatus === 'ended' || remoteCallStatus === 'rejected'
+        || remoteCallStatus === 'missed') return 'Call ended';
+    if (isOutgoing) {
+      return peerOnline ? 'Ringing…' : 'Calling…';
+    }
+    return 'Connecting…';
+  })();
+
   const topStatusText = isMeeting
     ? `${fmt(duration)} · ${joinedCount} participant${joinedCount === 1 ? '' : 's'}`
-    : `${fmt(duration)} · ${participants.length} participant${participants.length === 1 ? '' : 's'}`;
+    : (videoConnected
+        ? `${fmt(duration)} · ${participants.length} participant${participants.length === 1 ? '' : 's'}`
+        : oneToOneStatusLabel);
 
   return (
     <View style={styles.root}>
@@ -1154,10 +1263,19 @@ export default function VideoCallScreen() {
         )}
         {!mainP.isLocal && !remoteStream && (
           <View style={styles.mainAvatarOverlay}>
-            <Avatar initials={mainP.contact.avatar} color={mainP.contact.color} size={120} />
+            <Avatar
+              initials={mainP.contact.avatar}
+              color={mainP.contact.color}
+              size={120}
+              imageUrl={(mainP.contact as any).photoUrl ?? null}
+            />
             <AppText fixedColor style={styles.mainName}>{mainP.contact.name}</AppText>
             <AppText fixedColor style={styles.mainSub}>
-              {isRecording ? `● Recording ${fmt(Math.floor(recordingMs / 1000))}` : `In call · ${fmt(duration)}`}
+              {isRecording
+                ? `● Recording ${fmt(Math.floor(recordingMs / 1000))}`
+                : (isMeeting
+                    ? `In call · ${fmt(duration)}`
+                    : (videoConnected ? `In call · ${fmt(duration)}` : oneToOneStatusLabel))}
             </AppText>
           </View>
         )}

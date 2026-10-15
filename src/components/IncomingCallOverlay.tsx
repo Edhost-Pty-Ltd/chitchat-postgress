@@ -1,15 +1,19 @@
 // ─── Component: Incoming Call Overlay ────────────────────────────────────────
 // Full-screen overlay for incoming calls with answer/reject buttons
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View, StyleSheet, TouchableOpacity, Modal, Platform, Animated, Vibration,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
+import firestore from '@react-native-firebase/firestore';
 import { AppText, AppIcon } from '../context/ThemeContext';
 import { Avatar } from '.';
 import { useRingtone } from '../hooks/useRingtone';
+import { usePhoneBook } from '../hooks/usePhoneBook';
+import { normalizePhone } from '../utils/phoneUtils';
+import { db } from '../config/firebase';
 import { COLORS, RADIUS, SHADOW } from '../types/theme';
 import type { IncomingCallData } from '../types/call';
 
@@ -23,6 +27,30 @@ interface IncomingCallOverlayProps {
 export function IncomingCallOverlay({ visible, call, onAnswer, onReject }: IncomingCallOverlayProps) {
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const ringtone = useRingtone();
+  const { resolveName } = usePhoneBook();
+
+  // Resolve the caller against the RECEIVER's phone book. The call doc's
+  // displayName is whatever the caller set (often their phone number); we want
+  // the name the receiver saved them under. Look up the caller's authoritative
+  // phone + profile photo from users/{callerId}, then resolve the phone.
+  const [callerPhone, setCallerPhone] = useState<string | null>(null);
+  const [callerPhoto, setCallerPhoto] = useState<string | null>(null);
+
+  useEffect(() => {
+    const callerId = call?.caller?.userId;
+    if (!callerId) { setCallerPhone(null); setCallerPhoto(null); return; }
+    let cancelled = false;
+    const fsDb = db as ReturnType<typeof firestore>;
+    fsDb.collection('users').doc(callerId).get()
+      .then((snap) => {
+        if (cancelled || !snap.exists()) return;
+        const data = snap.data() ?? {};
+        if (typeof data.phone === 'string') setCallerPhone(data.phone);
+        if (typeof data.photoURL === 'string' && data.photoURL) setCallerPhoto(data.photoURL);
+      })
+      .catch((err) => console.warn('[IncomingCallOverlay] caller lookup failed:', err));
+    return () => { cancelled = true; };
+  }, [call?.caller?.userId]);
 
   // Pulse animation for avatar
   useEffect(() => {
@@ -81,12 +109,24 @@ export function IncomingCallOverlay({ visible, call, onAnswer, onReject }: Incom
   };
 
   const getInitials = (name: string) => {
-    const parts = name.trim().split(/\s+/);
+    const parts = (name || '').trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return '?';
     if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-    return name.slice(0, 2).toUpperCase();
+    return parts[0].slice(0, 2).toUpperCase();
   };
 
   if (!visible || !call) return null;
+
+  // The number to look up in the phone book: the caller's real phone when we
+  // have it, otherwise the displayName if it looks like a phone number.
+  const rawDisplay = call.caller.displayName || '';
+  const looksLikePhone = /^\+?[0-9\s()-]{6,}$/.test(rawDisplay);
+  const phoneToResolve = callerPhone ?? (looksLikePhone ? rawDisplay : null);
+  // Saved contact name from the receiver's phone book, or a sensible fallback.
+  const resolvedName = phoneToResolve
+    ? resolveName(normalizePhone(phoneToResolve), rawDisplay || 'Unknown')
+    : (rawDisplay || 'Unknown');
+  const resolvedPhoto = callerPhoto ?? call.caller.photoUrl ?? null;
 
   return (
     <Modal
@@ -113,16 +153,16 @@ export function IncomingCallOverlay({ visible, call, onAnswer, onReject }: Incom
             <Animated.View style={[styles.avatarContainer, { transform: [{ scale: pulseAnim }] }]}>
               <View style={styles.avatarRing}>
                 <Avatar
-                  initials={getInitials(call.caller.displayName)}
+                  initials={getInitials(resolvedName)}
                   color={COLORS.blue}
                   size={120}
-                  imageUrl={call.caller.photoUrl}
+                  imageUrl={resolvedPhoto}
                 />
               </View>
             </Animated.View>
 
             <AppText fixedColor style={styles.callerName}>
-              {call.caller.displayName}
+              {resolvedName}
             </AppText>
             <AppText fixedColor style={styles.callStatus}>
               Incoming {call.type} call...

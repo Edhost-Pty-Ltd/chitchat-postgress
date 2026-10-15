@@ -99,3 +99,42 @@ export async function removeLocalMessage(chatId: string, messageId: string): Pro
     console.warn('[useLocalMessages] removeLocalMessage error:', err);
   }
 }
+
+// ─── Per-user "delete for me" ids ─────────────────────────────────────────────
+// Message ids the user deleted FOR THEMSELVES. Kept locally so the deletion
+// survives Firestore snapshots (which would otherwise re-add the message) and
+// never touches the shared doc — the other member keeps their copy. No network
+// write, so it works regardless of Firestore security rules.
+
+const DELETED_KEY = (chatId: string) => `deleted_msgs_${chatId}`;
+
+/** Load the set of message ids this user has deleted for themselves. */
+export async function loadDeletedIds(chatId: string): Promise<string[]> {
+  try {
+    const raw = await AsyncStorage.getItem(DELETED_KEY(chatId));
+    return raw ? (JSON.parse(raw) as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Mark one or more message ids as deleted-for-me. Returns the updated set. */
+export async function addDeletedIds(chatId: string, ids: string[]): Promise<string[]> {
+  try {
+    const existing = await loadDeletedIds(chatId);
+    const merged = Array.from(new Set([...existing, ...ids]));
+    await AsyncStorage.setItem(DELETED_KEY(chatId), JSON.stringify(merged));
+    return merged;
+  } catch {
+    return ids;
+  }
+}
+
+/** Clear the deleted-for-me set (used when the whole chat is cleared/deleted). */
+export async function clearDeletedIds(chatId: string): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(DELETED_KEY(chatId));
+  } catch {
+    /* no-op */
+  }
+}

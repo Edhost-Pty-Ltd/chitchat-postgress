@@ -13,8 +13,8 @@
 
 import { useState, useEffect } from 'react';
 import firestore from '@react-native-firebase/firestore';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { db } from '../config/firebase';
-import { getAuth } from '@react-native-firebase/auth'; 
 
 export interface ChatPreview {
   chatId:       string;
@@ -28,23 +28,51 @@ export interface ChatPreview {
 }
 
 const MAX_PERM_RETRIES = 8;
+const CHATS_CACHE_KEY = (uid: string) => `chats_cache_${uid}`;
+
+// Serialise/deserialise ChatPreview[] for AsyncStorage (Date → ISO string).
+function serialiseChats(list: ChatPreview[]): string {
+  return JSON.stringify(list.map((c) => ({ ...c, timestamp: c.timestamp ? c.timestamp.toISOString() : null })));
+}
+function deserialiseChats(raw: string): ChatPreview[] {
+  try {
+    const arr = JSON.parse(raw) as any[];
+    return arr.map((c) => ({ ...c, timestamp: c.timestamp ? new Date(c.timestamp) : null }));
+  } catch {
+    return [];
+  }
+}
+
 export function useChats(ownerUid: string | null) {
   const [chats,   setChats]   = useState<ChatPreview[]>([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
 
+  // Seed instantly from the local cache so the list renders fully on launch
+  // without a "Loading chats…" spinner. The live listener below then refreshes
+  // silently in the background.
+  useEffect(() => {
+    if (!ownerUid) return;
+    let cancelled = false;
+    AsyncStorage.getItem(CHATS_CACHE_KEY(ownerUid)).then((raw) => {
+      if (cancelled || !raw) return;
+      const cached = deserialiseChats(raw);
+      if (cached.length > 0) {
+        setChats(cached);
+        setLoading(false); // we have something to show immediately
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [ownerUid]);
+
   useEffect(() => {
     if (!ownerUid) { 
-// ...
-console.log('[useChats][diag] auth.uid =', getAuth().currentUser?.uid,
-            '  passed ownerUid =', ownerUid);
       setChats([]);
       setLoading(false);
       return;
     }
 
-    setLoading(true);
     let cancelled = false;
 
     const unsub = (db as ReturnType<typeof firestore>)
@@ -78,6 +106,8 @@ console.log('[useChats][diag] auth.uid =', getAuth().currentUser?.uid,
           setChats(result);
           setError(null);
           setLoading(false);
+          // Persist for an instant, spinner-free render next launch.
+          AsyncStorage.setItem(CHATS_CACHE_KEY(ownerUid), serialiseChats(result)).catch(() => {});
         },
         (err) => {
           if (cancelled) return;

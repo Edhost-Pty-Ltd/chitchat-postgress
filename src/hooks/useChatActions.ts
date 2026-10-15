@@ -198,6 +198,7 @@ export async function sendImageMessage(
   senderId: string,
   imageUri: string,
   onProgress?: (progress: number) => void,
+  caption?: string | null,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
     const fileName = generateFileName(getFileExtension(imageUri));
@@ -212,10 +213,12 @@ export async function sendImageMessage(
     const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
     const batch        = fsDb().batch();
 
+    const trimmedCaption = caption?.trim() || null;
+
     const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
     batch.set(msgRef, {
       messageId: msgRef.id, senderId,
-      text: null, type: 'image', imageUrl,
+      text: trimmedCaption, type: 'image', imageUrl,
       timestamp: firestore.FieldValue.serverTimestamp(),
       expiresAt, readBy: [senderId], deliveredTo: [],
     });
@@ -224,7 +227,7 @@ export async function sendImageMessage(
       otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
     );
     batch.update(chatRef, {
-      'lastMessage.text':      '📷 Photo',
+      'lastMessage.text':      trimmedCaption ? `📷 ${trimmedCaption}` : '📷 Photo',
       'lastMessage.senderId':  senderId,
       'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
       ...unreadUpdates,
@@ -245,13 +248,14 @@ export async function sendVideoMessage(
   videoUri: string,
   thumbnailUri?: string,
   onProgress?: (progress: number) => void,
+  caption?: string | null,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
     const videoUrl = await uploadFile(videoUri, 'chatMedia', {
       chatId, fileName: generateFileName(getFileExtension(videoUri)),
     }, onProgress);
 
-    let thumbnailUrl: string | undefined;
+    let thumbnailUrl: string | null = null;
     if (thumbnailUri) {
       thumbnailUrl = await uploadFile(thumbnailUri, 'chatMedia', {
         chatId, fileName: generateFileName('jpg'),
@@ -267,10 +271,12 @@ export async function sendVideoMessage(
     const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
     const batch        = fsDb().batch();
 
+    const trimmedCaption = caption?.trim() || null;
+
     const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
     batch.set(msgRef, {
       messageId: msgRef.id, senderId,
-      text: null, type: 'video', videoUrl, thumbnailUrl,
+      text: trimmedCaption, type: 'video', videoUrl, thumbnailUrl,
       timestamp: firestore.FieldValue.serverTimestamp(),
       expiresAt, readBy: [senderId], deliveredTo: [],
     });
@@ -279,7 +285,7 @@ export async function sendVideoMessage(
       otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
     );
     batch.update(chatRef, {
-      'lastMessage.text':      '🎥 Video',
+      'lastMessage.text':      trimmedCaption ? `🎥 ${trimmedCaption}` : '🎥 Video',
       'lastMessage.senderId':  senderId,
       'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
       ...unreadUpdates,
@@ -488,4 +494,301 @@ export async function sendBroadcastMessage(
   }
 
   return { sent, failed };
+}
+
+// ── Send an order (cart checkout) message ─────────────────────────────────────
+// Stores the full line items (with product image URLs) so the recipient sees a
+// premium order card, not a plain-text summary.
+export interface OrderLineItem {
+  id: string;
+  name: string;
+  price: string;
+  imageUri: string | null;
+  quantity: number;
+}
+export async function sendOrderMessage(
+  chatId: string,
+  senderId: string,
+  items: OrderLineItem[],
+  total: string | null,
+  currency: string,
+): Promise<{ success: boolean; messageId: string }> {
+  try {
+    if (items.length === 0) return { success: false, messageId: '' };
+
+    const chatRef  = fsDb().collection('chats').doc(chatId);
+    const chatSnap = await chatRef.get();
+    if (!chatSnap.exists) return { success: false, messageId: '' };
+
+    const members      = chatSnap.data()!.members ?? [];
+    const otherMembers = members.filter((id: string) => id !== senderId);
+    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
+    const batch        = fsDb().batch();
+
+    const totalQty = items.reduce((sum, it) => sum + it.quantity, 0);
+
+    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
+    batch.set(msgRef, {
+      messageId: msgRef.id, senderId,
+      text: null, type: 'order',
+      order: {
+        items: items.map((it) => ({
+          id: it.id, name: it.name, price: it.price,
+          imageUri: it.imageUri ?? null, quantity: it.quantity,
+        })),
+        total: total ?? null,
+        currency: currency ?? '',
+      },
+      timestamp: firestore.FieldValue.serverTimestamp(),
+      expiresAt, readBy: [senderId], deliveredTo: [],
+    });
+
+    const unreadUpdates = Object.fromEntries(
+      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
+    );
+    batch.update(chatRef, {
+      'lastMessage.text':      `🛒 Order · ${totalQty} item${totalQty === 1 ? '' : 's'}`,
+      'lastMessage.senderId':  senderId,
+      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
+      ...unreadUpdates,
+    });
+
+    await batch.commit();
+    return { success: true, messageId: msgRef.id };
+  } catch (err) {
+    console.error('[sendOrderMessage] error:', err);
+    return { success: false, messageId: '' };
+  }
+}
+
+// ── Send a shared contact card ────────────────────────────────────────────────
+// The stored `name` is whatever the SENDER saved for this contact, so it shows
+// the same way to whoever receives it.
+export interface SharedContact {
+  name: string;
+  phone: string;
+  userId: string | null;
+  registered: boolean;
+  photoURL: string | null;
+}
+export async function sendContactMessage(
+  chatId: string,
+  senderId: string,
+  contact: SharedContact,
+): Promise<{ success: boolean; messageId: string }> {
+  try {
+    const chatRef  = fsDb().collection('chats').doc(chatId);
+    const chatSnap = await chatRef.get();
+    if (!chatSnap.exists) return { success: false, messageId: '' };
+
+    const members      = chatSnap.data()!.members ?? [];
+    const otherMembers = members.filter((id: string) => id !== senderId);
+    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
+    const batch        = fsDb().batch();
+
+    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
+    batch.set(msgRef, {
+      messageId: msgRef.id, senderId,
+      text: null, type: 'contact',
+      contact: {
+        name: contact.name,
+        phone: contact.phone,
+        userId: contact.userId ?? null,
+        registered: !!contact.registered,
+        photoURL: contact.photoURL ?? null,
+      },
+      timestamp: firestore.FieldValue.serverTimestamp(),
+      expiresAt, readBy: [senderId], deliveredTo: [],
+    });
+
+    const unreadUpdates = Object.fromEntries(
+      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
+    );
+    batch.update(chatRef, {
+      'lastMessage.text':      `👤 ${contact.name}`,
+      'lastMessage.senderId':  senderId,
+      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
+      ...unreadUpdates,
+    });
+
+    await batch.commit();
+    return { success: true, messageId: msgRef.id };
+  } catch (err) {
+    console.error('[sendContactMessage] error:', err);
+    return { success: false, messageId: '' };
+  }
+}
+
+// Share MULTIPLE contacts in a single message. The bubble shows a compact
+// "N contacts" card with a "View all" sheet. The first contact is also mirrored
+// into the top-level `contact` fields so older previews/fallbacks still work.
+export async function sendContactsMessage(
+  chatId: string,
+  senderId: string,
+  contacts: SharedContact[],
+): Promise<{ success: boolean; messageId: string }> {
+  try {
+    if (contacts.length === 0) return { success: false, messageId: '' };
+    if (contacts.length === 1) return sendContactMessage(chatId, senderId, contacts[0]);
+
+    const chatRef  = fsDb().collection('chats').doc(chatId);
+    const chatSnap = await chatRef.get();
+    if (!chatSnap.exists) return { success: false, messageId: '' };
+
+    const members      = chatSnap.data()!.members ?? [];
+    const otherMembers = members.filter((id: string) => id !== senderId);
+    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
+    const batch        = fsDb().batch();
+
+    const normalized = contacts.map((c) => ({
+      name: c.name,
+      phone: c.phone,
+      userId: c.userId ?? null,
+      registered: !!c.registered,
+      photoURL: c.photoURL ?? null,
+    }));
+    const first = normalized[0];
+
+    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
+    batch.set(msgRef, {
+      messageId: msgRef.id, senderId,
+      text: null, type: 'contact',
+      contact: { ...first, contacts: normalized },
+      timestamp: firestore.FieldValue.serverTimestamp(),
+      expiresAt, readBy: [senderId], deliveredTo: [],
+    });
+
+    const unreadUpdates = Object.fromEntries(
+      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
+    );
+    batch.update(chatRef, {
+      'lastMessage.text':      `👤 ${first.name} and ${normalized.length - 1} other${normalized.length - 1 === 1 ? '' : 's'}`,
+      'lastMessage.senderId':  senderId,
+      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
+      ...unreadUpdates,
+    });
+
+    await batch.commit();
+    return { success: true, messageId: msgRef.id };
+  } catch (err) {
+    console.error('[sendContactsMessage] error:', err);
+    return { success: false, messageId: '' };
+  }
+}
+
+// ── Send a poll ───────────────────────────────────────────────────────────────
+export interface PollDraft {
+  question: string;
+  options: string[];       // non-empty option texts
+  multiple: boolean;       // allow multiple selections
+}
+export async function sendPollMessage(
+  chatId: string,
+  senderId: string,
+  draft: PollDraft,
+): Promise<{ success: boolean; messageId: string }> {
+  try {
+    const question = draft.question.trim();
+    const options  = draft.options.map((o) => o.trim()).filter(Boolean);
+    if (!question || options.length < 2) return { success: false, messageId: '' };
+
+    const chatRef  = fsDb().collection('chats').doc(chatId);
+    const chatSnap = await chatRef.get();
+    if (!chatSnap.exists) return { success: false, messageId: '' };
+
+    const members      = chatSnap.data()!.members ?? [];
+    const otherMembers = members.filter((id: string) => id !== senderId);
+    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
+    const batch        = fsDb().batch();
+
+    const optionObjs = options.map((text, i) => ({ id: `opt${i}`, text }));
+    const votes: Record<string, string[]> = {};
+    optionObjs.forEach((o) => { votes[o.id] = []; });
+
+    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
+    batch.set(msgRef, {
+      messageId: msgRef.id, senderId,
+      text: null, type: 'poll',
+      poll: { question, options: optionObjs, votes, multiple: !!draft.multiple },
+      timestamp: firestore.FieldValue.serverTimestamp(),
+      expiresAt, readBy: [senderId], deliveredTo: [],
+    });
+
+    const unreadUpdates = Object.fromEntries(
+      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
+    );
+    batch.update(chatRef, {
+      'lastMessage.text':      `📊 ${question}`,
+      'lastMessage.senderId':  senderId,
+      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
+      ...unreadUpdates,
+    });
+
+    await batch.commit();
+    return { success: true, messageId: msgRef.id };
+  } catch (err) {
+    console.error('[sendPollMessage] error:', err);
+    return { success: false, messageId: '' };
+  }
+}
+
+// ── Cast / change a vote on a poll ────────────────────────────────────────────
+// Reads the current poll, toggles the voter on the chosen option, and (for
+// single-choice polls) removes them from all other options, then writes back.
+export async function votePollOption(
+  chatId: string,
+  messageId: string,
+  voterUid: string,
+  optionId: string,
+): Promise<boolean> {
+  try {
+    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc(messageId);
+
+    // Run the read-modify-write inside a transaction so concurrent votes from
+    // different users merge atomically against the latest server state. Without
+    // this, two people voting around the same time each write the whole
+    // `poll.votes` map and the second write clobbers the first — which is why a
+    // receiver's vote used to cancel the sender's vote.
+    await fsDb().runTransaction(async (tx) => {
+      const snap = await tx.get(msgRef);
+      if (!snap.exists) return;
+      const poll = snap.data()!.poll;
+      if (!poll) return;
+
+      const votes: Record<string, string[]> = {};
+      for (const id of Object.keys(poll.votes ?? {})) {
+        votes[id] = Array.isArray(poll.votes[id]) ? [...poll.votes[id]] : [];
+      }
+      // Ensure every option key exists so the written map is complete.
+      for (const o of poll.options ?? []) {
+        if (!votes[o.id]) votes[o.id] = [];
+      }
+
+      const already = votes[optionId]?.includes(voterUid);
+
+      if (!poll.multiple) {
+        // Single-choice: clear this voter from every option first, then set the
+        // new one. Tapping a different option switches the vote in one write.
+        for (const id of Object.keys(votes)) {
+          votes[id] = votes[id].filter((u) => u !== voterUid);
+        }
+        // In single-choice mode, tapping the already-selected option retracts it;
+        // tapping any other option selects it (we already cleared the old one).
+        if (!already) votes[optionId] = [...(votes[optionId] ?? []), voterUid];
+      } else {
+        // Multiple-choice: plain toggle on just this option.
+        if (already) {
+          votes[optionId] = (votes[optionId] ?? []).filter((u) => u !== voterUid);
+        } else {
+          votes[optionId] = [...(votes[optionId] ?? []), voterUid];
+        }
+      }
+
+      tx.update(msgRef, { 'poll.votes': votes });
+    });
+    return true;
+  } catch (err) {
+    console.error('[votePollOption] error:', err);
+    return false;
+  }
 }

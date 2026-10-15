@@ -692,6 +692,17 @@ export const autoResponder = onDocumentCreated(
     // Don't auto-reply to blocked messages or non-text types
     if (msgData.blockedMessage) return;
 
+    // Don't auto-reply to an auto-reply. Otherwise, when both parties are
+    // off-hours, A's message triggers B's away-message, and B's away-message
+    // (a new doc) would in turn trigger A's away-message back to B — spamming
+    // the person who started the conversation. The auto-reply we write is
+    // tagged isAutoReply:true, so bail out here when we see it.
+    if (msgData.isAutoReply) return;
+
+    // Also skip system notices (block/unblock, meeting invites, number-change
+    // notifications) — these aren't a person reaching out.
+    if (msgData.type === 'system') return;
+
     const dbAdmin = getFirestore();
 
     // Load the parent chat to find the other member and confirm it's 1-on-1

@@ -37,7 +37,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Platform, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import DeviceInfo from 'react-native-device-info';
 import firestore from '@react-native-firebase/firestore';
 import { getAuth, signOut as fbSignOut } from '@react-native-firebase/auth';
 import { getFunctions, httpsCallable } from '@react-native-firebase/functions';
@@ -112,11 +111,24 @@ function randomDisplayCode(len: number): string {
 }
 
 // ─── Device helpers — react-native-device-info backed ─────────────────────────
+// NOTE: react-native-device-info's JS throws at import time if its native
+// module (RNDeviceInfo) isn't in the binary (e.g. not pod-installed). A static
+// import would crash app startup, so we load it defensively and fall back to
+// Platform-based values. Every call site already has try/catch fallbacks.
+let DeviceInfo: any = null;
+try {
+  DeviceInfo = require('react-native-device-info').default ?? require('react-native-device-info');
+} catch (err) {
+  console.warn('[useLinkedDevices] react-native-device-info unavailable, using fallbacks:', err);
+  DeviceInfo = null;
+}
 
 async function getStableDeviceId(): Promise<string> {
   try {
-    const id = await DeviceInfo.getUniqueId();
-    if (id && id !== 'unknown') return id;
+    if (DeviceInfo) {
+      const id = await DeviceInfo.getUniqueId();
+      if (id && id !== 'unknown') return id;
+    }
   } catch {}
   let fallback = await AsyncStorage.getItem(DEVICE_ID_KEY);
   if (!fallback) {
@@ -129,6 +141,7 @@ async function getStableDeviceId(): Promise<string> {
 function detectDeviceType(): LinkedDevice['type'] {
   if (Platform.OS === 'web') return 'web';
   try {
+    if (!DeviceInfo) return 'phone';
     const t = DeviceInfo.getDeviceType();
     if (t === 'Tablet')  return 'tablet';
     if (t === 'Desktop') return 'desktop';
@@ -141,6 +154,7 @@ function detectDeviceType(): LinkedDevice['type'] {
 async function detectDeviceNameAsync(): Promise<string> {
   if (Platform.OS === 'web') return 'Web Browser';
   try {
+    if (!DeviceInfo) throw new Error('device-info unavailable');
     const name = await DeviceInfo.getDeviceName();
     if (name && name !== 'unknown') return name;
   } catch {}
@@ -151,6 +165,7 @@ async function detectDeviceNameAsync(): Promise<string> {
 function detectOS(): string {
   if (Platform.OS === 'web') return 'Web Browser';
   try {
+    if (!DeviceInfo) throw new Error('device-info unavailable');
     const sysName    = DeviceInfo.getSystemName();
     const sysVersion = DeviceInfo.getSystemVersion();
     const model      = DeviceInfo.getModel();

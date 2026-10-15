@@ -18,7 +18,7 @@ import { useState, useEffect, useCallback } from 'react';
 import firestore from '@react-native-firebase/firestore';
 import { db } from '../config/firebase';
 import { fetchUserPrivacySettings } from './usePrivacySettings';
-import { loadLocalMessages, mergeLocalMessages, clearLocalMessages, removeLocalMessage } from './useLocalMessages';
+import { loadLocalMessages, mergeLocalMessages, clearLocalMessages, removeLocalMessage, loadDeletedIds, addDeletedIds, clearDeletedIds } from './useLocalMessages';
 import { CatalogItem } from '../types';
 
 export interface FireMessage {
@@ -29,7 +29,7 @@ export interface FireMessage {
   voiceUrl:     string | null;
   videoUrl:     string | null;
   fileUrl:      string | null;
-  type:         'text' | 'image' | 'voice' | 'video' | 'file' | 'location' | 'system' | 'catalog';
+  type:         'text' | 'image' | 'voice' | 'video' | 'file' | 'location' | 'system' | 'catalog' | 'order' | 'contact' | 'poll';
   timestamp:    Date | null;
   expiresAt:    Date | null;
   readBy:       string[];
@@ -42,6 +42,33 @@ export interface FireMessage {
   blockedMessage?: boolean;
   // Catalog product card
   catalogItem?: CatalogItem | null;
+  // Order card (cart checkout) — line items + total
+  order?: {
+    items: { id: string; name: string; price: string; imageUri: string | null; quantity: number }[];
+    total: string | null;
+    currency: string;
+  } | null;
+  // Shared contact card
+  contact?: {
+    name: string;        // the sender's saved name for this contact
+    phone: string;       // E.164
+    userId: string | null;   // ChitChat UID when registered, else null
+    registered: boolean;     // true if this contact uses ChitChatBusiness
+    photoURL: string | null;
+    // When multiple contacts were shared at once, the full list lives here.
+    // The top-level fields above mirror the first entry for previews/fallbacks.
+    contacts?: {
+      name: string; phone: string; userId: string | null;
+      registered: boolean; photoURL: string | null;
+    }[];
+  } | null;
+  // Poll
+  poll?: {
+    question: string;
+    options: { id: string; text: string }[];
+    votes: Record<string, string[]>; // optionId -> array of voter UIDs
+    multiple: boolean;
+  } | null;
   location?: {
     latitude: number; longitude: number; accuracy?: number;
     altitude?: number | null; altitudeAccuracy?: number | null;
@@ -71,6 +98,14 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
   // Per-user "cleared" cutoff: messages at/before this time are hidden for this
   // user only (set when they clear the chat). Does not affect the other member.
   const [clearedAt, setClearedAt] = useState<number>(0);
+  // Message ids this user deleted "for me" (local-only, survives snapshots).
+  const [deletedIds, setDeletedIds] = useState<Set<string>>(new Set());
+
+  // Load the per-user deleted-for-me set for this chat.
+  useEffect(() => {
+    if (!chatId) { setDeletedIds(new Set()); return; }
+    loadDeletedIds(chatId).then((ids) => setDeletedIds(new Set(ids)));
+  }, [chatId]);
 
   // Seed from local cache immediately
   useEffect(() => {
@@ -125,6 +160,9 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
               thumbnailUrl:       d.thumbnailUrl ?? null,
               blockedMessage:     d.blockedMessage ?? false,
               catalogItem:        d.catalogItem ?? null,
+              order:              d.order      ?? null,
+              contact:            d.contact    ?? null,
+              poll:               d.poll       ?? null,
               location:           d.location   ?? null,
               isLiveLocation:     d.isLiveLocation ?? false,
               liveLocationExpiry: toDate(d.liveLocationExpiry),
@@ -193,17 +231,16 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
 
   // Delete a single message in real time: remove it from the in-memory list and
   // the local cache immediately, then delete the Firestore doc.
+  // Delete FOR THIS USER ONLY ("delete for me"). Purely local — we never touch
+  // the shared Firestore doc, so the other member keeps their copy and there's
+  // no permission concern. The id is recorded in a persistent local set so the
+  // message stays hidden even after Firestore snapshots re-deliver it.
   const deleteMessage = useCallback(async (messageId: string) => {
     if (!chatId || !messageId) return;
+    setDeletedIds((prev) => new Set(prev).add(messageId));
     setMessages((prev) => prev.filter((m) => m.messageId !== messageId));
     await removeLocalMessage(chatId, messageId);
-    try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('chats').doc(chatId).collection('messages').doc(messageId).delete();
-    } catch (err: any) {
-      setError(err.message);
-      throw err;
-    }
+    await addDeletedIds(chatId, [messageId]);
   }, [chatId]);
 
   // Clear every message in the chat: delete the Firestore docs, wipe the local
@@ -216,7 +253,9 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     if (!chatId || !ownerUid) return;
     setMessages([]);
     setClearedAt(Date.now());
+    setDeletedIds(new Set());
     await clearLocalMessages(chatId);
+    await clearDeletedIds(chatId);
     try {
       const fsDb = db as ReturnType<typeof firestore>;
       await fsDb.collection('chats').doc(chatId).set(
@@ -229,12 +268,55 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     }
   }, [chatId, ownerUid]);
 
-  // Hide messages the user cleared for themselves (timestamp <= their cutoff)
-  const visibleMessages = clearedAt > 0
-    ? messages.filter((m) => (m.timestamp?.getTime() ?? 0) > clearedAt)
-    : messages;
+  // Optimistically insert a locally-built message so it appears instantly,
+  // before the Firestore snapshot round-trips. The real snapshot (same
+  // messageId) overwrites it on arrival, so this is safe to call right after a
+  // successful send. Used for poll/order/contact cards which are written via
+  // useChatActions (outside this hook's own sendMessage path).
+  const addOptimisticMessage = useCallback((partial: Partial<FireMessage> & { messageId: string }) => {
+    if (!chatId) return;
+    const echo: FireMessage = {
+      messageId: partial.messageId,
+      senderId: partial.senderId ?? ownerUid ?? '',
+      text: partial.text ?? null,
+      imageUrl: partial.imageUrl ?? null,
+      voiceUrl: partial.voiceUrl ?? null,
+      videoUrl: partial.videoUrl ?? null,
+      fileUrl: partial.fileUrl ?? null,
+      type: partial.type ?? 'text',
+      timestamp: partial.timestamp ?? new Date(),
+      expiresAt: partial.expiresAt ?? null,
+      readBy: partial.readBy ?? (ownerUid ? [ownerUid] : []),
+      deliveredTo: partial.deliveredTo ?? [],
+      duration: partial.duration ?? null,
+      fileName: partial.fileName ?? null,
+      fileSize: partial.fileSize ?? null,
+      mimeType: partial.mimeType ?? null,
+      thumbnailUrl: partial.thumbnailUrl ?? null,
+      catalogItem: partial.catalogItem ?? null,
+      order: partial.order ?? null,
+      contact: partial.contact ?? null,
+      poll: partial.poll ?? null,
+      location: partial.location ?? null,
+      replyTo: partial.replyTo ?? null,
+      forwarded: partial.forwarded ?? false,
+    };
+    setMessages((prev) => {
+      if (prev.some((m) => m.messageId === echo.messageId)) return prev;
+      return [...prev, echo];
+    });
+    mergeLocalMessages(chatId, [echo]).catch(() => {});
+  }, [chatId, ownerUid]);
 
-  return { messages: visibleMessages, loading, error, sendMessage, clearMessages, deleteMessage };
+  // Hide messages the user cleared for themselves (timestamp <= their cutoff)
+  // and any they deleted "for me".
+  const visibleMessages = messages.filter((m) => {
+    if (deletedIds.has(m.messageId)) return false;
+    if (clearedAt > 0 && (m.timestamp?.getTime() ?? 0) <= clearedAt) return false;
+    return true;
+  });
+
+  return { messages: visibleMessages, loading, error, sendMessage, clearMessages, deleteMessage, addOptimisticMessage };
 }
 
 async function markAsRead(chatId: string, ownerUid: string, readReceipts = true) {

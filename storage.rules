@@ -12,15 +12,18 @@ service firebase.storage {
     }
 
     function isImage() {
-      return request.resource.contentType.matches('image/.*');
+      return request.resource.contentType != null
+        && request.resource.contentType.matches('image/.*');
     }
 
     function isVideo() {
-      return request.resource.contentType.matches('video/.*');
+      return request.resource.contentType != null
+        && request.resource.contentType.matches('video/.*');
     }
 
     function isAudio() {
-      return request.resource.contentType.matches('audio/.*');
+      return request.resource.contentType != null
+        && request.resource.contentType.matches('audio/.*');
     }
 
     function isValidMediaSize() {

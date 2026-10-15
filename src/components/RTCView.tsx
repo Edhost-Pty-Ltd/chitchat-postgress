@@ -43,17 +43,21 @@ export function RTCViewWeb({ stream, style, objectFit = 'cover', mirror = false 
   );
 }
 
-// Native implementation (lazy loaded)
+// Native implementation — resolved lazily on first render.
+// @livekit/react-native-webrtc builds `new NativeEventEmitter()` at module
+// top level; requiring it during app startup (before the bridge is ready)
+// throws and crashes the app. Defer the require until this view renders.
+let _rtcResolved = false;
 let RTCViewNative: any = null;
-
-if (Platform.OS !== 'web') {
-  // Only import the WebRTC view on native platforms
+function getRTCViewNative(): any {
+  if (_rtcResolved) return RTCViewNative;
+  _rtcResolved = true;
   try {
-    const webrtc = require('@livekit/react-native-webrtc');
-    RTCViewNative = webrtc.RTCView;
+    RTCViewNative = require('@livekit/react-native-webrtc').RTCView;
   } catch (err) {
     console.warn('[RTCView] Failed to load @livekit/react-native-webrtc:', err);
   }
+  return RTCViewNative;
 }
 
 // Cross-platform component
@@ -65,13 +69,14 @@ export default function RTCView(props: RTCViewProps) {
     return <RTCViewWeb {...props} />;
   }
 
-  // Native: use react-native-webrtc RTCView
-  if (!RTCViewNative) {
+  // Native: use react-native-webrtc RTCView (resolved on first render)
+  const RTCViewNativeComp = getRTCViewNative();
+  if (!RTCViewNativeComp) {
     console.error('[RTCView] RTCView not available on native platform');
     return <View style={[styles.fallback, props.style]} />;
   }
 
-  return <RTCViewNative {...props} />;
+  return <RTCViewNativeComp {...props} />;
 }
 
 const styles = StyleSheet.create({

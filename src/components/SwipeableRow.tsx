@@ -8,7 +8,7 @@
 // Only left-swipe is used so it never conflicts with the stack's right-edge
 // back-swipe gesture.
 
-import React, { useRef, useState, useImperativeHandle, forwardRef } from 'react';
+import React, { useRef, useState, useImperativeHandle, forwardRef, useEffect, useCallback } from 'react';
 import {
   View, Animated, PanResponder, StyleSheet, TouchableOpacity, Text,
 } from 'react-native';
@@ -24,6 +24,18 @@ export interface SwipeAction {
 
 export interface SwipeableRowHandle {
   close: () => void;
+}
+
+// ── Global open-row registry ──────────────────────────────────────────────────
+// Only one row may be open at a time across the whole list. Each mounted row
+// registers a `close` fn here; when any row opens, it closes all the others.
+// This is self-contained in the component, so parents need no extra wiring.
+const openRegistry = new Set<() => void>();
+
+function closeAllExcept(keep: () => void) {
+  openRegistry.forEach((closeFn) => {
+    if (closeFn !== keep) closeFn();
+  });
 }
 
 interface Props {
@@ -44,22 +56,29 @@ export const SwipeableRow = forwardRef<SwipeableRowHandle, Props>(function Swipe
   // hidden (and non-interactive) at rest.
   const [revealed, setRevealed] = useState(false);
 
-  const animateTo = (to: number) => {
-    openValue.current = to;
-    if (to === 0) {
-      // keep layer mounted during the close animation, then hide it
-      Animated.spring(translateX, { toValue: to, useNativeDriver: true, friction: 9, tension: 70 })
-        .start(() => setRevealed(false));
-    } else {
-      setRevealed(true);
-      Animated.spring(translateX, { toValue: to, useNativeDriver: true, friction: 9, tension: 70 }).start();
-    }
+  // `close` must be stable so it can live in the global open registry across
+  // renders without churning the Set on every re-render.
+  const close = useCallback(() => {
+    openValue.current = 0;
+    Animated.spring(translateX, { toValue: 0, useNativeDriver: true, friction: 9, tension: 70 })
+      .start(() => setRevealed(false));
+  }, [translateX]);
+
+  const open = () => {
+    // Smoothly close any other row that's currently open — one at a time.
+    closeAllExcept(close);
+    openValue.current = -openWidth;
+    setRevealed(true);
+    Animated.spring(translateX, { toValue: -openWidth, useNativeDriver: true, friction: 9, tension: 70 }).start();
   };
 
-  const open  = () => animateTo(-openWidth);
-  const close = () => animateTo(0);
-
   useImperativeHandle(ref, () => ({ close }));
+
+  // Register this row's `close` in the global registry while mounted.
+  useEffect(() => {
+    openRegistry.add(close);
+    return () => { openRegistry.delete(close); };
+  }, [close]);
 
   const panResponder = useRef(
     PanResponder.create({
@@ -67,7 +86,11 @@ export const SwipeableRow = forwardRef<SwipeableRowHandle, Props>(function Swipe
       // beats the stack back-swipe and doesn't hijack vertical scrolling.
       onMoveShouldSetPanResponder: (_e, g) =>
         Math.abs(g.dx) > 6 && Math.abs(g.dx) > Math.abs(g.dy) * 1.2,
-      onPanResponderGrant: () => setRevealed(true),
+      onPanResponderGrant: () => {
+        // As soon as a new row starts being swiped, close any other open row.
+        closeAllExcept(close);
+        setRevealed(true);
+      },
       onPanResponderMove: (_e, g) => {
         let next = openValue.current + g.dx;
         if (next > 0) next = next * 0.2;                    // resist dragging right past closed
