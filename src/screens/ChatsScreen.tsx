@@ -1306,6 +1306,7 @@ export default function ChatsScreen() {
   const [query,      setQuery]      = useState('');
   const [sheetOpen,  setSheetOpen]  = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const chatsListRef = useRef<FlatList>(null);
   const [labelManagerOpen, setLabelManagerOpen] = useState(false);
   const [managingLabelId,  setManagingLabelId]  = useState<string | null>(null);
 
@@ -1580,12 +1581,12 @@ export default function ChatsScreen() {
             newInfo.set(uid, {
               displayName: uid,
               phone: uid.startsWith('+') ? uid : '',
-              photoURL: null,
+              photoURL: '',
             });
           }
         } catch (_) {
           // On a fetch error, still record a fallback so the list isn't blocked.
-          newInfo.set(uid, { displayName: uid, phone: uid.startsWith('+') ? uid : '', photoURL: null });
+          newInfo.set(uid, { displayName: uid, phone: uid.startsWith('+') ? uid : '', photoURL: '' });
         }
       }
 
@@ -1703,6 +1704,24 @@ export default function ChatsScreen() {
       })
       .sort(byRecent);
   }, [tab, groupChats, labels, chats, query, userId, contactsMap, firestoreUsersMap, pinned]);
+
+  // Scroll to first unread chat or bottom when data updates
+  useEffect(() => {
+    if (!chatsListRef.current || data.length === 0) return;
+
+    setTimeout(() => {
+      // Find first chat with unread messages
+      const firstUnreadIndex = data.findIndex((chat) => chat.unreadCount > 0);
+
+      if (firstUnreadIndex !== -1) {
+        // Scroll to first unread chat
+        chatsListRef.current?.scrollToIndex({ index: firstUnreadIndex, animated: false, viewPosition: 0.5 });
+      } else {
+        // All read, scroll to bottom (most recent)
+        chatsListRef.current?.scrollToEnd({ animated: false });
+      }
+    }, 50);
+  }, [data.length, tab]); // Re-scroll when tab changes or data count changes
 
   const openSearch = () => {
     setSearchOpen(true);
@@ -2527,6 +2546,7 @@ export default function ChatsScreen() {
         </View>
       ) : (
         <FlatList
+          ref={chatsListRef}
           data={data}
           keyExtractor={(item) => item.chatId}
           renderItem={renderChat}

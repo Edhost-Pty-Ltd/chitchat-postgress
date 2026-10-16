@@ -3,7 +3,7 @@
 import React, {
   createContext, useContext, useState, useCallback, useRef, useEffect,
 } from 'react';
-import { Platform } from 'react-native';
+import { Platform, AppState } from 'react-native';
 import { useAuth } from '../hooks/useAuth';
 import { useNotificationSync } from '../hooks/useNotificationSync';
 
@@ -140,22 +140,27 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       if (toastTimer.current) clearTimeout(toastTimer.current);
       toastTimer.current = setTimeout(() => setToast(null), 4000);
 
-      // Send native device notification
-      try {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: notif.title,
-            body: notif.body,
-            sound: true,
-            data: { 
-              contactId: notif.contactId,
-              type: notif.type,
+      // Send a native local notification ONLY when the app is backgrounded.
+      // When the app is active (foregrounded), the Cloud Function has already
+      // sent an FCM/APNs push — firing a local one too causes a duplicate
+      // notification. The in-app toast shown above is sufficient while active.
+      if (AppState.currentState !== 'active') {
+        try {
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: notif.title,
+              body: notif.body,
+              sound: true,
+              data: { 
+                contactId: notif.contactId,
+                type: notif.type,
+              },
             },
-          },
-          trigger: null,
-        });
-      } catch (error) {
-        console.log(`[NotificationContext-${callId}] Failed to send native notification:`, error);
+            trigger: null,
+          });
+        } catch (error) {
+          console.log(`[NotificationContext-${callId}] Failed to send native notification:`, error);
+        }
       }
     },
     [],
@@ -190,7 +195,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
   // Update app badge count
   useEffect(() => {
-    Notifications.setBadgeCountAsync(unreadCount).catch((err) => {
+    Notifications.setBadgeCountAsync(unreadCount).catch((err:any) => {
       console.log('[Notifications] Failed to set badge count:', err);
     });
   }, [unreadCount]);

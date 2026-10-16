@@ -5,7 +5,7 @@ import {
   StyleSheet, TextInput, KeyboardAvoidingView, Platform,
   ActivityIndicator, PanResponder, Linking, Modal, Alert,
   GestureResponderEvent, PanResponderGestureState, Image, Dimensions,
-  Animated, Share, Switch, Pressable,
+  Animated, Easing, Share, Switch, Pressable,
 } from 'react-native';
 import { useNavigation, useRoute, RouteProp, useFocusEffect } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -77,7 +77,7 @@ import { useOutgoingCall } from '../hooks/useOutgoingCall';
 
 
 import { usePhoneBook } from '../hooks/usePhoneBook';
-import { useOtherUserPresence, useWritePresence } from '../hooks/usePresence';
+import { useOtherUserPresence } from '../hooks/usePresence';
 import { fetchUserPrivacySettings } from '../hooks/usePrivacySettings';
 import { useContacts, AppContact } from '../hooks/useContacts';
 
@@ -621,15 +621,29 @@ export default function ChatScreen() {
   // whenever messages cross a calendar day boundary
   type MessageListItem =
     | { type: 'message'; data: FireMessage }
-    | { type: 'dateSeparator'; dateLabel: string; date: Date };
+    | { type: 'dateSeparator'; dateLabel: string; date: Date }
+    | { type: 'unreadDivider' };
 
   const messagesWithDates = useMemo((): MessageListItem[] => {
     if (filteredMessages.length === 0) return [];
 
+    // Find the first message the current user hasn't read (and didn't send).
+    // We'll insert an "Unread messages" divider just before it.
+    const firstUnreadIndex = filteredMessages.findIndex(
+      (m) => m.senderId !== userId && !(m.readBy ?? []).includes(userId ?? ''),
+    );
+
     const items: MessageListItem[] = [];
     let currentDateLabel: string | null = null;
+    let dividerInserted = false;
 
-    filteredMessages.forEach((message) => {
+    filteredMessages.forEach((message, msgIndex) => {
+      // Insert the unread divider just before the first unread message
+      if (!dividerInserted && firstUnreadIndex !== -1 && msgIndex === firstUnreadIndex) {
+        items.push({ type: 'unreadDivider' });
+        dividerInserted = true;
+      }
+
       if (!message.timestamp) {
         items.push({ type: 'message', data: message });
         return;
@@ -655,7 +669,7 @@ export default function ChatScreen() {
     });
 
     return items;
-  }, [filteredMessages]);
+  }, [filteredMessages, userId]);
 
   // ── Voice player — single-active-player management ─────────────
   const player = useVoicePlayer();
@@ -685,8 +699,11 @@ export default function ChatScreen() {
     return member?.displayName ?? displayName;
   };
 
-  // ── Presence: write current user online, watch other user's status ────────
-  useWritePresence(userId);
+  // ── Presence: watch other user's status ──────────────────────────────────
+  // useWritePresence is NOT called here — it lives at the app root in
+  // AuthContext so it tracks the full app lifecycle, not just this screen.
+  // Calling it here caused online:false to fire whenever the user navigated
+  // away from ChatScreen (e.g. to Calls or Updates) — still inside the app.
   // viewerIsContact: true by default — chats only exist between contacts.
   const { statusText: presenceText, isOnline, photoURL: livePhotoURL } = useOtherUserPresence(
     isGroup ? null : otherUserId ?? null,
@@ -774,6 +791,33 @@ export default function ChatScreen() {
   const [isSending, setIsSending] = useState(false);
   const [editingMessage, setEditingMessage] = useState<any | null>(null);
   const listRef = useRef<FlatList>(null);
+  const [showScrollBtn, setShowScrollBtn]   = useState(false);
+  const scrollBtnOpacity                    = useRef(new Animated.Value(0)).current;
+  const distanceFromBottomRef               = useRef(0);
+
+  // Show the scroll-to-bottom button whenever the user is more than 150px
+  // away from the newest message. Animate it in/out smoothly.
+  const SCROLL_THRESHOLD = 150;
+  const handleScroll = useCallback((e: any) => {
+    const { contentSize, layoutMeasurement, contentOffset } = e.nativeEvent;
+    const dist = contentSize.height - layoutMeasurement.height - contentOffset.y;
+    distanceFromBottomRef.current = dist;
+    const shouldShow = dist > SCROLL_THRESHOLD;
+    setShowScrollBtn((prev) => {
+      if (prev !== shouldShow) {
+        Animated.timing(scrollBtnOpacity, {
+          toValue: shouldShow ? 1 : 0,
+          duration: 200,
+          useNativeDriver: true,
+        }).start();
+      }
+      return shouldShow;
+    });
+  }, [scrollBtnOpacity]);
+
+  const scrollToBottom = useCallback(() => {
+    listRef.current?.scrollToEnd({ animated: true });
+  }, []);
   const [showEmoji, setShowEmoji] = useState(false);
   const [showAttach, setShowAttach] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -865,7 +909,10 @@ export default function ChatScreen() {
   // ── Captured/selected media awaiting a caption before sending ────
   // Holds a photo or video the user just captured/picked. We show a preview
   // with a caption field (WhatsApp style) instead of sending immediately.
-  const [pendingMedia, setPendingMedia] = useState<{ uri: string; kind: 'image' | 'video' } | null>(null);
+  const [pendingMedia, setPendingMedia] = useState<{ uri: string; kind: 'image' | 'video' }[] | null>(null);
+  const [pendingMediaIndex, setPendingMediaIndex] = useState(0);
+  const carouselScrollAnim = useRef(new Animated.Value(0)).current;
+  const carouselSwipeStartX = useRef(0);
   const [mediaCaption, setMediaCaption] = useState('');
 
   // ── Full-screen video viewer ─────────────────────────────────────
@@ -919,13 +966,16 @@ export default function ChatScreen() {
   const viewerVideoPlayer  = useVideoPlayer(null, (p: any) => { p.loop = false; });
 
   useEffect(() => {
-    if (pendingMedia?.kind === 'video' && pendingMedia.uri) {
-      try { previewVideoPlayer.replace(pendingMedia.uri); previewVideoPlayer.play(); } catch {}
+    if (pendingMedia && pendingMedia.length > 0 && pendingMedia[pendingMediaIndex]?.kind === 'video') {
+      try { 
+        previewVideoPlayer.replace(pendingMedia[pendingMediaIndex].uri); 
+        previewVideoPlayer.play(); 
+      } catch {}
     } else {
       try { previewVideoPlayer.pause(); } catch {}
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingMedia?.uri, pendingMedia?.kind]);
+  }, [pendingMedia, pendingMediaIndex]);
 
   useEffect(() => {
     if (videoViewerUrl) {
@@ -1292,12 +1342,43 @@ export default function ChatScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Auto-scroll when new messages arrive ────────────────────────
+  // ── Initial scroll: jump to first unread, fall back to bottom ───────────────
+  // On first load we find the first message the current user hasn't read yet
+  // (senderId !== me AND !readBy.includes(me)) and scroll there so they see
+  // new messages immediately. If everything is read, we scroll to the bottom.
+  // After the initial scroll we stop interfering — subsequent new-message
+  // scrolling is handled by onContentSizeChange (only when near the bottom).
+  const initialScrollDoneRef = useRef(false);
+
   useEffect(() => {
-    if (filteredMessages.length > 0) {
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
-    }
-  }, [filteredMessages.length]);
+    if (initialScrollDoneRef.current) return;       // already did the initial scroll
+    if (filteredMessages.length === 0) return;       // nothing loaded yet
+
+    initialScrollDoneRef.current = true;
+
+    // Find the index of the first unread message in messagesWithDates
+    // (we search filteredMessages then map to the messagesWithDates index).
+    const firstUnreadMsg = filteredMessages.find(
+      (m) => m.senderId !== userId && !(m.readBy ?? []).includes(userId ?? ''),
+    );
+
+    setTimeout(() => {
+      if (firstUnreadMsg) {
+        // Scroll to the unread divider itself (inserted just before the first
+        // unread message) so the banner appears at the top of the viewport.
+        const dividerIdx = messagesWithDates.findIndex((item) => item.type === 'unreadDivider');
+        const targetIdx = dividerIdx !== -1 ? dividerIdx : messagesWithDates.findIndex(
+          (item) => item.type === 'message' && item.data.messageId === firstUnreadMsg.messageId,
+        );
+        if (targetIdx !== -1 && listRef.current) {
+          listRef.current.scrollToIndex({ index: targetIdx, animated: false, viewPosition: 0 });
+          return;
+        }
+      }
+      // All read → go to the bottom
+      listRef.current?.scrollToEnd({ animated: false });
+    }, 100);
+  }, [filteredMessages.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Handle permission denied states ─────────────────────────────
   useEffect(() => {
@@ -1549,7 +1630,8 @@ export default function ChatScreen() {
   const handleEditMessage = () => {
     if (!selectedMessageId) return;
     const message = messages.find(m => m.messageId === selectedMessageId);
-    if (message && message.senderId === userId && message.type === 'text') {
+    // Allow editing text, image, and video messages (which can have captions)
+    if (message && message.senderId === userId && ['text', 'image', 'video'].includes(message.type)) {
       setEditingMessage(message);
       setInput(message.text ?? '');
       setShowEmoji(false);
@@ -2047,63 +2129,74 @@ export default function ChatScreen() {
       setCameraOpen(false);
       // Show the preview + caption screen instead of sending immediately.
       setMediaCaption('');
-      setPendingMedia({ uri: photo.uri, kind: 'image' });
+      setPendingMedia([{ uri: photo.uri, kind: 'image' }]);
+      setPendingMediaIndex(0);
     } catch (error) {
       console.error('[ChatScreen] Camera error:', error);
       Alert.alert('Error', 'Failed to take picture.');
     }
   };
 
-  // Send whatever media is sitting in the preview, with its caption.
+  // Send whatever media is sitting in the preview, with optional caption.
   const sendPendingMedia = async () => {
-    if (!pendingMedia || !userId) return;
-    const { uri, kind } = pendingMedia;
+    if (!pendingMedia || pendingMedia.length === 0 || !userId) return;
+    
     const caption = mediaCaption.trim() || null;
 
     // Close the preview up front so the UI feels responsive.
     setPendingMedia(null);
+    setPendingMediaIndex(0);
     setMediaCaption('');
 
     setUploadingImage(true);
     setImageUploadProgress(0);
+    
     try {
-      // Copy into the app cache first so Storage never reads a raw Photos-library path.
-      const localUri = await toUploadableUri(uri, kind);
+      // Send all media items
+      for (let i = 0; i < pendingMedia.length; i++) {
+        const media = pendingMedia[i];
+        const { uri, kind } = media;
+        
+        console.log(`[ChatScreen] Sending media ${i + 1}/${pendingMedia.length}`);
+        
+        try {
+          // Copy into the app cache first so Storage never reads a raw Photos-library path.
+          const localUri = await toUploadableUri(uri, kind);
 
-      // Final safety net: make sure we're about to hand a valid file to Storage.
-      const preflight = await isFileReadable(localUri);
-      if (!preflight.ok) {
-        throw new Error(`Media file is not readable (size=${preflight.size})`);
-      }
+          // Final safety net: make sure we're about to hand a valid file to Storage.
+          const preflight = await isFileReadable(localUri);
+          if (!preflight.ok) {
+            throw new Error(`Media file is not readable (size=${preflight.size})`);
+          }
 
-      if (kind === 'video') {
-        const result = await sendVideoMessage(
-          chatId, userId, localUri, undefined,
-          (progress) => setImageUploadProgress(progress),
-          caption,
-        );
-        if (!result.success) {
-          Alert.alert('Upload Failed', 'Could not send the video. Please try again.');
-        } else {
-          await checkAndTriggerAutoResponder();
-        }
-      } else {
-        const compressedUri = await compressImage(localUri);
-        // Verify once more — compressImage can fall back to the original URI,
-        // which is fine, but let's confirm it still exists.
-        const finalCheck = await isFileReadable(compressedUri);
-        const uploadUri = finalCheck.ok ? compressedUri : localUri;
-        const uploadResult = await sendImageMessage(
-          chatId, userId, uploadUri,
-          (progress) => setImageUploadProgress(progress),
-          caption,
-        );
-        if (!uploadResult.success) {
-          Alert.alert('Upload Failed', 'Could not send the image. Please try again.');
-        } else {
-          await checkAndTriggerAutoResponder();
+          if (kind === 'video') {
+            const result = await sendVideoMessage(
+              chatId, userId, localUri, undefined,
+              (progress) => setImageUploadProgress(progress),
+              i === 0 ? caption : null, // Only use caption for first item
+            );
+            if (!result.success) {
+              console.error(`[ChatScreen] Media ${i + 1} upload failed`);
+            }
+          } else {
+            const compressedUri = await compressImage(localUri);
+            const finalCheck = await isFileReadable(compressedUri);
+            const uploadUri = finalCheck.ok ? compressedUri : localUri;
+            const uploadResult = await sendImageMessage(
+              chatId, userId, uploadUri,
+              (progress) => setImageUploadProgress(progress),
+              i === 0 ? caption : null, // Only use caption for first item
+            );
+            if (!uploadResult.success) {
+              console.error(`[ChatScreen] Media ${i + 1} upload failed`);
+            }
+          }
+        } catch (error: any) {
+          console.error(`[ChatScreen] Media ${i + 1} error:`, error);
         }
       }
+      
+      await checkAndTriggerAutoResponder();
     } catch (error: any) {
       console.error('[ChatScreen] Pending media upload error:', error);
       Alert.alert('Error', error?.message || 'Failed to send media.');
@@ -2132,59 +2225,17 @@ export default function ChatScreen() {
       if (result.canceled || result.assets.length === 0 || !userId) return;
       setShowAttach(false);
 
-      // Single selection → show the caption preview (WhatsApp style).
-      if (result.assets.length === 1) {
-        const asset = result.assets[0];
-        const kind: 'image' | 'video' = asset.type === 'video' ? 'video' : 'image';
-        setMediaCaption('');
-        setPendingMedia({ uri: asset.uri, kind });
-        return;
-      }
+      // Convert assets to pending media format
+      const assets = result.assets.map(asset => ({
+        uri: asset.uri,
+        kind: asset.type === 'video' ? 'video' as const : 'image' as const,
+      }));
 
-      // Multiple selection → send each sequentially (no per-item caption).
-      setUploadingImage(true);
-      setImageUploadProgress(0);
-      for (let i = 0; i < result.assets.length; i++) {
-        const asset = result.assets[i];
-        const isVideo = asset.type === 'video';
-        console.log(`[ChatScreen] Uploading media ${i + 1}/${result.assets.length} (${isVideo ? 'video' : 'image'})`);
-
-        try {
-          setImageUploadProgress(0);
-          const localUri = await toUploadableUri(asset.uri, isVideo ? 'video' : 'image');
-          const preflight = await isFileReadable(localUri);
-          if (!preflight.ok) throw new Error(`Media file is not readable (size=${preflight.size})`);
-
-          let uploadResult;
-          if (isVideo) {
-            uploadResult = await sendVideoMessage(
-              chatId, userId, localUri, undefined,
-              (progress) => setImageUploadProgress(progress),
-            );
-          } else {
-            const compressedUri = await compressImage(localUri);
-            const finalCheck = await isFileReadable(compressedUri);
-            const uploadUri = finalCheck.ok ? compressedUri : localUri;
-            uploadResult = await sendImageMessage(
-              chatId, userId, uploadUri,
-              (progress) => setImageUploadProgress(progress),
-            );
-          }
-
-          if (!uploadResult.success) {
-            console.error(`[ChatScreen] Media ${i + 1} upload failed`);
-            Alert.alert('Upload Failed', `Item ${i + 1} could not be sent. Continuing with others...`);
-          }
-        } catch (error) {
-          console.error(`[ChatScreen] Media ${i + 1} upload error:`, error);
-          Alert.alert('Error', `Failed to upload item ${i + 1}. Continuing with others...`);
-        }
-      }
-
-      console.log('[ChatScreen] All media processed');
-      setUploadingImage(false);
-      setImageUploadProgress(0);
-      await checkAndTriggerAutoResponder();
+      // Show carousel preview for any number of items
+      setMediaCaption('');
+      setPendingMedia(assets);
+      setPendingMediaIndex(0);
+      return;
     } catch (error) {
       console.error('[ChatScreen] Gallery error:', error);
       setUploadingImage(false);
@@ -2584,6 +2635,19 @@ export default function ChatScreen() {
       );
     }
 
+    // Handle unread divider — the "Unread messages" banner WhatsApp-style
+    if (item.type === 'unreadDivider') {
+      return (
+        <View style={styles.unreadDividerWrap}>
+          <View style={styles.unreadDividerLine} />
+          <View style={styles.unreadDividerPill}>
+            <AppText style={styles.unreadDividerText}>Unread messages</AppText>
+          </View>
+          <View style={styles.unreadDividerLine} />
+        </View>
+      );
+    }
+
     // Handle messages
     return renderMessage({ item: item.data });
   };
@@ -2753,28 +2817,53 @@ export default function ChatScreen() {
             />
           ) : item.type === 'video' && item.videoUrl ? (
             <LinearGradient colors={GRADIENTS.chatSent} style={[styles.bubble, styles.bubbleIn, styles.imageBubble]}>
+              {item.forwarded && (
+                <View style={styles.forwardedRow}>
+                  <AppIcon name="arrow-redo-outline" size={12} color="rgba(255,255,255,0.7)" fixedColor />
+                  <AppText fixedColor style={styles.forwardedLabelIn}>Forwarded</AppText>
+                </View>
+              )}
               <TouchableOpacity
                 activeOpacity={0.9}
                 onPress={() => setVideoViewerUrl(item.videoUrl!)}
               >
                 <View style={styles.videoThumbWrap}>
                   {item.thumbnailUrl ? (
-                    <Image source={{ uri: item.thumbnailUrl }} style={styles.messageImage} resizeMode="cover" />
+                    <Image source={{ uri: item.thumbnailUrl }} style={styles.videoThumbImage} resizeMode="cover" />
                   ) : (
-                    <View style={[styles.messageImage, styles.videoPlaceholder]} />
+                    <View style={[styles.videoThumbImage, styles.videoPlaceholder]} />
                   )}
                   <View style={styles.videoPlayOverlay}>
                     <AppIcon name="play" size={30} color="#fff" fixedColor />
                   </View>
+                  {/* Time overlay only when there is NO caption — otherwise
+                      the footer row below handles it to avoid overlap. */}
+                  {!item.text && (
+                    <View style={styles.imageTimeOverlay}>
+                      <AppText fixedColor style={styles.timeIn}>{formatTime(item.timestamp)}</AppText>
+                    </View>
+                  )}
                 </View>
               </TouchableOpacity>
-              {item.text ? <AppText fixedColor style={styles.mediaCaptionIn}>{item.text}</AppText> : null}
-              <View style={styles.imageTimeOverlay}>
-                <AppText fixedColor style={styles.timeIn}>{formatTime(item.timestamp)}</AppText>
-              </View>
+              {item.text ? (
+                <View style={styles.mediaCaptionBlock}>
+                  <AppText fixedColor style={styles.mediaCaptionIn}>{item.text}</AppText>
+                  <View style={styles.mediaCaptionTimeRow}>
+                    <AppText fixedColor style={styles.timeIn}>
+                      {formatTime(item.timestamp)}
+                    </AppText>
+                  </View>
+                </View>
+              ) : null}
             </LinearGradient>
           ) : item.type === 'image' && item.imageUrl ? (
             <LinearGradient colors={GRADIENTS.chatSent} style={[styles.bubble, styles.bubbleIn, styles.imageBubble]}>
+              {item.forwarded && (
+                <View style={styles.forwardedRow}>
+                  <AppIcon name="arrow-redo-outline" size={12} color="rgba(255,255,255,0.7)" fixedColor />
+                  <AppText fixedColor style={styles.forwardedLabelIn}>Forwarded</AppText>
+                </View>
+              )}
               <TouchableOpacity
                 activeOpacity={0.9}
                 onPress={() => {
@@ -2882,20 +2971,31 @@ export default function ChatScreen() {
               >
                 <View style={styles.videoThumbWrap}>
                   {item.thumbnailUrl ? (
-                    <Image source={{ uri: item.thumbnailUrl }} style={styles.messageImage} resizeMode="cover" />
+                    <Image source={{ uri: item.thumbnailUrl }} style={styles.videoThumbImage} resizeMode="cover" />
                   ) : (
-                    <View style={[styles.messageImage, styles.videoPlaceholder]} />
+                    <View style={[styles.videoThumbImage, styles.videoPlaceholder]} />
                   )}
                   <View style={styles.videoPlayOverlay}>
                     <AppIcon name="play" size={30} color="#fff" fixedColor />
                   </View>
+                  {/* Time overlay only when there is NO caption */}
+                  {!item.text && (
+                    <View style={styles.imageTimeOverlay}>
+                      <AppText style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
+                      <AppIcon name={tickIcon.icon} size={13} color={tickIcon.color} fixedColor />
+                    </View>
+                  )}
                 </View>
               </TouchableOpacity>
-              {item.text ? <AppText style={[styles.mediaCaptionOut, { color: textColor }]}>{item.text}</AppText> : null}
-              <View style={styles.imageTimeOverlay}>
-                <AppText style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
-                <AppIcon name={tickIcon.icon} size={13} color={tickIcon.color} fixedColor />
-              </View>
+              {item.text ? (
+                <View style={styles.mediaCaptionBlock}>
+                  <AppText style={[styles.mediaCaptionOut, { color: textColor }]}>{item.text}</AppText>
+                  <View style={styles.mediaCaptionTimeRow}>
+                    <AppText style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
+                    <AppIcon name={tickIcon.icon} size={13} color={tickIcon.color} fixedColor />
+                  </View>
+                </View>
+              ) : null}
             </View>
           ) : item.type === 'image' && item.imageUrl ? (
             <View style={[styles.bubble, styles.bubbleOut, styles.imageBubble]}>
@@ -2925,6 +3025,7 @@ export default function ChatScreen() {
             </View>
           ) : (
             <View style={[styles.bubble, styles.bubbleOut]}>
+              {/* Forwarded label is only shown for received messages, not sent ones */}
               {item.replyTo && (
                 <TouchableOpacity
                   style={[styles.replyBubble, { backgroundColor: 'rgba(30,156,240,0.08)' }]}
@@ -2960,12 +3061,7 @@ export default function ChatScreen() {
                   </View>
                 </TouchableOpacity>
               )}
-              {item.forwarded && (
-                <View style={styles.forwardedRow}>
-                  <AppIcon name="arrow-redo-outline" size={12} color={FG.secondary} fixedColor />
-                  <AppText style={[styles.forwardedLabelOut, { color: FG.secondary }]}>Forwarded</AppText>
-                </View>
-              )}
+              {/* Forwarded label is only shown for received messages, not sent ones */}
               {item.text && <AppText style={[styles.bubbleTextOut, { color: textColor, fontFamily }]}>{item.text}</AppText>}
               <View style={styles.timeOutRow}>
                 {item.edited && (
@@ -3330,18 +3426,48 @@ export default function ChatScreen() {
             <FlatList
               ref={listRef}
               data={messagesWithDates}
-              keyExtractor={(item) => item.type === 'message' ? item.data.messageId : `date-${item.date.getTime()}`}
+              keyExtractor={(item) =>
+                item.type === 'message'
+                  ? item.data.messageId
+                  : item.type === 'unreadDivider'
+                  ? 'unread-divider'
+                  : `date-${item.date.getTime()}`
+              }
               renderItem={renderItem}
               contentContainerStyle={styles.messageList}
               showsVerticalScrollIndicator={false}
+              onScroll={handleScroll}
+              scrollEventThrottle={100}
               ListFooterComponent={
                 typingNames.length > 0
                   ? <TypingIndicator names={typingNames} />
                   : null
               }
-              onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
+              // Only auto-scroll when the user is already near the bottom so
+              // we don't interrupt someone reading older messages.
+              onContentSizeChange={() => {
+                if (distanceFromBottomRef.current <= SCROLL_THRESHOLD) {
+                  listRef.current?.scrollToEnd({ animated: false });
+                }
+              }}
             />
           )}
+
+          {/* ── Scroll-to-bottom button ───────────────────────────────────── */}
+          {/* Appears with a fade when the user scrolls up away from the latest
+              message. Tapping it animates back to the bottom and hides itself. */}
+          <Animated.View
+            style={[styles.scrollToBottomBtn, { opacity: scrollBtnOpacity }]}
+            pointerEvents={showScrollBtn ? 'auto' : 'none'}
+          >
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={scrollToBottom}
+              style={styles.scrollToBottomInner}
+            >
+              <AppIcon name="chevron-down" size={22} color="#fff" fixedColor />
+            </TouchableOpacity>
+          </Animated.View>
 
           {/* ── Assignment sheet (team inbox) ── */}
           {isTeamMember && (
@@ -3437,9 +3563,10 @@ export default function ChatScreen() {
                     </TouchableOpacity>
 
                     {(() => {
-                      const EDIT_WINDOW_MS = 15 * 60 * 1000;
+                      const EDIT_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
                       const msg = messages.find(m => m.messageId === selectedMessageId);
-                      if (!msg || msg.senderId !== userId || msg.type !== 'text') return null;
+                      // Allow editing text, image, and video messages within the edit window
+                      if (!msg || msg.senderId !== userId || !['text', 'image', 'video'].includes(msg.type)) return null;
                       const msgTime = msg.timestamp instanceof Date ? msg.timestamp : msg.timestamp ? new Date(msg.timestamp) : null;
                       if (msgTime && Date.now() - msgTime.getTime() > EDIT_WINDOW_MS) return null;
                       return (
@@ -3911,7 +4038,8 @@ export default function ChatScreen() {
                           setCameraOpen(false);
                           setMediaCaption('');
                           const isVid = p.isVideo ?? /\.(mp4|mov|m4v|3gp|avi)$/i.test(p.uri);
-                          setPendingMedia({ uri: p.uri, kind: isVid ? 'video' : 'image' });
+                          setPendingMedia([{ uri: p.uri, kind: isVid ? 'video' : 'image' }]);
+                          setPendingMediaIndex(0);
                         }}
                       >
                         <Image source={{ uri: p.uri }} style={styles.cameraRollThumb} resizeMode="cover" />
@@ -3944,8 +4072,8 @@ export default function ChatScreen() {
       )}
 
       {/* ── Media preview + caption (before sending) ── */}
-      {pendingMedia && (
-        <Modal visible animationType="slide" onRequestClose={() => { setPendingMedia(null); setMediaCaption(''); }}>
+      {pendingMedia && pendingMedia.length > 0 && (
+        <Modal visible animationType="slide" onRequestClose={() => { setPendingMedia(null); setPendingMediaIndex(0); setMediaCaption(''); }}>
           <KeyboardAvoidingView
             style={{ flex: 1, backgroundColor: '#000' }}
             behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -3953,43 +4081,154 @@ export default function ChatScreen() {
             {/* Close button */}
             <TouchableOpacity
               style={styles.mediaPreviewClose}
-              onPress={() => { setPendingMedia(null); setMediaCaption(''); }}
+              onPress={() => { setPendingMedia(null); setPendingMediaIndex(0); setMediaCaption(''); }}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
               <AppIcon name="close" size={28} color="#fff" fixedColor />
             </TouchableOpacity>
 
-            {/* Preview */}
-            <View style={styles.mediaPreviewBody}>
-              {pendingMedia.kind === 'video' ? (
-                <VideoView
-                  player={previewVideoPlayer}
-                  style={styles.mediaPreviewMedia}
-                  contentFit="contain"
-                  nativeControls
-                />
-              ) : (
-                <Image source={{ uri: pendingMedia.uri }} style={styles.mediaPreviewMedia} resizeMode="contain" />
-              )}
-            </View>
+            {/* Full-Screen Carousel Preview */}
+            {pendingMedia && pendingMedia.length > 0 && (
+              <View style={styles.carouselContainer}>
+                {/* Main Carousel - Full Screen with Swipe */}
+                <Animated.View
+                  style={[
+                    styles.carouselViewport,
+                    {
+                      transform: [{ translateX: carouselScrollAnim }],
+                    },
+                  ]}
+                  onTouchStart={(e) => {
+                    carouselSwipeStartX.current = e.nativeEvent.pageX;
+                  }}
+                  onTouchEnd={(e) => {
+                    const endX = e.nativeEvent.pageX;
+                    const distance = endX - carouselSwipeStartX.current;
+                    const threshold = 50;
+                    
+                    if (Math.abs(distance) > threshold) {
+                      let newIndex = pendingMediaIndex;
+                      if (distance > 0) {
+                        // Swiped right - show previous
+                        newIndex = pendingMediaIndex === 0 ? pendingMedia.length - 1 : pendingMediaIndex - 1;
+                      } else {
+                        // Swiped left - show next
+                        newIndex = pendingMediaIndex === pendingMedia.length - 1 ? 0 : pendingMediaIndex + 1;
+                      }
+                      
+                      // Animate to new position
+                      Animated.timing(carouselScrollAnim, {
+                        toValue: 0,
+                        duration: 300,
+                        useNativeDriver: true,
+                        easing: Easing.out(Easing.cubic),
+                      }).start();
+                      
+                      setPendingMediaIndex(newIndex);
+                    } else {
+                      // Reset animation
+                      Animated.timing(carouselScrollAnim, {
+                        toValue: 0,
+                        duration: 150,
+                        useNativeDriver: true,
+                      }).start();
+                    }
+                  }}
+                >
+                  {pendingMedia[pendingMediaIndex].kind === 'video' ? (
+                    <VideoView
+                      player={previewVideoPlayer}
+                      style={styles.carouselFullMedia}
+                      contentFit="contain"
+                      nativeControls
+                    />
+                  ) : (
+                    <Image 
+                      source={{ uri: pendingMedia[pendingMediaIndex].uri }} 
+                      style={styles.carouselFullMedia} 
+                      resizeMode="contain" 
+                    />
+                  )}
+                </Animated.View>
 
-            {/* Caption + send */}
-            <View style={styles.mediaPreviewBar}>
-              <View style={styles.mediaPreviewInputWrap}>
-                <TextInput
-                  style={styles.mediaPreviewInput}
-                  placeholder="Add a caption..."
-                  placeholderTextColor="rgba(255,255,255,0.6)"
-                  value={mediaCaption}
-                  onChangeText={setMediaCaption}
-                  multiline
-                  maxLength={1024}
-                />
+                {/* Thumbnail row at bottom with delete button overlay */}
+                {pendingMedia.length > 1 && (
+                  <View style={styles.carouselThumbnailRowContainer}>
+                    {/* Delete button overlay */}
+                    <TouchableOpacity
+                      style={styles.deleteMediaBtn}
+                      onPress={() => {
+                        const newMedia = pendingMedia.filter((_, i) => i !== pendingMediaIndex);
+                        if (newMedia.length === 0) {
+                          setPendingMedia(null);
+                          setPendingMediaIndex(0);
+                        } else {
+                          setPendingMedia(newMedia);
+                          setPendingMediaIndex(Math.min(pendingMediaIndex, newMedia.length - 1));
+                        }
+                      }}
+                    >
+                      <AppIcon name="trash-outline" size={24} color="#fff" fixedColor />
+                    </TouchableOpacity>
+                    
+                    {/* Thumbnails row */}
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={styles.carouselThumbnailContent}
+                    >
+                      {pendingMedia.map((media, idx) => (
+                        <TouchableOpacity
+                          key={idx}
+                          style={[
+                            styles.carouselThumbnail,
+                            idx === pendingMediaIndex && styles.carouselThumbnailActive,
+                          ]}
+                          onPress={() => setPendingMediaIndex(idx)}
+                        >
+                          {media.kind === 'video' ? (
+                            <>
+                              <Image
+                                source={{ uri: media.uri }}
+                                style={styles.carouselThumbnailImage}
+                                resizeMode="cover"
+                              />
+                              <View style={styles.carouselVideoPlayIcon}>
+                                <AppIcon name="play" size={14} color="#fff" fixedColor />
+                              </View>
+                            </>
+                          ) : (
+                            <Image
+                              source={{ uri: media.uri }}
+                              style={styles.carouselThumbnailImage}
+                              resizeMode="cover"
+                            />
+                          )}
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  </View>
+                )}
+
+                {/* Caption input at very bottom */}
+                <View style={styles.carouselCaptionBar}>
+                  <View style={styles.carouselCaptionInputWrap}>
+                    <TextInput
+                      style={styles.carouselCaptionInput}
+                      placeholder="Add a caption..."
+                      placeholderTextColor="rgba(255,255,255,0.6)"
+                      value={mediaCaption}
+                      onChangeText={setMediaCaption}
+                      multiline
+                      maxLength={1024}
+                    />
+                  </View>
+                  <TouchableOpacity style={styles.carouselSendBtn} onPress={sendPendingMedia}>
+                    <AppIcon name="send" size={22} color="#fff" fixedColor />
+                  </TouchableOpacity>
+                </View>
               </View>
-              <TouchableOpacity style={styles.mediaPreviewSendBtn} onPress={sendPendingMedia}>
-                <AppIcon name="send" size={22} color="#fff" fixedColor />
-              </TouchableOpacity>
-            </View>
+            )}
           </KeyboardAvoidingView>
         </Modal>
       )}
@@ -5940,6 +6179,33 @@ const styles = StyleSheet.create({
   datePill: { ...GLASS.card, borderRadius: RADIUS.full, paddingHorizontal: 16, paddingVertical: 5 },
   datePillText: { fontSize: 11, color: COLORS.sub },
 
+  // ── Unread messages divider ──────────────────────────────────────────────────
+  unreadDividerWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 8,
+    paddingHorizontal: 14,
+    gap: 8,
+  },
+  unreadDividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: 'rgba(30,156,240,0.35)',
+  },
+  unreadDividerPill: {
+    backgroundColor: 'rgba(30,156,240,0.12)',
+    borderRadius: RADIUS.full,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(30,156,240,0.25)',
+  },
+  unreadDividerText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.blue,
+  },
+
   msgRow: { flexDirection: 'row', marginBottom: 4 },
   msgRowIn: { justifyContent: 'flex-start' },
   msgRowOut: { justifyContent: 'flex-end' },
@@ -6144,7 +6410,11 @@ const styles = StyleSheet.create({
   cameraRollThumb: { width: 60, height: 60 },
 
   // ── Video message bubble ────────────────────────────────────────────────────
-  videoThumbWrap: { width: 200, height: 200, borderRadius: 12, overflow: 'hidden', position: 'relative' },
+  // width:'100%' + aspectRatio makes the thumb fill the bubble horizontally
+  // so it always matches the caption text width below it.
+  videoThumbWrap: { width: '100%', aspectRatio: 1, borderRadius: 12, overflow: 'hidden', position: 'relative' },
+  // Fills the wrap completely — width/height 100% of the parent.
+  videoThumbImage: { width: '100%', height: '100%', borderRadius: 12 },
   videoPlaceholder: { backgroundColor: '#1c2733', alignItems: 'center', justifyContent: 'center' },
   videoPlayOverlay: {
     ...StyleSheet.absoluteFill,
@@ -6154,6 +6424,25 @@ const styles = StyleSheet.create({
   // ── Media caption (shown under image/video bubbles) ─────────────────────────
   mediaCaptionIn: { color: '#fff', fontSize: 15, paddingHorizontal: 4, paddingTop: 6 },
   mediaCaptionOut: { fontSize: 15, paddingHorizontal: 4, paddingTop: 6 },
+
+  // Column(crossAxisAlignment: end) wrapping the caption text + time row.
+  // The caption fills full width and wraps naturally. The time row sits on its
+  // own line pinned to the right — exactly like Flutter's CrossAxisAlignment.end.
+  mediaCaptionBlock: {
+    flexDirection: 'column',
+    alignItems: 'flex-end',    // every child right-aligned — CrossAxisAlignment.end
+    paddingHorizontal: 4,
+    paddingTop: 6,
+    paddingBottom: 4,
+  },
+  // Row(mainAxisAlignment: end) for the timestamp + tick icon.
+  mediaCaptionTimeRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end', // MainAxisAlignment.end
+    alignItems: 'center',
+    gap: 3,
+    marginTop: 2,
+  },
 
   // ── Media preview + caption screen ──────────────────────────────────────────
   mediaPreviewClose: {
@@ -6177,6 +6466,172 @@ const styles = StyleSheet.create({
   mediaPreviewSendBtn: {
     width: 48, height: 48, borderRadius: 24, backgroundColor: COLORS.blue,
     alignItems: 'center', justifyContent: 'center',
+  },
+
+  // ── Carousel Navigation ────────────────────────────────────────────────────
+  carouselContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+    flexDirection: 'column',
+  },
+  carouselViewport: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  carouselFullMedia: {
+    width: '100%',
+    height: '100%',
+  },
+  deleteMediaBtn: {
+    position: 'absolute',
+    top: -20,
+    right: 16,
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(255, 59, 48, 0.95)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+    zIndex: 10,
+  },
+
+  // ── Thumbnail Row (Bottom) ─────────────────────────────────────────────────
+  carouselThumbnailRowContainer: {
+    position: 'relative',
+    height: 90,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.1)',
+  },
+  carouselThumbnailRow: {
+    width: '100%',
+    height: '100%',
+  },
+  carouselThumbnailContent: {
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  carouselThumbnail: {
+    width: 74,
+    height: 74,
+    borderRadius: 8,
+    overflow: 'hidden',
+    borderWidth: 3,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  carouselThumbnailActive: {
+    borderColor: COLORS.blue,
+  },
+  carouselThumbnailImage: {
+    width: '100%',
+    height: '100%',
+  },
+  carouselVideoPlayIcon: {
+    ...StyleSheet.absoluteFill,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.4)',
+  },
+
+  // ── Caption Bar (Bottom) ───────────────────────────────────────────────────
+  carouselCaptionBar: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    paddingBottom: 20,
+    backgroundColor: 'rgba(0,0,0,0.9)',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.1)',
+  },
+  carouselCaptionInputWrap: {
+    flex: 1,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 24,
+    paddingHorizontal: 16,
+    paddingVertical: Platform.OS === 'ios' ? 10 : 4,
+    maxHeight: 120,
+    justifyContent: 'center',
+  },
+  carouselCaptionInput: {
+    color: '#fff',
+    fontSize: 16,
+    maxHeight: 100,
+  },
+  carouselSendBtn: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.blue,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  // ── Old Carousel Navigation (Removed) ──────────────────────────────────────
+  carouselNav: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    gap: 12,
+    display: 'none',
+  },
+  carouselNavBtn: {
+    padding: 8,
+    display: 'none',
+  },
+  carouselCounter: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+    minWidth: 60,
+    textAlign: 'center',
+    display: 'none',
+  },
+
+  // ── Thumbnail Row (Old - Removed) ──────────────────────────────────────────
+  thumbnailRow: {
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    display: 'none',
+  },
+  thumbnailRowContent: {
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    gap: 8,
+    display: 'none',
+  },
+  thumbnail: {
+    width: 70,
+    height: 70,
+    borderRadius: 8,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: 'transparent',
+    display: 'none',
+  },
+  thumbnailActive: {
+    borderColor: COLORS.blue,
+    display: 'none',
+  },
+  thumbnailImage: {
+    width: '100%',
+    height: '100%',
+    display: 'none',
+  },
+  videoPlayIcon: {
+    ...StyleSheet.absoluteFill,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    display: 'none',
   },
 
   // ── Full-screen video viewer ────────────────────────────────────────────────
@@ -6915,6 +7370,23 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
     marginBottom: 8,
+  },
+
+  // ── Scroll-to-bottom FAB ────────────────────────────────────────────────────
+  scrollToBottomBtn: {
+    position: 'absolute',
+    bottom: 80,          // sits just above the input bar
+    right: 16,
+    zIndex: 20,
+  },
+  scrollToBottomInner: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.blue,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...SHADOW.button,
   },
 
   // ── Cart FAB ────────────────────────────────────────────────────────────────

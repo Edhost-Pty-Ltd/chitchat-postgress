@@ -6,6 +6,7 @@ import { RootStackParamList } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { COLORS } from '../types/theme';
 import { AppBg } from '../context/ThemeContext';
+import { useWritePresence } from '../hooks/usePresence';
 
 import { getAuth, signOut as firebaseSignOut } from '@react-native-firebase/auth';
 import firestore from '@react-native-firebase/firestore';
@@ -75,6 +76,14 @@ const modalOptions = {
 
 export default function AppNavigator() {
   const { isSignedIn, loading, phone, displayName, isCompanion } = useAuth();
+
+  // ── Presence: mark online while the app is in the foreground ─────────────
+  // Lives here (not inside individual screens) so it tracks the full app
+  // session — online:true when the app is foregrounded from anywhere,
+  // online:false + lastSeen when the user switches to another app entirely.
+  // Companions must not write the owner's presence — they'd fight the primary.
+  const { userId } = useAuth();
+  useWritePresence(isCompanion ? null : userId);
 
   const [profileExists, setProfileExists] = useState<boolean | null>(null);
   const [profileCheckError, setProfileCheckError] = useState(false);

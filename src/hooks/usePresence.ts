@@ -41,10 +41,12 @@ export async function writePresence(userId: string, online: boolean): Promise<vo
 
   try {
     const fsDb = db as ReturnType<typeof firestore>;
-    await fsDb.collection('users').doc(userId).set(
-      { online, lastSeen: firestore.FieldValue.serverTimestamp() },
-      { merge: true },
-    );
+    // Only update lastSeen when going OFFLINE so it accurately reflects when
+    // the user left the app. Updating it on every online write would make
+    // "last seen" show the time the user opened the app rather than left it.
+    const payload: Record<string, any> = { online };
+    if (!online) payload.lastSeen = firestore.FieldValue.serverTimestamp();
+    await fsDb.collection('users').doc(userId).set(payload, { merge: true });
   } catch (err) {
     console.warn('[usePresence] Failed to write presence:', err);
   }
