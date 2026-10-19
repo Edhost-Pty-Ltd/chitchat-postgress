@@ -55,7 +55,7 @@ export function useOutgoingCall() {
       try {
         console.log('[useOutgoingCall] Creating call document...', 'Type:', callType);
         
-        // Step 1: Create call document in Firestore
+        // Step 1: Create the call via the signaling backend
         const callId = await SignalingService.createCall(
           callerId,
           calleeId,
@@ -77,8 +77,8 @@ export function useOutgoingCall() {
         console.log('[useOutgoingCall] Creating offer... Video:', isVideo);
         const offer = await createOffer(isVideo);
 
-        // Step 4: Save offer to Firestore
-        console.log('[useOutgoingCall] Saving offer to Firestore...');
+        // Step 4: Send the offer through the signaling backend
+        console.log('[useOutgoingCall] Sending offer via signaling...');
         await SignalingService.saveOffer(callId, offer);
 
         // Step 5: Listen for answer from callee and status changes
@@ -86,7 +86,7 @@ export function useOutgoingCall() {
         unsubscribeRef.current = SignalingService.onCallUpdated(callId, async (call) => {
           if (!call) return;
 
-          console.log('[useOutgoingCall] Firestore update - status:', call.status, 'hasAnswer:', !!call.answer, 'answerProcessed:', answerProcessedRef.current);
+          console.log('[useOutgoingCall] Signaling update - status:', call.status, 'hasAnswer:', !!call.answer, 'answerProcessed:', answerProcessedRef.current);
 
           // Handle call rejected/missed/ended FIRST before processing answer - IMMEDIATE cleanup
           if (call.status === 'rejected') {
@@ -197,10 +197,10 @@ export function useOutgoingCall() {
       console.log('[useOutgoingCall] Ending call...');
 
       try {
-        // Update call status in Firestore
-        console.log('[useOutgoingCall] Step 1: Updating Firestore status to ended...');
+        // Update call status via the signaling backend
+        console.log('[useOutgoingCall] Step 1: Updating call status to ended...');
         await SignalingService.updateCallStatus(callId, 'ended', duration);
-        console.log('[useOutgoingCall] Step 2: Firestore updated successfully');
+        console.log('[useOutgoingCall] Step 2: Call status updated successfully');
 
         // Save to call history
         console.log('[useOutgoingCall] Step 3: Fetching call document...');

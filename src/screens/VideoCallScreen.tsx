@@ -733,17 +733,10 @@ export default function VideoCallScreen() {
       setMinutesText(text);
       if (isMeeting) {
         await saveMinutes(text);
-        // Auto-post summary to chat if this is a meeting
+        // Auto-post summary to the in-meeting chat via the backend.
         if (meetingId) {
-          firestore()
-            .collection('meetings').doc(meetingId).collection('messages')
-            .add({
-              senderId: 'system',
-              senderName: 'Meeting Minutes',
-              text: `📋 Meeting minutes generated:\n\n${text}`,
-              isSystem: true,
-              timestamp: firestore.FieldValue.serverTimestamp(),
-            })
+          endpoints
+            .sendMeetingMessage(meetingId, { text: `📋 Meeting minutes generated:\n\n${text}` })
             .catch(() => {});
         }
       }
@@ -856,17 +849,23 @@ export default function VideoCallScreen() {
         });
       });
 
-      // Merge with Firestore meeting doc if available
+      // Merge with the backend meeting state if available. The backend returns
+      // ISO date strings; coerce them with `new Date(...)`.
+      const toDate = (v: unknown): Date | null => {
+        if (!v) return null;
+        const d = new Date(v as string);
+        return Number.isNaN(d.getTime()) ? null : d;
+      };
       let startedAt: Date | null = sessionStartRef.current;
       let endedAt: Date | null = null;
-      if (meetingDoc) {
-        if (meetingDoc.date?.toDate) startedAt = meetingDoc.date.toDate();
-        if (meetingDoc.endedAt?.toDate) endedAt = meetingDoc.endedAt.toDate();
-      } else if (meetingId) {
-        const snap = await firestore().collection('meetings').doc(meetingId).get();
-        const data = snap.data();
-        if (data?.date?.toDate) startedAt = data.date.toDate();
-        if (data?.endedAt?.toDate) endedAt = data.endedAt.toDate();
+      let doc = meetingDoc;
+      if (!doc && meetingId) {
+        const res = await endpoints.getMeeting(meetingId);
+        if (res.ok) doc = res.data.state;
+      }
+      if (doc) {
+        startedAt = toDate((doc as any).date) ?? startedAt;
+        endedAt = toDate((doc as any).endedAt);
       }
 
       const totalSeconds = startedAt

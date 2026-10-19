@@ -71,10 +71,14 @@ describe('useRegistration', () => {
 
   // ── Req 2.1: OTP send triggers signInWithPhoneNumber ──
   describe('submitRegistration — OTP send (Req 2.1)', () => {
-    it('calls signInWithPhoneNumber with the provided phone number', async () => {
+    it('calls signInWithPhoneNumber with the auth instance and phone number', async () => {
       const { result } = renderHook(() => useRegistration());
       await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', null); });
-      expect(mockSignInWithPhoneNumber).toHaveBeenCalledWith('+27821234567');
+      // RN Firebase v24 modular API: signInWithPhoneNumber(auth, phoneNumber).
+      expect(mockSignInWithPhoneNumber).toHaveBeenCalledWith(
+        expect.objectContaining({ currentUser: expect.anything() }),
+        '+27821234567',
+      );
     });
 
     it('transitions step to "otp" on success', async () => {

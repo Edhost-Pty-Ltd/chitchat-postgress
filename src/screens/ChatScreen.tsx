@@ -13,7 +13,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { NotificationTestPanel } from '../components/NotificationTestPanel';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import { Ionicons } from '@expo/vector-icons';
 
 // Platform-specific imports for native-only modules
 let CameraView: any = null;
@@ -331,6 +332,39 @@ const SwipeableMessage = React.memo(function SwipeableMessage({
   );
 });
 
+// ── Fullscreen Video Player ───────────────────────────────────────────────────
+function VideoPlayerModal({ url, onClose }: { url: string; onClose: () => void }) {
+  const player = useVideoPlayer(url, (p) => {
+    p.loop = false;
+    p.play();
+  });
+
+  return (
+    <Modal visible transparent animationType="fade" onRequestClose={onClose}>
+      <View style={{ flex: 1, backgroundColor: '#000' }}>
+        <VideoView
+          player={player}
+          style={{ flex: 1 }}
+          contentFit="contain"
+          allowsFullscreen
+          allowsPictureInPicture={false}
+        />
+        <TouchableOpacity
+          onPress={onClose}
+          style={{
+            position: 'absolute', top: 50, right: 20,
+            width: 44, height: 44, borderRadius: 22,
+            backgroundColor: 'rgba(0,0,0,0.55)',
+            alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <Ionicons name="close" size={26} color="#fff" />
+        </TouchableOpacity>
+      </View>
+    </Modal>
+  );
+}
+
 export default function ChatScreen() {
   const navigation = useNavigation<NavProp>();
   const route = useRoute<RoutePropType>();
@@ -545,6 +579,8 @@ export default function ChatScreen() {
   // ── Image viewer state ──────────────────────────────────────────
   const [viewerVisible, setViewerVisible] = useState(false);
   const [viewerImageUrl, setViewerImageUrl] = useState<string | null>(null);
+  const [videoPlayerVisible, setVideoPlayerVisible] = useState(false);
+  const [videoPlayerUrl, setVideoPlayerUrl] = useState<string | null>(null);
 
   // ── Selected message state (for long-press actions) ────────────
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
@@ -1268,9 +1304,10 @@ export default function ChatScreen() {
 
   const openGallery = async () => {
     try {
-      // expo-image-picker v57 on iOS 14+ uses the native PHPickerViewController
-      // which doesn't require a permission prompt — just launch it directly.
-      // On older iOS / Android, request the media library permission first.
+      // On iOS, do NOT call requestMediaLibraryPermissionsAsync before launching
+      // the picker — calling it when status is already 'limited' throws
+      // PHPhotosErrorDomain error 3164. Just launch the picker directly;
+      // iOS handles the permission prompt natively on first use.
       if (Platform.OS === 'android') {
         const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
         if (status !== 'granted') {
@@ -1279,12 +1316,11 @@ export default function ChatScreen() {
         }
       }
 
-      // Open gallery with both images and videos — same as WhatsApp
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images', 'videos'],
-        allowsMultipleSelection: true,
+        mediaTypes: ImagePicker.MediaTypeOptions.All,
+        allowsMultipleSelection: false,
         quality: 0.85,
-        videoMaxDuration: 300,      // 5 min cap
+        videoMaxDuration: 300,
       });
 
       if (!result.canceled && result.assets.length > 0 && userId) {
@@ -1336,11 +1372,12 @@ export default function ChatScreen() {
         setImageUploadProgress(0);
         await checkAndTriggerAutoResponder();
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('[ChatScreen] Gallery error:', error);
       setUploadingImage(false);
       setImageUploadProgress(0);
-      Alert.alert('Error', 'Failed to open gallery.');
+      // Show the real error so we can diagnose it
+      Alert.alert('Error', `Failed to open gallery.\n\n${error?.message ?? String(error)}`);
     }
   };
 
@@ -1662,6 +1699,33 @@ export default function ChatScreen() {
               mimeType={item.mimeType ?? undefined}
               isOutgoing={false}
             />
+          ) : item.type === 'video' ? (
+            <TouchableOpacity
+              activeOpacity={0.85}
+              style={[styles.bubble, styles.bubbleIn, styles.imageBubble]}
+              onPress={() => {
+                if (item.videoUrl) {
+                  setVideoPlayerUrl(item.videoUrl);
+                  setVideoPlayerVisible(true);
+                }
+              }}
+            >
+              {item.thumbnailUrl ? (
+                <Image source={{ uri: item.thumbnailUrl }} style={styles.messageImage} resizeMode="cover" />
+              ) : (
+                <View style={[styles.messageImage, styles.videoPlaceholder]}>
+                  <AppIcon name="film-outline" size={36} color="rgba(255,255,255,0.7)" fixedColor />
+                </View>
+              )}
+              <View style={styles.videoPlayOverlay}>
+                <View style={styles.videoPlayBtn}>
+                  <AppIcon name="play" size={22} color="#fff" fixedColor />
+                </View>
+              </View>
+              <View style={styles.imageTimeOverlay}>
+                <AppText fixedColor style={styles.timeIn}>{formatTime(item.timestamp)}</AppText>
+              </View>
+            </TouchableOpacity>
           ) : item.type === 'image' && item.imageUrl ? (
             <View style={[styles.bubble, styles.bubbleIn, styles.imageBubble]}>
               <TouchableOpacity
@@ -1757,6 +1821,34 @@ export default function ChatScreen() {
               mimeType={item.mimeType ?? undefined}
               isOutgoing={true}
             />
+          ) : item.type === 'video' ? (
+            <TouchableOpacity
+              activeOpacity={0.85}
+              style={[styles.bubble, styles.bubbleOut, styles.imageBubble]}
+              onPress={() => {
+                if (item.videoUrl) {
+                  setVideoPlayerUrl(item.videoUrl);
+                  setVideoPlayerVisible(true);
+                }
+              }}
+            >
+              {item.thumbnailUrl ? (
+                <Image source={{ uri: item.thumbnailUrl }} style={styles.messageImage} resizeMode="cover" />
+              ) : (
+                <View style={[styles.messageImage, styles.videoPlaceholder]}>
+                  <AppIcon name="film-outline" size={36} color="rgba(255,255,255,0.7)" fixedColor />
+                </View>
+              )}
+              <View style={styles.videoPlayOverlay}>
+                <View style={styles.videoPlayBtn}>
+                  <AppIcon name="play" size={22} color="#fff" fixedColor />
+                </View>
+              </View>
+              <View style={styles.imageTimeOverlay}>
+                <AppText fixedColor style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
+                <AppIcon name={tickIcon.icon} size={13} color={tickIcon.color} fixedColor />
+              </View>
+            </TouchableOpacity>
           ) : item.type === 'image' && item.imageUrl ? (
             <View style={[styles.bubble, styles.bubbleOut, styles.imageBubble]}>
               <TouchableOpacity
@@ -2481,7 +2573,7 @@ export default function ChatScreen() {
           <AppText style={[styles.attachTitle, { color: textColor, fontFamily }]}>Share</AppText>
           <View style={styles.attachGrid}>
             {[
-              { icon: 'images-outline'   as const, label: 'Photos & Videos', action: () => { setShowAttach(false); openGallery(); } },
+              { icon: 'images-outline'   as const, label: 'Photos & Videos', action: () => { setShowAttach(false); setTimeout(openGallery, 400); } },
               { icon: 'document-outline' as const, label: 'Files',           action: openDocuments },
               { icon: 'camera-outline'   as const, label: 'Camera',          action: () => { setShowAttach(false); openCamera(); } },
             ].map((item) => (
@@ -2623,6 +2715,14 @@ export default function ChatScreen() {
             </View>
           </View>
         </Modal>
+      )}
+
+      {/* ── Full-screen video player ── */}
+      {videoPlayerVisible && videoPlayerUrl && (
+        <VideoPlayerModal
+          url={videoPlayerUrl}
+          onClose={() => { setVideoPlayerVisible(false); setVideoPlayerUrl(null); }}
+        />
       )}
 
       {/* ── Full-screen image viewer ── */}
@@ -4168,6 +4268,27 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.5)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+
+  // ── Video bubble ──────────────────────────────────────────────────────────
+  videoPlaceholder: {
+    backgroundColor: '#111',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  videoPlayOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  videoPlayBtn: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingLeft: 4,
   },
 
   // ── Profile Modal ──────────────────────────────────────────────────────────

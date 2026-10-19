@@ -106,7 +106,7 @@ jest.mock('../../navigation/TabNavigator', () => {
   const React = require('react');
   return { __esModule: true, default: () => React.createElement('TabNavigator') };
 });
-jest.mock('../../components', () => ({ InCallChatManager: () => null }));
+jest.mock('../../components', () => ({ IncomingCallManager: () => null }));
 
 // ─── Import after mocks ──────────────────────────────────────────────────────
 
@@ -150,10 +150,14 @@ describe('AppNavigator — profile gating', () => {
   });
 
   // ── Req 5.3: authenticated + no profile → CreateAccount ──
+  // Backend contract: GET /me returns 404 for a Firebase UID with no DB row.
+  // That 404 marks the user as "no profile", so the navigator falls back to
+  // the unauthenticated branch (Splash/SignIn/CreateAccount) and the sign-out
+  // effect clears the orphaned session.
   describe('authenticated + no profile (Req 5.3)', () => {
-    it('uses CreateAccount when profile has no displayName', async () => {
+    it('uses CreateAccount when GET /me returns 404 (no DB row)', async () => {
       mockAuthValue = { isSignedIn: true, loading: false, phone: '', displayName: '' };
-      mockGetMe.mockResolvedValue({ ok: true, data: { id: 'test-uid-123', displayName: null, phoneNumber: null, avatarObjectKey: null, about: null, email: null, website: null, catalog: null, operationalHours: null, accountType: 'business' } });
+      mockGetMe.mockResolvedValue({ ok: false, error: { status: 404, message: 'Not found', kind: 'http', code: 'NOT_FOUND' } });
 
       let tree: ReactTestRenderer;
       await act(async () => { tree = create(<AppNavigator />); await flushPromises(); });

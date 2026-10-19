@@ -11,7 +11,9 @@ const config = getDefaultConfig(__dirname);
 // Redirect native-only packages to lightweight web-compatible shims on web.
 const webShims = {
   '@livekit/react-native-webrtc': path.resolve(__dirname, 'src/shims/livekit-react-native-webrtc.web.ts'),
-  '@react-native-firebase/app':   path.resolve(__dirname, 'src/shims/react-native-firebase-app.web.ts'),
+  // Firebase is Auth-only (identity provider). On web, map the RN Firebase auth
+  // module to the firebase/auth JS SDK shim. No app/firestore/storage shims are
+  // needed — the web build imports firebase/app directly in src/config/firebase.ts.
   '@react-native-firebase/auth':  path.resolve(__dirname, 'src/shims/react-native-firebase-auth.web.ts'),
 };
 

@@ -1,112 +1,63 @@
 // ─── voiceNoteStorage Unit Tests ─────────────────────────────────────────────
-// The voice note uploader uses Firebase Storage REST API via XHR + IdToken
-// (no Firebase Storage SDK). Tests verify size validation and timeout handling.
+// The voice note uploader routes through the backend presigned-URL pipeline
+// (mediaService → MinIO/S3). Firebase Storage is no longer involved. Tests
+// verify the uploader delegates to mediaService and returns the object key.
 
 import { uploadVoiceNote } from '../voiceNoteStorage';
 
-// ─── Mock @react-native-firebase/auth ─────────────────────────────────────────
+// ─── Mock mediaService (backend presigned-URL upload) ─────────────────────────
 
-jest.mock('@react-native-firebase/auth', () => ({
-  getAuth: () => ({
-    currentUser: {
-      getIdToken: jest.fn().mockResolvedValue('mock-id-token'),
-    },
-  }),
+const mockUpload = jest.fn();
+const mockFileSize = jest.fn();
+
+jest.mock('../../services/mediaService', () => ({
+  mediaService: {
+    upload: (...args: any[]) => mockUpload(...args),
+  },
+  fileSize: (...args: any[]) => mockFileSize(...args),
 }));
-
-// ─── Mock expo-file-system/legacy ────────────────────────────────────────────
-
-jest.mock('expo-file-system/legacy', () => ({
-  readAsStringAsync: jest.fn().mockResolvedValue('base64data'),
-  EncodingType: { Base64: 'base64' },
-}));
-
-// ─── Mock global XHR ──────────────────────────────────────────────────────────
-
-const mockOpen  = jest.fn();
-const mockSend  = jest.fn();
-const mockSetRequestHeader = jest.fn();
-const mockAbort = jest.fn();
-
-const listeners: Record<string, Function> = {};
-const uploadListeners: Record<string, Function> = {};
-
-class MockXHR {
-  status = 200;
-  upload = { addEventListener: (e: string, fn: Function) => { uploadListeners[e] = fn; } };
-  open = mockOpen;
-  send = mockSend;
-  setRequestHeader = mockSetRequestHeader;
-  abort = mockAbort;
-  addEventListener(event: string, fn: Function) { listeners[event] = fn; }
-}
-
-(global as any).XMLHttpRequest = MockXHR;
-
-// ─── Mock global atob ────────────────────────────────────────────────────────
-
-(global as any).atob = (str: string) => Buffer.from(str, 'base64').toString('binary');
 
 beforeEach(() => {
   jest.clearAllMocks();
-  jest.useRealTimers();
-  Object.keys(listeners).forEach((k) => delete listeners[k]);
-  Object.keys(uploadListeners).forEach((k) => delete uploadListeners[k]);
-  mockSend.mockImplementation(() => {
-    // Simulate successful upload by firing the load event
-    setTimeout(() => { if (listeners['load']) listeners['load'](); }, 0);
-  });
+  mockFileSize.mockResolvedValue(5000);
+  mockUpload.mockResolvedValue('chats/chat1/voice/uuid.m4a');
 });
 
 describe('uploadVoiceNote', () => {
-  describe('file size validation', () => {
-    it('rejects files over 10 MB with RECORDING_TOO_LARGE error', async () => {
-      const { readAsStringAsync } = await import('expo-file-system/legacy');
-      // base64 of 10MB+ file — mock the decoded size by returning a very long string
-      (readAsStringAsync as jest.Mock).mockResolvedValueOnce('A'.repeat(14 * 1024 * 1024));
+  describe('backend upload (mediaService)', () => {
+    it('uploads via mediaService with the chat-voice category and chat context', async () => {
+      await uploadVoiceNote('file://recording.m4a', 'chat1', 'msg1', jest.fn());
 
-      await expect(
-        uploadVoiceNote('file://recording.m4a', 'chat1', 'msg1', jest.fn()),
-      ).rejects.toThrow('RECORDING_TOO_LARGE');
+      expect(mockUpload).toHaveBeenCalledWith(
+        'file://recording.m4a',
+        'chat-voice',
+        expect.objectContaining({ chatId: 'chat1', contentType: 'audio/mp4', ext: 'm4a' }),
+      );
     });
-  });
 
-  describe('timeout handling', () => {
-    it('rejects with UPLOAD_TIMEOUT after 30 seconds', async () => {
-      jest.useFakeTimers();
-      mockSend.mockImplementation(() => {
-        // Never fire the load event — simulates a stalled upload
-      });
-
-      const promise = uploadVoiceNote('file://recording.m4a', 'chat1', 'msg1', jest.fn());
-      jest.advanceTimersByTime(30000);
-      await expect(promise).rejects.toThrow('UPLOAD_TIMEOUT');
-      expect(mockAbort).toHaveBeenCalled();
+    it('resolves with the object key as both downloadUrl and storagePath', async () => {
+      const result = await uploadVoiceNote('file://recording.m4a', 'chat1', 'msg1', jest.fn());
+      expect(result.downloadUrl).toBe('chats/chat1/voice/uuid.m4a');
+      expect(result.storagePath).toBe('chats/chat1/voice/uuid.m4a');
     });
   });
 
   describe('progress callback', () => {
-    it('invokes onProgress when upload progresses', async () => {
+    it('reports 0% then 100% progress around the upload', async () => {
       const onProgress = jest.fn();
-      mockSend.mockImplementation(() => {
-        // Fire progress then load
-        if (uploadListeners['progress']) {
-          uploadListeners['progress']({ lengthComputable: true, loaded: 2500, total: 5000 });
-        }
-        setTimeout(() => { if (listeners['load']) listeners['load'](); }, 0);
-      });
-
       await uploadVoiceNote('file://recording.m4a', 'chat1', 'msg1', onProgress);
 
-      expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ percentage: 50 }));
+      expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ percentage: 0 }));
+      expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ percentage: 100 }));
     });
   });
 
-  describe('successful upload', () => {
-    it('resolves with a downloadUrl and storagePath', async () => {
-      const result = await uploadVoiceNote('file://recording.m4a', 'chat1', 'msg1', jest.fn());
-      expect(result.storagePath).toBe('voiceNotes/chat1/msg1.m4a');
-      expect(result.downloadUrl).toContain('voiceNotes/chat1/msg1.m4a');
+  describe('error handling', () => {
+    it('propagates a failure from mediaService', async () => {
+      mockUpload.mockRejectedValueOnce(new Error('UPLOAD_FAILED'));
+      await expect(
+        uploadVoiceNote('file://recording.m4a', 'chat1', 'msg1', jest.fn()),
+      ).rejects.toThrow('UPLOAD_FAILED');
     });
   });
 });

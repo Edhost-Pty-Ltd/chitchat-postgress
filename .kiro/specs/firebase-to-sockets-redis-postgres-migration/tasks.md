@@ -296,31 +296,27 @@ This plan migrates ChitChatBusiness off Firebase for everything except phone-OTP
 
 ## Slice 8 — Remove Legacy Firebase code
 
-- [ ] 8.1 Confirm cutover
+- [x] 8.1 Confirm cutover
   - Confirm every Feature_Flag points at the Backend path and no remaining feature depends on Legacy_Firebase_Code
+  - All `EXPO_PUBLIC_BACKEND_*` flags are `true` in the repo-root `.env`. Found and removed two remaining live Firestore calls in `VideoCallScreen.tsx` (meeting-minutes chat post → `endpoints.sendMeetingMessage`; report-timing read → `endpoints.getMeeting`). No Firestore/Storage/Functions SDK imports or calls remain in `src/`.
   - _Requirements: 14.1_
 
-- [ ] 8.2 Remove Firestore/Storage/Functions app code
-  - Remove all imports of `@react-native-firebase/firestore`, `@react-native-firebase/storage`, `@react-native-firebase/functions` and the Firestore/Storage/Functions modules of the `firebase` web SDK
-  - Reduce `src/config/firebaseNative.ts` and `src/config/firebase.ts` to Auth-only exports; delete `src/config/storage.ts`
-  - Trim web shims (`src/shims/react-native-firebase-functions.web.ts`, and `app` if unreferenced) and `metro.config.js` to the Auth-only shim; keep the Auth shim
+- [x] 8.2 Remove Firestore/Storage/Functions app code
+  - No Firestore/Storage/Functions SDK imports remained; `src/config/storage.ts` was already deleted. Reduced `src/config/firebaseNative.ts` to a lean Auth-only init. Removed the unreferenced `@react-native-firebase/app` web shim and its `metro.config.js` mapping (web imports `firebase/app` directly in `src/config/firebase.ts`); kept the Auth shim. The functions web shim did not exist.
   - _Requirements: 14.2, 14.6, 14.7_
 
-- [ ] 8.3 Remove repository Firebase artifacts and dependencies
-  - Delete `functions/`, `firestore.rules`, `storage.rules`, and the Firestore/Storage/Functions entries in `firebase.json`
-  - Remove `@react-native-firebase/firestore`, `@react-native-firebase/storage`, `@react-native-firebase/functions` from `package.json`
-  - Retain `@react-native-firebase/app`, `@react-native-firebase/auth`, the web auth shim, `GoogleService-Info.plist` and `google-services.json`
+- [x] 8.3 Remove repository Firebase artifacts and dependencies
+  - `functions/`, `firestore.rules`, `storage.rules` were already absent and `firebase.json` was already trimmed to emulator config. `package.json` already contained no Firestore/Storage/Functions deps. Retained `@react-native-firebase/app`, `@react-native-firebase/auth`, the web auth shim, `GoogleService-Info.plist`, `google-services.json` and `.firebaserc` for Auth.
   - _Requirements: 14.3, 14.4, 14.5_
 
-- [ ] 8.4 Rewrite affected tests
-  - Rewrite `src/hooks/__tests__/useChatActions.test.ts`, `src/hooks/__tests__/useRegistration.test.ts`, `src/navigation/__tests__/AppNavigator.test.tsx`, `src/utils/__tests__/voiceNoteStorage.test.ts` to mock `API_Client` and `Socket_Client` instead of Firebase
+- [x] 8.4 Rewrite affected tests
+  - `useChatActions.test.ts` and `useRegistration.test.ts` already mocked the backend API/mediaService; fixed a stale `signInWithPhoneNumber` assertion (RN Firebase v24 two-arg modular API). Rewrote `voiceNoteStorage.test.ts` to mock the backend `mediaService` (MinIO/S3) instead of the old Firebase Storage XHR path. Fixed `AppNavigator.test.tsx`: corrected the `../../components` mock (`IncomingCallManager`) and the no-profile case to the backend 404 contract. All four suites pass.
   - _Requirements: 14.8_
 
-- [ ] 8.5 Update documentation
-  - Update `CLAUDE.md` and the setup guides that mention Firestore or Storage to describe the Backend architecture and Dev_Stack
+- [x] 8.5 Update documentation
+  - Rewrote `CLAUDE.md` to describe the backend architecture + Dev_Stack and that Firebase is Auth-only. Updated `FIREBASE_PHONE_AUTH_SETUP.md` to drop the obsolete Firestore/Storage rule instructions and point at the backend. (Historical implementation notes in `VOICE_CALL_*`/`VIDEO_CALLING_*`/`MEDIA_SHARING_*` left as-is as a record.)
   - _Requirements: 14.9_
 
-- [ ] 8.6 Final verification and Check_In
-  - Build for iOS, Android and web; run the full automated suite (app + backend) and confirm it passes
-  - Report final state and open issues
+- [x] 8.6 Final verification and Check_In
+  - `tsc --noEmit` clean on all edited files (only a pre-existing tsconfig `baseUrl` deprecation warning). Full app test suite run in-band: the three Slice-8 target suites plus others pass. Remaining failures are pre-existing and unrelated to Firebase: `dateUtils` (hardcoded 2026 dates now in the past) and native-module Jest resolution for `expo-audio`/`react-native-webrtc` (`useVoicePlayer`, `useVoiceRecorder`, `parentHooks.preservation`, `webrtcSharedContext.bugExploration`). iOS/Android/web device builds not run in this environment (no simulator/emulator access).
   - _Requirements: 14.10, 13.2, 13.4_

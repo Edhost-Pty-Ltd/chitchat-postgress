@@ -110,17 +110,41 @@ export async function sendVideoMessage(
 ): Promise<{ success: boolean; messageId: string }> {
   try {
     const { mediaService, fileSize } = await import('../services/mediaService');
-    const objectKey = await mediaService.upload(videoUri, 'chat-media', {
+
+    // iOS photo library URIs (ph:// or assets-library://) cannot be read
+    // directly by expo-file-system. Export to a local cache file first.
+    let localUri = videoUri;
+    if (videoUri.startsWith('ph://') || videoUri.startsWith('assets-library://')) {
+      const { FileSystem } = await import('expo-file-system');
+      const dest = `${FileSystem.cacheDirectory}video_${Date.now()}.mp4`;
+      await FileSystem.copyAsync({ from: videoUri, to: dest });
+      localUri = dest;
+    }
+
+    // Derive content type from the local URI extension; default to mp4.
+    const ext = localUri.split('.').pop()?.toLowerCase() ?? 'mp4';
+    const contentType =
+      ext === 'mov' ? 'video/quicktime' :
+      ext === 'avi' ? 'video/x-msvideo' :
+      'video/mp4';
+
+    const objectKey = await mediaService.upload(localUri, 'chat-media', {
       chatId,
-      sizeBytes: await fileSize(videoUri),
+      sizeBytes: await fileSize(localUri),
+      contentType,
+      ext,
     });
+
     let thumbKey: string | null = null;
     if (thumbnailUri) {
       thumbKey = await mediaService.upload(thumbnailUri, 'chat-media', {
         chatId,
         sizeBytes: await fileSize(thumbnailUri),
+        contentType: 'image/jpeg',
+        ext: 'jpg',
       });
     }
+
     const res = await endpoints.sendMessage(chatId, {
       type: 'video',
       mediaObjectKey: objectKey,
