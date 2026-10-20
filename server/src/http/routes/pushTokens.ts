@@ -7,8 +7,10 @@ import { addPushToken, removePushToken } from '../../db/repositories/pushTokens.
 export async function registerPushTokenRoutes(app: FastifyInstance): Promise<void> {
   // POST /push-tokens — register an Expo push token (Req 4.7).
   app.post('/push-tokens', { preHandler: requireAuth }, async (request, reply) => {
-    const { token, platform } = parse(pushTokenSchema, request.body);
-    await addPushToken(request.identity!.userId, token, platform ?? null);
+    const { token, platform, deviceId } = parse(pushTokenSchema, request.body);
+    // A companion's token is always tied to the device it was linked with.
+    const device = request.identity!.isCompanion ? request.identity!.deviceId ?? null : deviceId ?? null;
+    await addPushToken(request.identity!.userId, token, platform ?? null, device);
     return reply.code(201).send({ ok: true });
   });
 

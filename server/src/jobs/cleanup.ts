@@ -37,3 +37,11 @@ export async function runStaleCallCleanup(): Promise<{ rows: number }> {
   logger.info({ job: 'cleanupStaleCalls', rows: deleted }, 'cleanup complete');
   return { rows: deleted };
 }
+
+/** Hourly: delete expired companion link requests (old cleanupExpiredLinkTokens). */
+export async function runLinkTokenCleanup(): Promise<{ rows: number }> {
+  const { deleteExpiredLinkTokens } = await import('../db/repositories/linkedDevices.js');
+  const deleted = await deleteExpiredLinkTokens();
+  logger.info({ job: 'cleanupExpiredLinkTokens', rows: deleted }, 'cleanup complete');
+  return { rows: deleted };
+}

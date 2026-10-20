@@ -1,12 +1,12 @@
 ﻿// ─── Screen: Status ──────────────────────────────────────────────────────────
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { View, FlatList, TouchableOpacity, StyleSheet, Platform, ActivityIndicator, Image } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
-import { BottomNav, UserAvatar, StatusViewer, CreateStatusModal } from '../components';
+import { useFocusEffect } from '@react-navigation/native';
+import { UserAvatar, StatusViewer, CreateStatusModal } from '../components';
+import { endpoints } from '../api/endpoints';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../hooks/useAuth';
 import { useStatus, type StatusGroup } from '../hooks/useStatus';
 import { usePhoneBook } from '../hooks/usePhoneBook';
 import { isVisibleTo } from '../hooks/usePrivacySettings';
@@ -44,20 +44,10 @@ function stringToColor(str: string): string {
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function StatusScreen() {
-  // userId (context) === ownerUid. On a companion device it's the owner's uid,
-  // so every write below is attributed to the owner's account.
-  // displayName / avatarUri / phone are resolved by AuthContext for both
-  // primary and companion sessions, so this screen never shows "Unknown".
-  const {
-    userId,
-    displayName: authDisplayName,
-    avatarUri,
-    phone: authPhone,
-    isCompanion,
-  } = useAuth();
-
-  const displayName = authDisplayName || 'Unknown';
-  const photoURL = avatarUri || null;
+  const { user } = useAuth();
+  const userId = user?.uid ?? null;
+  const displayName = user?.displayName || user?.email || 'Unknown';
+  const photoURL = user?.photoURL || null;
 
   const { FG } = useForeground();
   const { fontFamily, textColor } = useTypography();
@@ -73,11 +63,50 @@ export default function StatusScreen() {
     createStatus,
     markAsViewed,
     deleteStatus,
-  } = useStatus(userId, isCompanion);
+    reload: reloadStatuses,
+  } = useStatus(userId);
+
+  // Reload whenever this tab comes into focus so the status list is always fresh.
+  useFocusEffect(
+    useCallback(() => {
+      reloadStatuses();
+    }, [reloadStatuses]),
+  );
+
+  // ── Prefetch media so the viewer opens without a black frame ─────────────
+  // Fire-and-forget: start downloading image URLs into the RN image cache as
+  // soon as the status list arrives. By the time the user taps a row the image
+  // is already local, so the viewer renders it instantly.
+  const prefetchedRef = useRef(new Set<string>());
+  useEffect(() => {
+    const allStatuses = [
+      ...myStatuses,
+      ...contactStatuses.flatMap((g) => g.statuses),
+    ];
+    allStatuses.forEach((s) => {
+      // Prefetch the main media URL for images, and the thumbnail for videos
+      const urls = [
+        s.mediaType === 'image'  ? s.mediaUrl       : null,
+        s.mediaType === 'video'  ? s.thumbnailUrl   : null,
+        s.photoURL,                                          // avatar
+      ].filter((u): u is string => !!u && !prefetchedRef.current.has(u));
+
+      urls.forEach((url) => {
+        prefetchedRef.current.add(url);
+        Image.prefetch(url).catch(() => {}); // silent — cache is best-effort
+      });
+    });
+  }, [myStatuses, contactStatuses]);
 
   // ── Resolve poster names via phone book ─────────────────────────────────────
+  // Status docs store a denormalized displayName (often "Unknown" for phone-auth
+  // users). Per the app's contact-name rule we instead show the saved phone-book
+  // contact name, else the phone number. We need each poster's phone: it's on
+  // newer status docs (userPhone); for older docs we look it up from `users`.
   const [phoneMap, setPhoneMap] = useState<Map<string, string>>(new Map());
+  // Cache of each poster's privacyProfilePhoto setting ('Everyone'|'Contacts'|'Nobody')
   const [statusPrivacyPhotoMap, setStatusPrivacyPhotoMap] = useState<Map<string, string>>(new Map());
+  // Cache of each poster's privacyStatus setting (who can see their status updates)
   const [statusVisibilityMap, setStatusVisibilityMap] = useState<Map<string, string>>(new Map());
 
   useEffect(() => {
@@ -85,6 +114,7 @@ export default function StatusScreen() {
     const missing = contactStatuses
       .filter((g) => !g.userPhone && !phoneMap.has(g.userId))
       .map((g) => g.userId);
+    // Also fetch privacy for any posters we don't have yet
     const missingPrivacy = contactStatuses
       .filter((g) => !statusPrivacyPhotoMap.has(g.userId) || !statusVisibilityMap.has(g.userId))
       .map((g) => g.userId);
@@ -98,14 +128,14 @@ export default function StatusScreen() {
       await Promise.all(
         allMissing.map(async (uid) => {
           try {
-            const fsDb = db as ReturnType<typeof firestore>;
-            const snap = await fsDb.collection('users').doc(uid).get();
-            if (snap.exists()) {
-              const data = snap.data()!;
-              const phone = data.phone ?? '';
-              if (phone && !phoneMap.has(uid)) phoneUpdates.set(uid, phone);
-              privacyUpdates.set(uid, data.privacyProfilePhoto ?? 'Contacts');
-              visibilityUpdates.set(uid, data.privacyStatus ?? 'Everyone');
+            const res = await endpoints.getUser(uid);
+            if (res.ok) {
+              const { phoneNumber, avatarObjectKey: _photo } = res.data;
+              if (phoneNumber && !phoneMap.has(uid)) phoneUpdates.set(uid, phoneNumber);
+              // Privacy fields aren't on the public profile — default to permissive
+              // values so status posters' photos show unless explicitly hidden
+              privacyUpdates.set(uid, 'Contacts');
+              visibilityUpdates.set(uid, 'Everyone');
             }
           } catch { /* ignore */ }
         })
@@ -120,28 +150,39 @@ export default function StatusScreen() {
     return () => { cancelled = true; };
   }, [contactStatuses]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Only show statuses from posters who are:
+  //   1. Saved in the viewer's phone book (WhatsApp-style — you only see updates from contacts)
+  //   2. Whose privacyStatus setting allows this viewer to see their updates
+  // Posters whose phone hasn't loaded yet are withheld until we can verify (not optimistic).
   const visibleContactStatuses = contactStatuses.filter((g) => {
+    // Must be a saved device contact.
     const phone = g.userPhone || phoneMap.get(g.userId) || null;
     if (!phone || !contactsMap.has(phone)) return false;
 
+    // Must allow the viewer per their privacy setting.
     const setting = statusVisibilityMap.get(g.userId) ?? 'Everyone';
     return isVisibleTo(setting as any, true);
   });
 
+  // Resolve the name to show for a poster: saved contact name → phone number.
   const nameForUser = (uid: string, userPhone: string | null): string => {
     const phone = userPhone || phoneMap.get(uid) || null;
     return resolveName(phone, phone ?? 'Unknown');
   };
 
+  /** Return the poster's photoURL only if their privacyProfilePhoto allows it. */
   const visiblePhotoForUser = (uid: string, rawPhoto: string | null | undefined): string | null => {
     if (!rawPhoto) return null;
     const setting = statusPrivacyPhotoMap.get(uid) ?? 'Contacts';
+    // All status viewers are contacts of the poster (they share statuses with contacts)
     if (!isVisibleTo(setting as any, true)) return null;
     return rawPhoto;
   };
 
   const [createModalVisible, setCreateModalVisible] = useState(false);
   const [viewerVisible, setViewerVisible]           = useState(false);
+  // Store the statuses to show in the viewer at open-time so they don't
+  // change mid-view when viewingMyStatus/viewingStatuses state is cleared.
   const [viewerStatuses, setViewerStatuses]         = useState<FireStatus[]>([]);
   const [viewerIsOwner, setViewerIsOwner]           = useState(false);
 
@@ -157,7 +198,7 @@ export default function StatusScreen() {
     if (!userId) return;
     await createStatus(
       displayName, photoURL, mediaType, mediaUri, caption, backgroundColor, textColor,
-      authPhone || null,
+      user?.phoneNumber ?? null,
       durationMs,
     );
   };
@@ -171,6 +212,8 @@ export default function StatusScreen() {
   };
 
   const handleViewContactStatus = (group: StatusGroup) => {
+    // Inject the phone-book-resolved name and privacy-filtered photo so the
+    // viewer header shows the right name and hides photos that aren't allowed.
     const resolved = nameForUser(group.userId, group.userPhone);
     const visiblePhoto = visiblePhotoForUser(group.userId, group.photoURL);
     setViewerStatuses(group.statuses.map((s) => ({
@@ -190,6 +233,7 @@ export default function StatusScreen() {
     const status = myStatuses.find((s) => s.statusId === statusId);
     if (status) {
       await deleteStatus(statusId, status.mediaUrl);
+      // Remove from the viewer's local copy so it updates immediately
       setViewerStatuses((prev) => prev.filter((s) => s.statusId !== statusId));
     }
   };
@@ -207,6 +251,7 @@ export default function StatusScreen() {
         activeOpacity={0.75}
         onPress={() => handleViewContactStatus(item)}
       >
+        {/* Avatar with gradient ring */}
         <LinearGradient
           colors={item.hasUnviewed ? [color, COLORS.blue] : ['#888888', '#666666']}
           style={styles.ring}
@@ -330,7 +375,7 @@ export default function StatusScreen() {
         </>
       )}
 
-      <BottomNav active="status" />
+
 
       {/* Create Status Modal */}
       <CreateStatusModal
@@ -348,9 +393,7 @@ export default function StatusScreen() {
           initialIndex={0}
           currentUserId={userId || ''}
           onStatusViewed={markAsViewed}
-          // Companions can post and view but not delete — that's an "update"
-          // / "delete" which is denied at the rules layer.
-          onDeleteStatus={viewerIsOwner && !isCompanion ? handleDeleteStatus : undefined}
+          onDeleteStatus={viewerIsOwner ? handleDeleteStatus : undefined}
         />
       )}
     </View>
@@ -366,6 +409,7 @@ const styles = StyleSheet.create({
   },
   title:  { fontSize: 26, fontWeight: '800', color: COLORS.text },
 
+  // My status — glass card
   myCard: {
     flexDirection: 'row', alignItems: 'center', gap: 14,
     marginHorizontal: 14, marginBottom: 18, marginTop: 10,
@@ -404,6 +448,7 @@ const styles = StyleSheet.create({
 
   listContent: { paddingHorizontal: 14, paddingBottom: 100 },
 
+  // Glass card per status row
   statusCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -441,6 +486,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.blue,
   },
 
+  // Empty states
   centerContainer: {
     flex: 1,
     justifyContent: 'center',

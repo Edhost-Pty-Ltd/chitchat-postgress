@@ -10,23 +10,24 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import DateTimePickerModal from 'react-native-modal-datetime-picker';
-import firestore from '@react-native-firebase/firestore';
 import * as Notifications from 'expo-notifications';
+import { endpoints } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
 import * as Contacts from 'expo-contacts';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
-import auth from '@react-native-firebase/auth';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
+import { readAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 
-import { BottomNav } from '../components';
+
 import { ParticipantPickerSheet } from '../components/ParticipantPickerSheet';
 import { useAuth } from '../context/AuthContext';
 import { useContacts, AppContact } from '../hooks/useContacts';
-import { getOrCreateDirectChat } from '../hooks/useChatActions';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 
+const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
 const HOUR_HEIGHT = 70; // Height per hour in the timeline
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'Calendar'>;
@@ -53,14 +54,14 @@ interface Meeting {
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false,
-
+    shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: false,
+    shouldShowBanner: true, shouldShowList: true,
   }),
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const stringToColor = (str: string) => {
-  const c = ['#f97316', '#8b5cf6', '#ec4899', '#06b6d4', '#10b981', '#f59e0b', '#6366f1', '#e11d48'];
+  const c = ['#f97316','#8b5cf6','#ec4899','#06b6d4','#10b981','#f59e0b','#6366f1','#e11d48'];
   let h = 0; for (let i = 0; i < str.length; i++) h = str.charCodeAt(i) + ((h << 5) - h);
   return c[Math.abs(h) % c.length];
 };
@@ -90,11 +91,11 @@ const deriveEnd = (start: Date, duration: string): Date => {
 };
 const getEndTime = (m: Meeting): Date => m.endDate ?? deriveEnd(m.date, m.duration);
 const isMeetingActive = (m: Meeting, now: Date) => m.isActive && now >= m.date && now <= getEndTime(m);
-const isMeetingPast = (m: Meeting, now: Date) => !m.isActive || getEndTime(m) < now;
+const isMeetingPast   = (m: Meeting, now: Date) => !m.isActive || getEndTime(m) < now;
 
-const isSameDay = (d1: Date, d2: Date) =>
-  d1.getFullYear() === d2.getFullYear() &&
-  d1.getMonth() === d2.getMonth() &&
+const isSameDay = (d1: Date, d2: Date) => 
+  d1.getFullYear() === d2.getFullYear() && 
+  d1.getMonth() === d2.getMonth() && 
   d1.getDate() === d2.getDate();
 
 const fmtRemaining = (ms: number) => {
@@ -111,7 +112,7 @@ const fmtRemaining = (ms: number) => {
 const getWeekDays = (date: Date) => {
   const start = new Date(date);
   start.setDate(start.getDate() - (start.getDay() === 0 ? 6 : start.getDay() - 1));
-  return Array.from({ length: 7 }).map((_, i) => {
+  return Array.from({length: 7}).map((_, i) => {
     const d = new Date(start);
     d.setDate(start.getDate() + i);
     return d;
@@ -123,7 +124,7 @@ const getMonthGrid = (month: Date): (Date | null)[] => {
   const year = month.getFullYear();
   const m = month.getMonth();
   const firstDay = new Date(year, m, 1);
-  const lastDay = new Date(year, m + 1, 0);
+  const lastDay  = new Date(year, m + 1, 0);
   // Monday-indexed: Mon=0 … Sun=6
   const startPad = (firstDay.getDay() + 6) % 7;
   const cells: (Date | null)[] = Array(startPad).fill(null);
@@ -142,7 +143,7 @@ function LiveDot({ size = 10 }: { size?: number }) {
   useEffect(() => {
     const loop = Animated.loop(Animated.sequence([
       Animated.timing(pulse, { toValue: 1, duration: 900, easing: Easing.out(Easing.ease), useNativeDriver: true }),
-      Animated.timing(pulse, { toValue: 0, duration: 900, easing: Easing.in(Easing.ease), useNativeDriver: true }),
+      Animated.timing(pulse, { toValue: 0, duration: 900, easing: Easing.in(Easing.ease),  useNativeDriver: true }),
     ]));
     loop.start(); return () => loop.stop();
   }, [pulse]);
@@ -162,15 +163,13 @@ function LiveDot({ size = 10 }: { size?: number }) {
 function ContactAvatar({ contact, size = 36 }: { contact: AppContact; size?: number }) {
   const photo = contact.photoUri || contact.firebasePhotoURL;
   return (
-    <View style={{
-      width: size, height: size, borderRadius: size / 2, overflow: 'hidden',
-      backgroundColor: stringToColor(contact.displayName), alignItems: 'center', justifyContent: 'center'
-    }}>
+    <View style={{ width: size, height: size, borderRadius: size / 2, overflow: 'hidden',
+      backgroundColor: stringToColor(contact.displayName), alignItems: 'center', justifyContent: 'center' }}>
       {photo
         ? <Image source={{ uri: photo }} style={{ width: size, height: size }} />
         : <Text style={{ color: '#fff', fontSize: size * 0.36, fontWeight: '700' }}>
-          {getInitials(contact.displayName)}
-        </Text>}
+            {getInitials(contact.displayName)}
+          </Text>}
     </View>
   );
 }
@@ -187,7 +186,7 @@ const MeetingRow = React.memo(function MeetingRow({
 
   const handlePress = () => {
     if (isActive) { onJoin(); return; }
-    onPress();
+    onPress(); 
   };
 
   return (
@@ -280,7 +279,6 @@ function NewMeetingSheet({
 }: any) {
   const [creating, setCreating] = useState(false);
   const { contacts } = useContacts();
-  const { displayName } = useAuth();
   const { bevel } = useGlass();
   const { textColor } = useTypography();
   const duration = useMemo(() => calcDuration(startTime, endTime), [startTime, endTime]);
@@ -295,7 +293,7 @@ function NewMeetingSheet({
           fields: [Contacts.Fields.PhoneNumbers, Contacts.Fields.Emails],
         });
         setPhoneCount(data.length);
-      } catch { }
+      } catch {}
     })();
   }, []);
 
@@ -308,22 +306,11 @@ function NewMeetingSheet({
     setCreating(true);
     const allParticipants = Array.from(new Set([userId, ...participantIds]));
     try {
-      const meetingRef = await firestore().collection('meetings').add({
-        title,
-        date: firestore.Timestamp.fromDate(startTime),
-        endDate: firestore.Timestamp.fromDate(endTime),
-        duration,
-        participants: allParticipants,
-        organizerId: userId,
-        type: 'online',
-        reminders: REMINDER_MILESTONES,
-        joinedMembers: [],
-        mutedUsers: [],
-        kickedUsers: [],
-        isActive: true,
-        createdAt: firestore.FieldValue.serverTimestamp(),
-      });
+      // Create meeting on the backend
+      const res = await endpoints.createMeeting(title, allParticipants);
+      if (!res.ok) throw new Error(res.error.message);
 
+      // Schedule local notifications for the organizer's device
       const now = new Date();
       const scheduledIds: string[] = [];
 
@@ -351,10 +338,9 @@ function NewMeetingSheet({
         scheduledIds.push(id);
       }
 
-      // Post-start "still waiting" nudges — only schedule if the meeting hasn't started yet
-      if (startTime > now) {
-        for (let i = 5; i <= 30; i += 5) {
-          const t = new Date(startTime.getTime() + i * 60000);
+      for (let i = 5; i <= 30; i += 5) {
+        const t = new Date(startTime.getTime() + i * 60000);
+        if (t > now) {
           const id = await Notifications.scheduleNotificationAsync({
             content: {
               title: `Waiting for "${title}"`,
@@ -367,54 +353,15 @@ function NewMeetingSheet({
         }
       }
 
-      // Persist IDs so CalendarScreen can cancel them if the meeting is ended early
-      if (scheduledIds.length > 0) {
-        await meetingRef.update({ notificationIds: scheduledIds });
-      }
-
-      // Invite participants. We write a `system` message into each participant's
-      // direct chat: this triggers sendMessageNotification (the proven push path)
-      // via the lastMessage update, while rendering as a clean centered notice
-      // in the chat rather than a normal message bubble.
       const invitees = allParticipants.filter(uid => uid !== userId);
       if (invitees.length > 0) {
-        const businessName = (displayName || '').trim() || 'A business';
-        const inviteText = `You're invited to the meeting "${title}" by ${businessName}.`;
-        try {
-          await Promise.all(invitees.map(async (inviteeUid) => {
-            const chatId = await getOrCreateDirectChat(userId, inviteeUid);
-            const chatRef = firestore().collection('chats').doc(chatId);
-            const msgRef = chatRef.collection('messages').doc();
-            const batch = firestore().batch();
-            batch.set(msgRef, {
-              messageId:   msgRef.id,
-              senderId:    userId,
-              text:        inviteText,
-              type:        'system',
-              timestamp:   firestore.FieldValue.serverTimestamp(),
-              readBy:      [userId],
-              deliveredTo: [],
-            });
-            batch.update(chatRef, {
-              'lastMessage.text':      inviteText,
-              'lastMessage.senderId':  userId,
-              'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-              [`unreadCounts.${inviteeUid}`]: firestore.FieldValue.increment(1),
-            });
-            await batch.commit();
-          }));
-        } catch (err) {
-          console.warn('[handleCreate] Failed to send invite messages:', err);
-        }
-
-        // Local confirmation on the organizer's device
         await Notifications.scheduleNotificationAsync({
           content: {
             title: 'Meeting invitations sent',
             body: `${invitees.length} participant${invitees.length > 1 ? 's' : ''} invited to "${title}".`,
             sound: false,
           },
-          trigger: null, // immediate
+          trigger: null,
         });
       }
 
@@ -553,7 +500,6 @@ function RecordingPlayer({
   const isPlaying = status.playing ?? false;
 
   const [summarizing, setSummarizing] = useState(false);
-  const [summarizeStep, setSummarizeStep] = useState<'transcribing' | 'summarizing' | null>(null);
   const [minutes, setMinutes] = useState<string | null>(existingMinutes);
   const [exportingPdf, setExportingPdf] = useState(false);
 
@@ -589,46 +535,41 @@ function RecordingPlayer({
       Alert.alert('No recording', 'Recording URL is not available.');
       return;
     }
-
+    if (!GEMINI_API_KEY) {
+      Alert.alert('Not configured', 'Gemini API key is not set. Add GEMINI_API_KEY to your .env file.');
+      return;
+    }
     setSummarizing(true);
-    setSummarizeStep('transcribing');
-
     try {
-      // Call Cloud Function directly via fetch with Firebase ID token —
-      // bypasses @react-native-firebase/functions which falls back to the
-      // JS SDK web module and has timeout/module-resolution issues on iOS.
-      const currentUser = auth().currentUser;
-      if (!currentUser) throw new Error('You must be signed in to summarize a recording.');
-      const idToken = await currentUser.getIdToken();
+      const { downloadAsync, documentDirectory } = await import('expo-file-system/legacy');
+      const dest = `${documentDirectory}rec_${rec.id}_tmp.m4a`;
+      await downloadAsync(rec.url, dest);
+      const base64Audio = await readAsStringAsync(dest, { encoding: EncodingType.Base64 });
 
       const res = await fetch(
-        'https://us-central1-chitchatbusiness-880ce.cloudfunctions.net/summarizeMeetingRecording',
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
         {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${idToken}`,
-          },
-          body: JSON.stringify({ data: { url: rec.url, recordingId: rec.id } }),
-        },
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: 'Act as an executive meeting recorder. Produce clear minutes with: 1. Executive Summary 2. Key Decisions 3. Attendees & Action Items. Format as structured plain text.' },
+                { inlineData: { mimeType: 'audio/mp4', data: base64Audio } },
+              ],
+            }],
+          }),
+        }
       );
-
-      const json = await res.json();
-      if (json.error) throw new Error(json.error.message ?? 'Cloud Function error');
-      const { minutes } = json.result as { minutes: string };
-
-      setMinutes(minutes);
-      onMinutesGenerated(minutes);
-
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? 'No content returned.';
+      setMinutes(text);
+      onMinutesGenerated(text);
     } catch (e: any) {
       console.error('[RecordingPlayer] summarize failed:', e);
-      console.error('[RecordingPlayer] error code:', e?.code);
-      console.error('[RecordingPlayer] error details:', e?.details);
-      console.error('[RecordingPlayer] error cause:', e?.cause);
-      Alert.alert('Summarize failed', `${e?.code ?? ''}: ${e?.message ?? 'Could not generate minutes.'}`);
+      Alert.alert('Summarize failed', e?.message ?? 'Could not generate minutes. Please try again.');
     } finally {
       setSummarizing(false);
-      setSummarizeStep(null);
     }
   };
 
@@ -700,7 +641,7 @@ function RecordingPlayer({
         </View>
 
         <TouchableOpacity
-          onPress={() => Share.share({ url: rec.url, message: rec.url }).catch(() => { })}
+          onPress={() => Share.share({ url: rec.url, message: rec.url }).catch(() => {})}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           disabled={!rec.url}
         >
@@ -727,13 +668,7 @@ function RecordingPlayer({
             <AppIcon name="sparkles-outline" size={15} color={COLORS.blue} />
           )}
           <AppText style={[styles.recActionText, { color: COLORS.blue }]}>
-            {summarizeStep === 'transcribing'
-              ? 'Transcribing…'
-              : summarizeStep === 'summarizing'
-                ? 'Summarizing…'
-                : minutes
-                  ? 'Re-summarize'
-                  : 'Summarize'}
+            {summarizing ? 'Generating…' : minutes ? 'Re-summarize' : 'Summarize'}
           </AppText>
         </TouchableOpacity>
 
@@ -792,16 +727,17 @@ function MeetingDetailSheet({
   useEffect(() => {
     if (!visible || !meeting) { setSubRecordings([]); setGeneratedMinutes(null); return; }
     setRecLoading(true);
-    firestore()
-      .collection('meetings').doc(meeting.id).collection('recordings')
-      .orderBy('createdAt', 'asc')
-      .get()
-      .then(snap => {
-        setSubRecordings(snap.docs.map(d => ({
-          id: d.id,
-          url: d.data().url ?? '',
-          durationMs: d.data().durationMs ?? 0,
-        })));
+    endpoints.getMeeting(meeting.id)
+      .then((res) => {
+        if (res.ok) {
+          const state = res.data.state as any;
+          if (state?.minutes) setGeneratedMinutes(state.minutes);
+        }
+        // Recordings are stored locally (S3 upload not yet wired); fall back to
+        // the meeting object's own recordings array.
+        setSubRecordings(
+          meeting.recordings.map((r, i) => ({ id: String(i), url: r.url, durationMs: r.durationMs }))
+        );
       })
       .catch(() => {
         setSubRecordings(
@@ -814,8 +750,8 @@ function MeetingDetailSheet({
   if (!meeting) return null;
 
   const nowDate = new Date();
-  const isPast = isMeetingPast(meeting, nowDate);
-  const isActive = isMeetingActive(meeting, nowDate);
+  const isPast     = isMeetingPast(meeting, nowDate);
+  const isActive   = isMeetingActive(meeting, nowDate);
   const isUpcoming = !isPast && !isActive;
   const isOrganizer = meeting.organizerId === currentUserId;
   const didAttend = meeting.attendance.includes(currentUserId);
@@ -856,7 +792,7 @@ function MeetingDetailSheet({
                 </View>
               )}
               {isUpcoming && (
-                <View style={[styles.detailStatusBadge, { backgroundColor: 'rgba(30,156,240,0.15)' }]}>
+                <View style={[styles.detailStatusBadge, { backgroundColor: 'rgba(9,178,238,0.15)' }]}>
                   <AppText style={[styles.detailStatusText, { color: COLORS.blue }]}>Upcoming</AppText>
                 </View>
               )}
@@ -991,15 +927,7 @@ function MeetingDetailSheet({
                     total={allRecordings.length}
                     meetingTitle={meeting.title}
                     existingMinutes={generatedMinutes ?? meeting.minutes}
-                    onMinutesGenerated={text => {
-                      setGeneratedMinutes(text);
-                      // Persist so the summary survives sheet close / app restart
-                      firestore()
-                        .collection('meetings')
-                        .doc(meeting.id)
-                        .update({ minutes: text })
-                        .catch(err => console.warn('[MeetingDetailSheet] Failed to save minutes:', err));
-                    }}
+                    onMinutesGenerated={text => setGeneratedMinutes(text)}
                   />
                 ))
               ) : (
@@ -1068,7 +996,7 @@ export default function CalendarScreen() {
   const { bevel, iconButton } = useGlass();
 
   const [tab, setTab] = useState<TabType>('Upcoming');
-
+  
   // Calendar specific state
   const [selectedDate, setSelectedDate] = useState(new Date());
   // The month displayed in the grid (can differ from selectedDate when navigating)
@@ -1148,58 +1076,46 @@ export default function CalendarScreen() {
   };
   const handleParticipantClose = () => setParticipantPickerOpen(false);
 
-  // ── Firestore ──────────────────────────────────────────────────────────────
+  // ── Load meetings from backend + refresh on socket events ─────────────────
   useEffect(() => {
     if (!user?.uid) return;
-    const unsub = firestore()
-      .collection('meetings')
-      .where('participants', 'array-contains', user.uid)
-      .orderBy('date', 'asc')
-      .onSnapshot(
-        (snap) => {
-          if (!snap) return;
+    let active = true;
 
-          // Cancel scheduled notifications for any meeting that just became inactive
-          snap.docChanges().forEach(change => {
-            if (change.type === 'modified') {
-              const d = change.doc.data();
-              if (d.isActive === false && Array.isArray(d.notificationIds)) {
-                d.notificationIds.forEach((id: string) => {
-                  Notifications.cancelScheduledNotificationAsync(id).catch(() => { });
-                });
-                // Clear the stored IDs so we don't try to cancel again
-                change.doc.ref.update({ notificationIds: [] }).catch(() => { });
-              }
-            }
-          });
+    const load = async () => {
+      const res = await endpoints.listMeetings();
+      if (!active || !res.ok) { if (active) setLoading(false); return; }
 
-          setMeetings(snap.docs.map(doc => {
-            const d = doc.data();
-            const start = d.date ? d.date.toDate() : new Date();
-            return {
-              id: doc.id,
-              title: d.title || 'Untitled',
-              date: start,
-              endDate: d.endDate ? d.endDate.toDate() : null,
-              duration: d.duration || '1h',
-              participants: d.participants || [],
-              organizerId: d.organizerId || '',
-              type: d.type || 'online',
-              reminders: d.reminders || [],
-              minutes: d.minutes ?? null,
-              hasRecordings: Array.isArray(d.recordings) ? d.recordings.length > 0 : false,
-              recordings: Array.isArray(d.recordings)
-                ? d.recordings.map((r: any) => ({ url: r.url ?? '', durationMs: r.durationMs ?? 0 }))
-                : [],
-              attendance: Array.isArray(d.joinedMembers) ? d.joinedMembers : [],
-              isActive: d.isActive !== false,
-            } as Meeting;
-          }));
-          setLoading(false);
-        },
-        (err) => { console.error('Firestore Error:', err); setLoading(false); }
-      );
-    return () => unsub();
+      setMeetings(res.data.meetings.map((m) => ({
+        id: m.id,
+        title: m.title,
+        date: new Date(m.createdAt),   // use createdAt as proxy until start/end are in the API
+        endDate: null,
+        duration: '1h',
+        participants: Array(m.participantCount).fill(''),
+        organizerId: m.organizerId,
+        type: 'online' as const,
+        reminders: [],
+        minutes: null,
+        hasRecordings: false,
+        recordings: [],
+        attendance: m.isActive ? [] : Array(m.participantCount).fill(''),
+        isActive: m.isActive,
+      })));
+      setLoading(false);
+    };
+
+    void socketClient.connect().then(load).catch(() => { if (active) setLoading(false); });
+
+    // Refresh when a meeting is created, updated, or ended
+    const unsubs = [
+      socketClient.subscribe('meeting:updated', () => void load()),
+      socketClient.subscribe('meeting:ended',   () => void load()),
+    ];
+
+    return () => {
+      active = false;
+      unsubs.forEach((u) => u());
+    };
   }, [user?.uid]);
 
   const nowDate = useMemo(() => new Date(now), [now]);
@@ -1212,7 +1128,7 @@ export default function CalendarScreen() {
     const q = query.toLowerCase().trim();
     return meetings.filter(m => {
       const active = isMeetingActive(m, nowDate);
-      const past = isMeetingPast(m, nowDate);
+      const past   = isMeetingPast(m, nowDate);
       const matchesTab = tab === 'Upcoming' ? (!past || active) : past;
       const matchesQuery = !q || m.title.toLowerCase().includes(q);
       return matchesTab && matchesQuery;
@@ -1265,7 +1181,7 @@ export default function CalendarScreen() {
 
   const renderMeetingRow = useCallback(({ item }: { item: Meeting }) => {
     const active = isMeetingActive(item, nowDate);
-    const past = isMeetingPast(item, nowDate);
+    const past   = isMeetingPast(item, nowDate);
     const remainingMs = active ? Math.max(0, getEndTime(item).getTime() - now) : 0;
     const remainingLabel = active ? fmtRemaining(remainingMs) : null;
 
@@ -1446,7 +1362,7 @@ export default function CalendarScreen() {
                 <View key={ri} style={styles.calWeekRow}>
                   {row.map((day, ci) => {
                     if (!day) return <View key={ci} style={styles.calDayCell} />;
-                    const isToday = isSameDay(day, today);
+                    const isToday   = isSameDay(day, today);
                     const isSelected = isSameDay(day, selectedDate);
                     const hasMeeting = meetings.some(m => isSameDay(m.date, day));
                     return (
@@ -1458,7 +1374,7 @@ export default function CalendarScreen() {
                           // keep calendarMonth in sync when tapping a different month's overflow day
                           const newMonth = new Date(day.getFullYear(), day.getMonth(), 1);
                           if (newMonth.getMonth() !== calendarMonth.getMonth() ||
-                            newMonth.getFullYear() !== calendarMonth.getFullYear()) {
+                              newMonth.getFullYear() !== calendarMonth.getFullYear()) {
                             setCalendarMonth(newMonth);
                           }
                         }}
@@ -1511,69 +1427,69 @@ export default function CalendarScreen() {
           </View>
 
           <ScrollView ref={scrollViewRef} style={styles.timelineScroll} showsVerticalScrollIndicator={false}>
-            <View style={{ height: 24 * HOUR_HEIGHT, paddingBottom: 100 }}>
-
-              {/* Background Hour Lines */}
-              {hoursArray.map((d, i) => (
-                <View key={i} style={[styles.timelineHourRow, { top: i * HOUR_HEIGHT }]}>
-                  <View style={styles.timelineHourTextWrap}>
-                    <AppText style={[styles.timelineHourText, { color: FG.secondary }]}>
-                      {i === 0 ? '12 AM' : i < 12 ? `${i} AM` : i === 12 ? '12 PM' : `${i - 12} PM`}
-                    </AppText>
-                  </View>
-                  <View style={[styles.timelineHourLine, { borderColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)' }]} />
-                </View>
-              ))}
-
-              {/* Current Time Indicator */}
-              {isSameDay(selectedDate, new Date()) && (
-                <View style={[styles.currentTimeContainer, { top: (new Date().getHours() + new Date().getMinutes() / 60) * HOUR_HEIGHT }]}>
-                  <View style={[styles.currentTimeBadge, { backgroundColor: textColor }]}>
-                    <AppText style={[styles.currentTimeText, { color: isDark ? '#000' : '#fff' }]}>
-                      {formatTimeSmall(new Date())}
-                    </AppText>
-                  </View>
-                  <View style={[styles.currentTimeLine, { backgroundColor: textColor }]} />
-                </View>
-              )}
-
-              {/* Event Blocks */}
-              {timelineData.map((event) => {
-                const colorBase = stringToColor(event.title);
-                const bg = hexToRgba(colorBase, isDark ? 0.2 : 0.15);
-                return (
-                  <TouchableOpacity
-                    key={event.id}
-                    style={[styles.timelineEventBlock, {
-                      top: event.top,
-                      height: event.height,
-                      backgroundColor: bg,
-                      borderLeftColor: colorBase,
-                    }]}
-                    onPress={() => setDetailMeeting(event)}
-                    activeOpacity={0.8}
-                  >
-                    <AppText style={[styles.timelineEventTitle, { color: textColor }]} numberOfLines={1}>
-                      {event.title}
-                    </AppText>
-                    {event.height > 40 && (
-                      <AppText style={[styles.timelineEventSub, { color: FG.secondary }]} numberOfLines={1}>
-                        {event.duration}
+             <View style={{ height: 24 * HOUR_HEIGHT, paddingBottom: 100 }}>
+               
+               {/* Background Hour Lines */}
+               {hoursArray.map((d, i) => (
+                 <View key={i} style={[styles.timelineHourRow, { top: i * HOUR_HEIGHT }]}>
+                    <View style={styles.timelineHourTextWrap}>
+                      <AppText style={[styles.timelineHourText, { color: FG.secondary }]}>
+                        {i === 0 ? '12 AM' : i < 12 ? `${i} AM` : i === 12 ? '12 PM' : `${i - 12} PM`}
                       </AppText>
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
+                    </View>
+                    <View style={[styles.timelineHourLine, { borderColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)' }]} />
+                 </View>
+               ))}
 
-              {/* Empty day hint */}
-              {timelineData.length === 0 && (
-                <View style={{ position: 'absolute', left: 65, right: 14, top: (8.5) * HOUR_HEIGHT, alignItems: 'center', gap: 8 }}>
-                  <AppIcon name="calendar-outline" size={36} color={COLORS.sub} />
-                  <AppText style={{ color: COLORS.sub, fontSize: 13 }}>No meetings on this day</AppText>
-                </View>
-              )}
+               {/* Current Time Indicator */}
+               {isSameDay(selectedDate, new Date()) && (
+                 <View style={[styles.currentTimeContainer, { top: (new Date().getHours() + new Date().getMinutes() / 60) * HOUR_HEIGHT }]}>
+                    <View style={[styles.currentTimeBadge, { backgroundColor: textColor }]}>
+                      <AppText style={[styles.currentTimeText, { color: isDark ? '#000' : '#fff' }]}>
+                        {formatTimeSmall(new Date())}
+                      </AppText>
+                    </View>
+                    <View style={[styles.currentTimeLine, { backgroundColor: textColor }]} />
+                 </View>
+               )}
 
-            </View>
+               {/* Event Blocks */}
+               {timelineData.map((event) => {
+                 const colorBase = stringToColor(event.title);
+                 const bg = hexToRgba(colorBase, isDark ? 0.2 : 0.15);
+                 return (
+                   <TouchableOpacity
+                     key={event.id}
+                     style={[styles.timelineEventBlock, {
+                       top: event.top,
+                       height: event.height,
+                       backgroundColor: bg,
+                       borderLeftColor: colorBase,
+                     }]}
+                     onPress={() => setDetailMeeting(event)}
+                     activeOpacity={0.8}
+                   >
+                     <AppText style={[styles.timelineEventTitle, { color: textColor }]} numberOfLines={1}>
+                        {event.title}
+                     </AppText>
+                     {event.height > 40 && (
+                       <AppText style={[styles.timelineEventSub, { color: FG.secondary }]} numberOfLines={1}>
+                          {event.duration}
+                       </AppText>
+                     )}
+                   </TouchableOpacity>
+                 );
+               })}
+
+               {/* Empty day hint */}
+               {timelineData.length === 0 && (
+                 <View style={{ position: 'absolute', left: 65, right: 14, top: (8.5) * HOUR_HEIGHT, alignItems: 'center', gap: 8 }}>
+                   <AppIcon name="calendar-outline" size={36} color={COLORS.sub} />
+                   <AppText style={{ color: COLORS.sub, fontSize: 13 }}>No meetings on this day</AppText>
+                 </View>
+               )}
+
+             </View>
           </ScrollView>
         </View>
       )}
@@ -1604,7 +1520,7 @@ export default function CalendarScreen() {
             data={filteredData.filter(m => {
               const d = m.date;
               return d.getFullYear() === calendarMonth.getFullYear() &&
-                d.getMonth() === calendarMonth.getMonth();
+                     d.getMonth() === calendarMonth.getMonth();
             })}
             keyExtractor={item => item.id}
             renderItem={renderMeetingRow}
@@ -1625,15 +1541,15 @@ export default function CalendarScreen() {
 
       {/* ── FAB ──────────────────────────────────────────────────────────── */}
       <TouchableOpacity
-        style={[styles.fab, bevel, { bottom: insets.bottom + 150 },
-        Platform.OS === 'web' && styles.fabWeb]}
+        style={[styles.fab, bevel, { bottom: 20 },
+          Platform.OS === 'web' && styles.fabWeb]}
         activeOpacity={0.85}
         onPress={openMeetingSheet}
       >
         <AppIcon name="add" size={28} color={COLORS.blue} fixedColor />
       </TouchableOpacity>
 
-      <BottomNav active="calendar" />
+
     </View>
   );
 }
@@ -1644,7 +1560,7 @@ const styles = StyleSheet.create({
   header: { paddingHorizontal: 14, paddingBottom: 10, gap: 8 },
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   appName: { fontSize: 22, fontWeight: '800', letterSpacing: -0.5 },
-  searchBubble: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(30,156,240,0.06)', borderWidth: 1, borderColor: 'rgba(30,156,240,0.18)', borderRadius: RADIUS.full, paddingHorizontal: 14, height: 42 },
+  searchBubble: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(9,178,238,0.06)', borderWidth: 1, borderColor: 'rgba(9,178,238,0.18)', borderRadius: RADIUS.full, paddingHorizontal: 14, height: 42 },
   searchInput: { flex: 1, fontSize: 14, padding: 0 },
   tabBar: { flexDirection: 'row', paddingHorizontal: 14, marginBottom: 10, gap: 6 },
   tabPillActive: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 22, paddingVertical: 9, borderRadius: RADIUS.full, ...SHADOW.button },
@@ -1680,7 +1596,7 @@ const styles = StyleSheet.create({
   calDayCircle: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
   calDayNumber: { fontSize: 13, fontWeight: '600' },
   calDot: { width: 5, height: 5, borderRadius: 3, marginTop: 1 },
-  calTodayBtn: { alignSelf: 'center', marginTop: 6, paddingHorizontal: 14, paddingVertical: 5, borderRadius: RADIUS.full, backgroundColor: 'rgba(30,156,240,0.12)' },
+  calTodayBtn: { alignSelf: 'center', marginTop: 6, paddingHorizontal: 14, paddingVertical: 5, borderRadius: RADIUS.full, backgroundColor: 'rgba(9,178,238,0.12)' },
   calTodayText: { fontSize: 12, fontWeight: '700' },
   calSelectedLabel: { fontSize: 12, fontWeight: '700', letterSpacing: 0.5, paddingHorizontal: 16, paddingBottom: 4 },
 
@@ -1710,12 +1626,12 @@ const styles = StyleSheet.create({
   meetingTitle: { fontSize: 15, fontWeight: '700', flexShrink: 1 },
   meetingMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   meetingMetaText: { fontSize: 12 },
-  organizerBadge: { backgroundColor: 'rgba(30,156,240,0.15)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: RADIUS.full },
+  organizerBadge: { backgroundColor: 'rgba(9,178,238,0.15)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: RADIUS.full },
   organizerBadgeText: { fontSize: 10, fontWeight: '700', color: COLORS.blue },
 
   liveBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(34,197,94,0.16)', paddingHorizontal: 7, paddingVertical: 2, borderRadius: RADIUS.full },
   liveBadgeText: { fontSize: 10, fontWeight: '800', color: '#16a34a', letterSpacing: 0.5 },
-  minutesBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: 'rgba(30,156,240,0.14)', paddingHorizontal: 7, paddingVertical: 2, borderRadius: RADIUS.full },
+  minutesBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: 'rgba(9,178,238,0.14)', paddingHorizontal: 7, paddingVertical: 2, borderRadius: RADIUS.full },
   minutesBadgeText: { fontSize: 10, fontWeight: '800', color: COLORS.blue, letterSpacing: 0.5 },
   activeHint: { fontSize: 11, color: '#16a34a', fontWeight: '600', marginTop: 2 },
   minutesHint: { fontSize: 11, color: COLORS.blue, fontWeight: '600', marginTop: 2 },
@@ -1734,7 +1650,7 @@ const styles = StyleSheet.create({
   fabWeb: { right: 16 },
   overlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.45)' },
   sheet: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '85%', borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden', ...SHADOW.glow },
-  handle: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(30,156,240,0.30)', marginTop: 10, marginBottom: 4 },
+  handle: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(9,178,238,0.30)', marginTop: 10, marginBottom: 4 },
 
   sheetSubHeader: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, gap: 10 },
   iconPad: { padding: 4 },
@@ -1749,7 +1665,7 @@ const styles = StyleSheet.create({
   autoReminderTitle: { fontSize: 13, fontWeight: '700' },
   autoReminderSub: { fontSize: 11, color: COLORS.sub, marginTop: 2 },
   phoneHint: { fontSize: 11, color: COLORS.sub, marginLeft: 6, marginTop: 6 },
-  participantChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(30,156,240,0.10)', borderRadius: RADIUS.full, paddingHorizontal: 8, paddingVertical: 3 },
+  participantChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(9,178,238,0.10)', borderRadius: RADIUS.full, paddingHorizontal: 8, paddingVertical: 3 },
   chipText: { fontSize: 12, fontWeight: '600', maxWidth: 70 },
 
   emptyWrap: { alignItems: 'center', gap: 12, flex: 1, justifyContent: 'center', paddingBottom: 80 },
@@ -1773,7 +1689,7 @@ const styles = StyleSheet.create({
 
   recCard: {
     borderRadius: RADIUS.lg, padding: 14, marginBottom: 10,
-    borderWidth: 1, borderColor: 'rgba(30,156,240,0.18)',
+    borderWidth: 1, borderColor: 'rgba(9,178,238,0.18)',
   },
   recPlayBtn: {
     width: 40, height: 40, borderRadius: 20,
@@ -1783,7 +1699,7 @@ const styles = StyleSheet.create({
   },
   recProgressTrack: {
     height: 3, borderRadius: 2,
-    backgroundColor: 'rgba(30,156,240,0.18)',
+    backgroundColor: 'rgba(9,178,238,0.18)',
     marginTop: 10, overflow: 'hidden',
   },
   recProgressFill: {
@@ -1795,8 +1711,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     gap: 6, paddingVertical: 9, paddingHorizontal: 12,
     borderRadius: RADIUS.md,
-    borderWidth: 1, borderColor: 'rgba(30,156,240,0.25)',
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    borderWidth: 1, borderColor: 'rgba(9,178,238,0.25)',
+    backgroundColor: 'rgba(9,178,238,0.08)',
   },
   recActionText: { fontSize: 12, fontWeight: '700' },
 });

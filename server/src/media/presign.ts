@@ -177,3 +177,15 @@ export async function deleteObject(objectKey: string): Promise<void> {
 export function assertSelfScoped(category: MediaCategory): boolean {
   return category === 'avatar' || category === 'status';
 }
+
+/**
+ * Read an object's bytes server-side through the internal endpoint (used by the
+ * meeting-minutes summarizer, which cannot use a LAN-signed presigned URL).
+ */
+export async function getObjectBuffer(objectKey: string): Promise<{ bytes: Buffer; contentType: string | null }> {
+  const env = getEnv();
+  const res = await s3().send(new GetObjectCommand({ Bucket: env.S3_BUCKET, Key: objectKey }));
+  if (!res.Body) throw new Error(`Object ${objectKey} has no body`);
+  const bytes = Buffer.from(await res.Body.transformToByteArray());
+  return { bytes, contentType: res.ContentType ?? null };
+}

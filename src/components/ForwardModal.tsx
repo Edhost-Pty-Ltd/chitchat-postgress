@@ -10,8 +10,7 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
 import { Avatar } from './index';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 import { COLORS, RADIUS, SHADOW } from '../types/theme';
@@ -48,55 +47,43 @@ export function ForwardModal({ visible, onClose, onForward, currentUserId }: For
     const loadChats = async () => {
       setLoading(true);
       try {
-        console.log('[ForwardModal] Loading chats for user:', currentUserId);
+        const res = await endpoints.listChats();
+        if (!res.ok) throw new Error(res.error.message);
 
-        const fsDb = db as ReturnType<typeof firestore>;
-        const snapshot = await fsDb
-          .collection('chats')
-          .where('members', 'array-contains', currentUserId)
-          .orderBy('lastMessage.timestamp', 'desc')
-          .limit(50)
-          .get();
-
-        const chatsList: Chat[] = [];
-
-        for (const docSnap of snapshot.docs) {
-          const data = docSnap.data();
-          
-          let displayName = 'Unknown';
-          let photoURL: string | null = null;
-          let isGroup = false;
-
-          if (data.type === 'group' || data.isGroup) {
-            displayName = data.groupName || 'Unnamed Group';
-            photoURL = data.groupPhoto || null;
-            isGroup = true;
-          } else {
-            const otherUserId = (data.members as string[]).find((id: string) => id !== currentUserId);
+        const chatsList: Chat[] = await Promise.all(
+          res.data.chats.map(async (c) => {
+            if (c.type === 'group') {
+              return {
+                chatId: c.chatId,
+                displayName: c.groupName ?? 'Unnamed Group',
+                photoURL: c.groupPhotoObjectKey ?? null,
+                isGroup: true,
+                lastMessageTimestamp: c.lastMessageAt ? new Date(c.lastMessageAt) : null,
+              };
+            }
+            // Direct chat — resolve the other member's name
+            const otherUserId = c.members.find((id) => id !== currentUserId);
+            let displayName = 'Unknown';
+            let photoURL: string | null = null;
             if (otherUserId) {
               try {
-                const userDoc = await fsDb.collection('users').doc(otherUserId).get();
-                if (userDoc.exists) {
-                  const userData = userDoc.data()!;
-                  displayName = userData.displayName || userData.phone || 'Unknown';
-                  photoURL = userData.photoURL || null;
+                const userRes = await endpoints.getUser(otherUserId);
+                if (userRes.ok) {
+                  displayName = userRes.data.displayName ?? userRes.data.phoneNumber ?? 'Unknown';
+                  photoURL = userRes.data.avatarObjectKey ?? null;
                 }
-              } catch (error) {
-                console.warn('[ForwardModal] Could not fetch user data:', error);
-              }
+              } catch {}
             }
-          }
+            return {
+              chatId: c.chatId,
+              displayName,
+              photoURL,
+              isGroup: false,
+              lastMessageTimestamp: c.lastMessageAt ? new Date(c.lastMessageAt) : null,
+            };
+          }),
+        );
 
-          chatsList.push({
-            chatId: docSnap.id,
-            displayName,
-            photoURL,
-            isGroup,
-            lastMessageTimestamp: data.lastMessage?.timestamp?.toDate() || null,
-          });
-        }
-
-        console.log('[ForwardModal] Loaded', chatsList.length, 'chats');
         setChats(chatsList);
       } catch (error) {
         console.error('[ForwardModal] Error loading chats:', error);
@@ -277,7 +264,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 4,
     borderRadius: 2,
-    backgroundColor: 'rgba(30,156,240,0.40)',
+    backgroundColor: 'rgba(9,178,238,0.40)',
     alignSelf: 'center',
     marginTop: 12,
     marginBottom: 8,
@@ -289,7 +276,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(30,156,240,0.15)',
+    borderBottomColor: 'rgba(9,178,238,0.15)',
   },
   title: {
     fontSize: 18,
@@ -301,9 +288,9 @@ const styles = StyleSheet.create({
   selectedBanner: {
     paddingHorizontal: 20,
     paddingVertical: 10,
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    backgroundColor: 'rgba(9,178,238,0.08)',
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(30,156,240,0.15)',
+    borderBottomColor: 'rgba(9,178,238,0.15)',
   },
   selectedText: {
     fontSize: 14,
@@ -342,7 +329,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   chatItemSelected: {
-    backgroundColor: 'rgba(30,156,240,0.12)',
+    backgroundColor: 'rgba(9,178,238,0.12)',
   },
   chatItemContent: {
     flex: 1,
@@ -360,7 +347,7 @@ const styles = StyleSheet.create({
     height: 24,
     borderRadius: 12,
     borderWidth: 2,
-    borderColor: 'rgba(30,156,240,0.35)',
+    borderColor: 'rgba(9,178,238,0.35)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -381,7 +368,7 @@ const styles = StyleSheet.create({
     ...SHADOW.button,
   },
   forwardBtnDisabled: {
-    backgroundColor: 'rgba(30,156,240,0.35)',
+    backgroundColor: 'rgba(9,178,238,0.35)',
     opacity: 0.6,
   },
   forwardBtnText: {

@@ -1,10 +1,10 @@
 ﻿// ─── Screen: Calls ───────────────────────────────────────────────────────────
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
 import {
   View, FlatList, TouchableOpacity, StyleSheet,
   Modal, Pressable, ScrollView, Alert, ActivityIndicator, TextInput,
 } from 'react-native';
-import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Avatar } from '../components';
@@ -16,7 +16,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../hooks/useAuth';
 import { useCallHistory } from '../hooks/useCallHistory';
 import { useOutgoingCall } from '../hooks/useOutgoingCall';
-import { useMissedCalls } from '../hooks/useMissedCalls';
 import { useContacts } from '../hooks/useContacts';
 import { usePhoneBook } from '../hooks/usePhoneBook';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
@@ -326,14 +325,6 @@ export default function CallsScreen() {
   const [calling, setCalling] = useState(false);
   const [selectedCall, setSelectedCall] = useState<CallHistoryItem | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
-
-  // Clear the missed-calls badge as soon as the user opens this screen.
-  const { markAllSeen } = useMissedCalls(user?.uid ?? null);
-  useFocusEffect(
-    useCallback(() => {
-      markAllSeen();
-    }, [markAllSeen]),
-  );
 
   // Resolved display name for the currently-selected call in the info sheet.
   const selectedCallName = selectedCall

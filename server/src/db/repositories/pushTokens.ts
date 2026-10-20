@@ -1,16 +1,23 @@
 import { query } from '../pool.js';
 
-/** Register (or refresh) an Expo push token for a user (Req 4.7). */
+/**
+ * Register (or refresh) an Expo push token for a user (Req 4.7). `deviceId`
+ * ties the token to a linked device so removing a companion also drops the
+ * tokens it registered.
+ */
 export async function addPushToken(
   userId: string,
   token: string,
   platform: string | null,
+  deviceId: string | null = null,
 ): Promise<void> {
   await query(
-    `INSERT INTO push_tokens (user_id, token, platform)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (user_id, token) DO UPDATE SET platform = EXCLUDED.platform`,
-    [userId, token, platform],
+    `INSERT INTO push_tokens (user_id, token, platform, device_id)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id, token) DO UPDATE
+       SET platform = EXCLUDED.platform,
+           device_id = COALESCE(EXCLUDED.device_id, push_tokens.device_id)`,
+    [userId, token, platform, deviceId],
   );
 }
 

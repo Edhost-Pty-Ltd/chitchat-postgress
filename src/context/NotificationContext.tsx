@@ -3,27 +3,10 @@
 import React, {
   createContext, useContext, useState, useCallback, useRef, useEffect,
 } from 'react';
-import { Platform, AppState } from 'react-native';
+import * as Notifications from 'expo-notifications';
+import { Platform } from 'react-native';
 import { useAuth } from '../hooks/useAuth';
 import { useNotificationSync } from '../hooks/useNotificationSync';
-
-// Load expo-notifications defensively. On a mismatched/not-ready native build
-// its top-level `new NativeEventEmitter()` can throw and crash app startup, so
-// we guard the require and fall back to no-op methods.
-let Notifications: any = null;
-try {
-  Notifications = require('expo-notifications');
-} catch (err) {
-  console.warn('[NotificationContext] expo-notifications unavailable:', err);
-  Notifications = {
-    setNotificationChannelAsync: async () => {},
-    getPermissionsAsync: async () => ({ status: 'denied' }),
-    requestPermissionsAsync: async () => ({ status: 'denied' }),
-    scheduleNotificationAsync: async () => {},
-    setBadgeCountAsync: async () => {},
-    AndroidImportance: { MAX: 5 },
-  };
-}
 
 // NOTE: setNotificationHandler is already configured in usePushNotifications.ts.
 // We do NOT call it here again — calling it twice causes a render crash.
@@ -140,27 +123,22 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       if (toastTimer.current) clearTimeout(toastTimer.current);
       toastTimer.current = setTimeout(() => setToast(null), 4000);
 
-      // Send a native local notification ONLY when the app is backgrounded.
-      // When the app is active (foregrounded), the Cloud Function has already
-      // sent an FCM/APNs push — firing a local one too causes a duplicate
-      // notification. The in-app toast shown above is sufficient while active.
-      if (AppState.currentState !== 'active') {
-        try {
-          await Notifications.scheduleNotificationAsync({
-            content: {
-              title: notif.title,
-              body: notif.body,
-              sound: true,
-              data: { 
-                contactId: notif.contactId,
-                type: notif.type,
-              },
+      // Send native device notification
+      try {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: notif.title,
+            body: notif.body,
+            sound: true,
+            data: { 
+              contactId: notif.contactId,
+              type: notif.type,
             },
-            trigger: null,
-          });
-        } catch (error) {
-          console.log(`[NotificationContext-${callId}] Failed to send native notification:`, error);
-        }
+          },
+          trigger: null,
+        });
+      } catch (error) {
+        console.log(`[NotificationContext-${callId}] Failed to send native notification:`, error);
       }
     },
     [],
@@ -195,7 +173,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
   // Update app badge count
   useEffect(() => {
-    Notifications.setBadgeCountAsync(unreadCount).catch((err:any) => {
+    Notifications.setBadgeCountAsync(unreadCount).catch((err) => {
       console.log('[Notifications] Failed to set badge count:', err);
     });
   }, [unreadCount]);

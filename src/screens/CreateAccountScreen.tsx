@@ -222,7 +222,6 @@ export default function CreateAccountScreen() {
   const [errorMsg, setErrorMsg] = useState('');
   const [nameError, setNameError] = useState('');
   const [resendTimer, setResendTimer] = useState(0);
-  const [focusedOtp, setFocusedOtp] = useState<number | null>(null);
 
   // Business-specific fields
   const [email, setEmail] = useState('');
@@ -414,22 +413,23 @@ export default function CreateAccountScreen() {
   const handleOtpChange = (text: string, i: number) => {
     const digits = text.replace(/\D/g, '');
 
-    // Autofill / paste of a full code into a single box
+    // Autofill / paste: iOS & Android deliver the full code into one field.
+    // Distribute every digit across the boxes and auto-submit when complete.
     if (digits.length > 1) {
-      const next = [...otp];
-      digits
-        .slice(0, 6 - i)
-        .split('')
-        .forEach((d, idx) => {
-          next[i + idx] = d;
-        });
+      const next = ['', '', '', '', '', ''];
+      for (let k = 0; k < 6; k++) next[k] = digits[k] || '';
       setOtp(next);
-      const lastIdx = Math.min(i + digits.length - 1, 5);
-      otpRefs.current[lastIdx]?.focus();
-      setErrorMsg('');
+      const lastFilled = Math.min(digits.length, 6) - 1;
+      otpRefs.current[Math.max(0, lastFilled)]?.focus();
+      if (digits.length >= 6) {
+        otpRefs.current[5]?.blur();
+        // Auto-verify once the full code is present
+        setTimeout(() => handleVerify(), 100);
+      }
       return;
     }
 
+    // Single-digit manual entry
     const digit = digits.slice(-1);
     const next = [...otp];
     next[i] = digit;
@@ -701,7 +701,6 @@ export default function CreateAccountScreen() {
                       setStep('details');
                       setErrorMsg('');
                       setOtp(['', '', '', '', '', '']);
-                      setFocusedOtp(null);
                     }}
                   >
                     <AppIcon
@@ -719,40 +718,33 @@ export default function CreateAccountScreen() {
                   </AppText>
 
                   <View style={styles.otpRow}>
-                    {otp.map((digit, i) => {
-                      const isFocused = focusedOtp === i;
-                      return (
-                        <TextInput
-                          key={i}
-                          ref={(el) => {
-                            otpRefs.current[i] = el;
-                          }}
-                          style={[
-                            styles.otpBox,
-                            digit ? styles.otpBoxFilled : null,
-                            isFocused ? styles.otpBoxFocused : null,
-                          ]}
-                          value={digit}
-                          onChangeText={(t) => handleOtpChange(t, i)}
-                          onKeyPress={({ nativeEvent }) =>
-                            handleOtpKey(nativeEvent.key, i)
-                          }
-                          onFocus={() => setFocusedOtp(i)}
-                          onBlur={() =>
-                            setFocusedOtp((cur) => (cur === i ? null : cur))
-                          }
-                          keyboardType="number-pad"
-                          maxLength={1}
-                          textAlign="center"
-                          selectTextOnFocus
-                          caretHidden
-                          placeholder="•"
-                          placeholderTextColor={COLORS.textFaint}
-                          textContentType="oneTimeCode"
-                          autoComplete="one-time-code"
-                        />
-                      );
-                    })}
+                    {otp.map((digit, i) => (
+                      <TextInput
+                        key={i}
+                        ref={(el) => {
+                          otpRefs.current[i] = el;
+                        }}
+                        style={[
+                          styles.otpBox,
+                          digit ? styles.otpBoxFilled : null,
+                        ]}
+                        value={digit}
+                        onChangeText={(t) => handleOtpChange(t, i)}
+                        onKeyPress={({ nativeEvent }) =>
+                          handleOtpKey(nativeEvent.key, i)
+                        }
+                        keyboardType="number-pad"
+                        // The first box accepts the full autofilled code; the
+                        // handler then distributes the digits across all boxes.
+                        maxLength={i === 0 ? 6 : 1}
+                        textContentType="oneTimeCode"
+                        autoComplete={i === 0 ? 'sms-otp' : 'off'}
+                        importantForAutofill={i === 0 ? 'yes' : 'no'}
+                        textAlign="center"
+                        selectTextOnFocus
+                        autoFocus={i === 0}
+                      />
+                    ))}
                   </View>
 
                   {errorMsg ? (
@@ -1084,44 +1076,39 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1.5,
     borderColor: COLORS.blue,
-    backgroundColor: 'rgba(30,156,240,0.08)',
+    backgroundColor: 'rgba(9,178,238,0.08)',
   },
   secondaryBtnText: { color: COLORS.blue, fontSize: 15, fontWeight: '700' },
   phoneHighlight: { fontWeight: '700', color: COLORS.text },
 
-  // ─── OTP row ────────────────────────────────────────────────────────────
   otpRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 20,
-    gap: 8,
+    marginBottom: 24,
+    marginTop: 8,
+    gap: 8, // Even spacing between boxes (flex:1 handles widths)
   },
   otpBox: {
-    flex: 1,
+    flex: 1, // Makes boxes responsive to screen width
+    maxWidth: 52, // Prevents boxes from getting too wide on tablets/large screens
     height: 56,
-    maxWidth: 54,
     borderRadius: 14,
     fontSize: 22,
     fontWeight: '700',
     color: COLORS.text,
     textAlign: 'center',
-    textAlignVertical: 'center',
-    includeFontPadding: false,
+    // No lineHeight: on a single-line TextInput, a lineHeight equal to the box
+    // height pushes the glyph below the box on iOS. Let the text center itself.
     paddingVertical: 0,
     paddingHorizontal: 0,
-    backgroundColor: 'rgba(127,127,127,0.10)',
+    backgroundColor: '#e6f1fa',
     borderWidth: 1.5,
-    borderColor: COLORS.border,
+    borderColor: 'transparent',
   },
   otpBoxFilled: {
-    backgroundColor: 'rgba(30,156,240,0.16)',
-    borderColor: 'rgba(30,156,240,0.45)',
-  },
-  otpBoxFocused: {
-    backgroundColor: 'rgba(30,156,240,0.10)',
-    borderColor: COLORS.blue,
-    ...SHADOW.glow,
+    backgroundColor: '#d0e8f9', 
+    borderColor: COLORS.blue,  
   },
 
   resendRow: { flexDirection: 'row', justifyContent: 'center', marginTop: 16 },
@@ -1141,9 +1128,9 @@ const styles = StyleSheet.create({
     width: 110,
     height: 110,
     borderRadius: 55,
-    backgroundColor: 'rgba(30,156,240,0.15)',
-    borderWidth: 2,
-    borderColor: 'rgba(30,156,240,0.35)',
+    backgroundColor: 'rgba(9,178,238,0.12)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.45)',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 24,
@@ -1184,7 +1171,7 @@ const picker = StyleSheet.create({
     paddingVertical: 13,
     gap: 12,
   },
-  itemSelected: { backgroundColor: 'rgba(30,156,240,0.08)' },
+  itemSelected: { backgroundColor: 'rgba(9,178,238,0.08)' },
   flag: { fontSize: 24, width: 32, textAlign: 'center' },
   countryName: { flex: 1, fontSize: 15, color: COLORS.text },
   dialCode: { fontSize: 14, fontWeight: '600', color: COLORS.sub },

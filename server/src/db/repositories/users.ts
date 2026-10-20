@@ -31,9 +31,27 @@ export interface UserRow {
   account_type: string;
   last_seen: Date | null;
   created_at: Date;
+  industry?: string | null;
+  address?: Record<string, string> | null;
+  work_schedule?: Record<string, { open: string; close: string }> | null;
+  timezone?: string | null;
+  auto_responder_enabled?: boolean;
+  auto_responder_message?: string | null;
+  catalog_items?: unknown[] | null;
+  catalog_collections?: unknown[] | null;
 }
 
-export interface UserProfile {
+/** Business-profile fields shown to other users (catalog, hours, address...). */
+export interface BusinessProfile {
+  industry: string | null;
+  address: Record<string, string> | null;
+  workSchedule: Record<string, { open: string; close: string }> | null;
+  timezone: string | null;
+  catalogItems: unknown[];
+  catalogCollections: unknown[];
+}
+
+export interface UserProfile extends BusinessProfile {
   id: string;
   phoneNumber: string | null;
   displayName: string | null;
@@ -44,6 +62,19 @@ export interface UserProfile {
   catalog: string | null;
   operationalHours: string | null;
   accountType: string;
+  autoResponderEnabled: boolean;
+  autoResponderMessage: string | null;
+}
+
+export function rowToBusiness(row: UserRow): BusinessProfile {
+  return {
+    industry: row.industry ?? null,
+    address: row.address ?? null,
+    workSchedule: row.work_schedule ?? null,
+    timezone: row.timezone ?? null,
+    catalogItems: Array.isArray(row.catalog_items) ? row.catalog_items : [],
+    catalogCollections: Array.isArray(row.catalog_collections) ? row.catalog_collections : [],
+  };
 }
 
 export function rowToProfile(row: UserRow): UserProfile {
@@ -58,6 +89,9 @@ export function rowToProfile(row: UserRow): UserProfile {
     catalog: row.catalog,
     operationalHours: row.operational_hours,
     accountType: row.account_type,
+    autoResponderEnabled: !!row.auto_responder_enabled,
+    autoResponderMessage: row.auto_responder_message ?? null,
+    ...rowToBusiness(row),
   };
 }
 
@@ -74,19 +108,37 @@ export interface ProfilePatch {
   website?: string | null;
   catalog?: string | null;
   operationalHours?: string | null;
+  industry?: string | null;
+  address?: Record<string, string> | null;
+  workSchedule?: Record<string, { open: string; close: string }> | null;
+  timezone?: string | null;
+  autoResponderEnabled?: boolean;
+  autoResponderMessage?: string | null;
+  catalogItems?: unknown[];
+  catalogCollections?: unknown[];
 }
+
+const json = (v: unknown) => (v === undefined || v === null ? null : JSON.stringify(v));
 
 /** Update profile fields, leaving unspecified fields untouched (Req 4.3). */
 export async function updateProfile(userId: string, patch: ProfilePatch): Promise<UserRow> {
   const res = await query<UserRow>(
     `UPDATE users SET
-       display_name      = COALESCE($2, display_name),
-       about             = COALESCE($3, about),
-       avatar_object_key = COALESCE($4, avatar_object_key),
-       email             = COALESCE($5, email),
-       website           = COALESCE($6, website),
-       catalog           = COALESCE($7, catalog),
-       operational_hours = COALESCE($8, operational_hours)
+       display_name           = COALESCE($2, display_name),
+       about                  = COALESCE($3, about),
+       avatar_object_key      = COALESCE($4, avatar_object_key),
+       email                  = COALESCE($5, email),
+       website                = COALESCE($6, website),
+       catalog                = COALESCE($7, catalog),
+       operational_hours      = COALESCE($8, operational_hours),
+       industry               = COALESCE($9, industry),
+       address                = COALESCE($10::jsonb, address),
+       work_schedule          = COALESCE($11::jsonb, work_schedule),
+       timezone               = COALESCE($12, timezone),
+       auto_responder_enabled = COALESCE($13, auto_responder_enabled),
+       auto_responder_message = COALESCE($14, auto_responder_message),
+       catalog_items          = COALESCE($15::jsonb, catalog_items),
+       catalog_collections    = COALESCE($16::jsonb, catalog_collections)
      WHERE id = $1
      RETURNING *`,
     [
@@ -98,6 +150,14 @@ export async function updateProfile(userId: string, patch: ProfilePatch): Promis
       patch.website ?? null,
       patch.catalog ?? null,
       patch.operationalHours ?? null,
+      patch.industry ?? null,
+      json(patch.address),
+      json(patch.workSchedule),
+      patch.timezone ?? null,
+      patch.autoResponderEnabled ?? null,
+      patch.autoResponderMessage ?? null,
+      json(patch.catalogItems),
+      json(patch.catalogCollections),
     ],
   );
   return res.rows[0];

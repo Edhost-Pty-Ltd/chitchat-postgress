@@ -34,6 +34,10 @@ export async function resolvePushRecipients(job: PushMessageJob): Promise<string
         AND NOT EXISTS (
           SELECT 1 FROM blocked_users b
            WHERE b.blocker_id = cm.user_id AND b.blocked_id = $3
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM chat_mutes mu
+           WHERE mu.chat_id = cm.chat_id AND mu.user_id = cm.user_id
         )`,
     [job.chatId, job.messageId, job.senderId],
   );

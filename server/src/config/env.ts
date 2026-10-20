@@ -46,6 +46,11 @@ const schema = z.object({
     ),
 
   EXPO_PUSH_URL: z.string().default('https://exp.host/--/api/v2/push/send'),
+
+  // AI meeting minutes (old summarizeMeetingRecording Cloud Function). Optional:
+  // without a key the summarize endpoints answer 503 and everything else works.
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_MODEL: z.string().min(1).default('gemini-3.8-flash'),
 });
 
 export type Env = z.infer<typeof schema>;

@@ -3,14 +3,15 @@ import React from 'react';
 import { View, TouchableOpacity, StyleSheet, ScrollView, Linking } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { Ionicons } from '@expo/vector-icons';
-import { BottomNav, UserAvatar } from '../components';
-import { COLORS, RADIUS } from '../types/theme';
+import { LinearGradient } from 'expo-linear-gradient';
+import { Ionicons } from '@expo/vector-icons'; // kept for IoniconName type
+import { Avatar, UserAvatar } from '../components';
+import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { useAuth } from '../context/AuthContext';
-import { AppBg, AppText, AppIcon, useForeground, useTypography } from '../context/ThemeContext';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { AppBg, AppText, AppIcon, useForeground, useTypography, useTheme } from '../context/ThemeContext';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'Settings'>;
 
@@ -27,14 +28,14 @@ const SETTINGS_SECTIONS: {
   },
   {
     items: [
-      { id: 'devices',    icon: 'phone-portrait-outline', label: 'Linked Devices' },
-      { id: 'appearance', icon: 'color-palette-outline',  label: 'Appearance'            },
+      { id: 'devices',    icon: 'phone-portrait-outline', label: 'Linked Devices'  },
+      { id: 'appearance', icon: 'color-palette-outline',  label: 'Appearance'      },
     ],
   },
   {
     items: [
-      { id: 'help',          icon: 'help-circle-outline',      label: 'Help & Support' },
-      { id: 'privacypolicy', icon: 'shield-checkmark-outline', label: 'Privacy Policy' },
+      { id: 'help',           icon: 'help-circle-outline',   label: 'Help & Support'  },
+      { id: 'privacypolicy',  icon: 'shield-checkmark-outline', label: 'Privacy Policy' },
     ],
   },
   {
@@ -44,9 +45,9 @@ const SETTINGS_SECTIONS: {
 
 export default function SettingsScreen() {
   const navigation = useNavigation<NavProp>();
-  const { signOut, displayName, isCompanion } = useAuth();
-  const { FG }  = useForeground();
-  const { fontFamily, textColor } = useTypography();
+  const { signOut, phone, displayName } = useAuth();
+  const { FG } = useForeground();
+  const { fontFamily, textColor, iconColor } = useTypography();
   const insets = useSafeAreaInsets();
 
   const handleItem = (id: string) => {
@@ -70,7 +71,7 @@ export default function SettingsScreen() {
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
 
-        {/* Profile card */}
+        {/* Profile — clean card — tap to open profile */}
         <TouchableOpacity
           style={styles.profileCard}
           activeOpacity={0.8}
@@ -78,76 +79,66 @@ export default function SettingsScreen() {
         >
           <UserAvatar size={52} />
           <View style={styles.profileText}>
-            <AppText style={[styles.profileName, { color: textColor, fontFamily }]}>
-              {displayName || 'John Doe'}
-            </AppText>
-            <AppText style={[styles.profileSub, { color: COLORS.sub, fontFamily }]}>
-              View business profile
-            </AppText>
+            <AppText style={[styles.profileName, { color: textColor, fontFamily }]}>{displayName || 'John Doe'}</AppText>
+            <AppText style={[styles.profileSub, { color: COLORS.sub, fontFamily }]}>View business profile</AppText>
           </View>
           <AppIcon name="chevron-forward" size={18} color={COLORS.sub} />
         </TouchableOpacity>
 
-        {/* Settings sections */}
-        {SETTINGS_SECTIONS.map((section, si) => {
-          // Companion devices cannot open the Account tab. Filter the entry
-          // out entirely rather than showing a disabled row.
-          const items = isCompanion
-            ? section.items.filter((i) => i.id !== 'account')
-            : section.items;
-
-          if (items.length === 0) return null;
-
-          return (
-            <View key={si} style={styles.section}>
-              {section.label && (
-                <AppText style={[styles.sectionLabel, { color: FG.secondary }]}>{section.label}</AppText>
-              )}
-              {items.map((item) => (
-                <TouchableOpacity
-                  key={item.id}
-                  style={styles.settingsCard}
-                  activeOpacity={0.75}
-                  onPress={() => handleItem(item.id)}
+        {/* Each section: label + clean flat cards per row */}
+        {SETTINGS_SECTIONS.map((section, si) => (
+          <View key={si} style={styles.section}>
+            {section.label && <AppText style={[styles.sectionLabel, { color: FG.secondary }]}>{section.label}</AppText>}
+            {section.items.map((item) => (
+              <TouchableOpacity
+                key={item.id}
+                style={styles.settingsCard}
+                activeOpacity={0.75}
+                onPress={() => handleItem(item.id)}
+              >
+                <View style={[styles.iconCircle, item.danger && styles.iconCircleDanger]}>
+                  <AppIcon
+                    name={item.icon}
+                    size={18}
+                    color={item.danger ? COLORS.missed : COLORS.blue}
+                    fixedColor
+                  />
+                </View>
+                <AppText style={[styles.itemLabel, { color: textColor, fontFamily }, item.danger && styles.itemLabelDanger]}
+                  fixedColor={item.danger}
                 >
-                  <View style={[styles.iconCircle, item.danger && styles.iconCircleDanger]}>
-                    <AppIcon
-                      name={item.icon}
-                      size={18}
-                      color={item.danger ? COLORS.missed : COLORS.blue}
-                      fixedColor
-                    />
-                  </View>
-                  <AppText
-                    style={[styles.itemLabel, { color: textColor, fontFamily }, item.danger && styles.itemLabelDanger]}
-                    fixedColor={item.danger}
-                  >
-                    {item.label}
-                  </AppText>
-                  {!item.danger && <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />}
-                </TouchableOpacity>
-              ))}
-            </View>
-          );
-        })}
+                  {item.label}
+                </AppText>
+                {!item.danger && <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />}
+              </TouchableOpacity>
+            ))}
+          </View>
+        ))}
       </ScrollView>
 
-      <BottomNav active="settings" />
+
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root:   { flex: 1, backgroundColor: COLORS.sky1 },
-  header: { paddingHorizontal: 20, paddingBottom: 14 },
+  root: { flex: 1, backgroundColor: COLORS.sky1 },
+
+  header: { paddingHorizontal: 20, paddingTop: 0, paddingBottom: 14 },
   title:  { fontSize: 26, fontWeight: '800', color: COLORS.text },
+
   scroll: { paddingHorizontal: 16, paddingBottom: 20, gap: 8 },
 
+  // Profile card — clean, no glass
   profileCard: {
     flexDirection: 'row', alignItems: 'center', gap: 14,
-    borderRadius: 16, paddingHorizontal: 14, paddingVertical: 14, marginBottom: 4,
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    marginBottom: 12,
     backgroundColor: 'rgba(255,255,255,0.6)',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.7)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.7)',
   },
   profileText: { flex: 1 },
   profileName: { fontSize: 16, fontWeight: '700', color: COLORS.text },
@@ -156,14 +147,24 @@ const styles = StyleSheet.create({
   section:      { gap: 8, marginBottom: 6 },
   sectionLabel: { fontSize: 10, fontWeight: '700', color: COLORS.sub, letterSpacing: 1.2, paddingHorizontal: 4, paddingBottom: 2 },
 
+  // Each settings row — clean flat card
   settingsCard: {
     flexDirection: 'row', alignItems: 'center', gap: 14,
-    borderRadius: 14, paddingHorizontal: 14, paddingVertical: 13,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
     backgroundColor: 'rgba(255,255,255,0.55)',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.7)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.7)',
   },
-  iconCircle:       { width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(30,156,240,0.10)', alignItems: 'center', justifyContent: 'center' },
-  iconCircleDanger: { backgroundColor: 'rgba(235,72,72,0.10)' },
-  itemLabel:        { flex: 1, fontSize: 15, fontWeight: '500', color: COLORS.text },
-  itemLabelDanger:  { color: COLORS.missed, fontWeight: '600' },
+  iconCircle: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: 'rgba(9,178,238,0.10)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  iconCircleDanger: {
+    backgroundColor: 'rgba(235,72,72,0.10)',
+  },
+  itemLabel:       { flex: 1, fontSize: 15, fontWeight: '500', color: COLORS.text },
+  itemLabelDanger: { color: COLORS.missed, fontWeight: '600' },
 });

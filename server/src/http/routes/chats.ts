@@ -11,6 +11,7 @@ import {
   editMessageSchema,
   forwardSchema,
   listMessagesQuerySchema,
+  votePollSchema,
 } from '../../domain/schemas/chat.js';
 import {
   listChats,
@@ -30,64 +31,65 @@ import {
   editMessage,
   messageChatId,
   getMessageSender,
-  type StoredMessage,
+  getMessageMeta,
+  votePoll,
 } from '../../db/repositories/messages.js';
 import { getUserById } from '../../db/repositories/users.js';
-import { blockedEitherWay } from '../../db/repositories/blocks.js';
+import {
+  leaveChat,
+  listPastMembers,
+  wasMember,
+  clearChatForUser,
+} from '../../db/repositories/chats.js';
 import { emitToUser, emitToChat } from '../../realtime/emitter.js';
-import { enqueueMessagePush } from '../../jobs/queues.js';
-import { logger } from '../../config/logger.js';
+import { fanOutMessage, notificationName } from '../../domain/messaging.js';
 
 const SEND_LIMIT = 60; // messages per window
 const SEND_WINDOW_SEC = 60;
 
-function previewBody(m: StoredMessage): string {
-  if (m.text) return m.text;
-  switch (m.type) {
-    case 'image':
-      return '📷 Photo';
-    case 'video':
-      return '🎥 Video';
-    case 'voice':
-      return '🎤 Voice message';
-    case 'file':
-      return `📎 ${m.fileName ?? 'File'}`;
-    case 'location':
-      return '📍 Location';
-    case 'catalog':
-      return '🛍️ Product';
-    default:
-      return 'New message';
-  }
-}
-
-/** Deliver a stored message to recipients and enqueue a push (Req 5.4, 6). */
-async function fanOutMessage(message: StoredMessage, senderDisplayName: string): Promise<void> {
-  const members = await getMembers(message.chatId);
-  const others = members.filter((id) => id !== message.senderId);
-  // Recipients who blocked the sender (either way) must not receive the event.
-  const blocked = await blockedEitherWay(message.senderId, others);
-  const recipients = others.filter((id) => !blocked.has(id));
-
-  for (const uid of recipients) {
-    emitToUser(uid, 'message:new', { message });
-  }
-
-  try {
-    await enqueueMessagePush({
-      chatId: message.chatId,
-      messageId: message.id,
-      senderId: message.senderId,
-      title: senderDisplayName,
-      body: previewBody(message),
-    });
-  } catch (err) {
-    // Push is best-effort; never fail the send because the queue is down.
-    logger.warn({ err, messageId: message.id }, 'failed to enqueue push');
-  }
-}
-
 export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
+  // POST /chats/:id/clear — clear the chat for the caller only; the other
+  // members keep their messages (old per-user `clearedAt` on the chat doc).
+  app.post<{ Params: { id: string } }>(
+    '/chats/:id/clear',
+    { preHandler: requireAuth },
+    async (request) => {
+      const userId = request.identity!.userId;
+      const chatId = request.params.id;
+      if (!(await isMember(chatId, userId))) throw Errors.forbidden('Not a member of this chat');
+      const clearedAt = await clearChatForUser(chatId, userId);
+      emitToUser(userId, 'chat:cleared', { chatId, clearedAt });
+      return { chatId, clearedAt };
+    },
+  );
+
+  // POST /chats/:id/leave — leave a group (any member; no admin rights needed).
+  app.post<{ Params: { id: string } }>(
+    '/chats/:id/leave',
+    { preHandler: requireAuth },
+    async (request) => {
+      const userId = request.identity!.userId;
+      const chatId = request.params.id;
+      if (!(await isMember(chatId, userId))) throw Errors.forbidden('Not a member of this chat');
+      const before = await getMembers(chatId);
+      await leaveChat(chatId, userId);
+      for (const uid of before) emitToUser(uid, 'chat:updated', { chatId });
+      emitToChat(chatId, 'chat:updated', { chatId });
+      return { ok: true };
+    },
+  );
+
+  // GET /chats/:id/past-members — people who left or were removed from a group.
+  app.get<{ Params: { id: string } }>(
+    '/chats/:id/past-members',
+    { preHandler: requireAuth },
+    async (request) => {
+      const userId = request.identity!.userId;
+      const chatId = request.params.id;
+      if (!(await wasMember(chatId, userId))) throw Errors.forbidden('Not a member of this chat');
+      return { pastMembers: await listPastMembers(chatId) };
+    },
+  );
   // GET /chats — chat list + unread totals (Req 5.11).
   app.get('/chats', { preHandler: requireAuth }, async (request) => {
     const userId = request.identity!.userId;
@@ -177,7 +179,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
 
       if (created) {
         const sender = await getUserById(userId);
-        await fanOutMessage(message, sender?.display_name ?? sender?.phone_number ?? 'New message');
+        await fanOutMessage(message, notificationName(sender));
       }
       return reply.code(created ? 201 : 200).send({ message });
     },
@@ -227,6 +229,32 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  // POST /chats/:id/messages/:mid/vote — cast/toggle a poll vote.
+  app.post<{ Params: { id: string; mid: string } }>(
+    '/chats/:id/messages/:mid/vote',
+    { preHandler: requireAuth },
+    async (request) => {
+      const userId = request.identity!.userId;
+      const chatId = request.params.id;
+      if (!(await isMember(chatId, userId))) {
+        throw Errors.forbidden('Not a member of this chat');
+      }
+      const { optionId } = parse(votePollSchema, request.body);
+      const meta = await getMessageMeta(request.params.mid);
+      if (!meta || meta.chatId !== chatId || meta.type !== 'poll' || !meta.poll) {
+        throw Errors.notFound('Poll not found in this chat');
+      }
+      if (!meta.poll.options.some((o) => o.id === optionId)) {
+        throw Errors.badRequest('Unknown poll option');
+      }
+      const updated = await votePoll(request.params.mid, userId, optionId);
+      if (!updated) throw Errors.notFound('Poll not found');
+      // Broadcast the refreshed poll (with projected votes) to the whole chat.
+      emitToChat(chatId, 'poll:updated', { chatId, message: updated });
+      return { message: updated };
+    },
+  );
+
   // POST /messages/forward — forward one message to N chats (Req 5.15).
   app.post('/messages/forward', { preHandler: requireAuth }, async (request) => {
     const userId = request.identity!.userId;
@@ -242,7 +270,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     if (!source) throw Errors.notFound('Message not found');
 
     const sender = await getUserById(userId);
-    const senderName = sender?.display_name ?? sender?.phone_number ?? 'New message';
+    const senderName = notificationName(sender);
     const createdIds: string[] = [];
     for (const targetId of body.targetChatIds) {
       if (!(await isMember(targetId, userId))) continue;
@@ -257,6 +285,9 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         durationMs: source.durationMs,
         location: source.location,
         catalogItem: source.catalogItem,
+        poll: source.poll,
+        order: source.order,
+        contact: source.contact,
       });
       createdIds.push(message.id);
       await fanOutMessage(message, senderName);

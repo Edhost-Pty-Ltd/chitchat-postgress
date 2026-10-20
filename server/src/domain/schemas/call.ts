@@ -27,12 +27,45 @@ export const createMeetingSchema = z
   .object({
     title: z.string().min(1).max(200).optional(),
     participants: z.array(z.string().min(1).max(128)).max(100).optional(),
+    // Scheduled start/end (ISO-8601). Defaults: now → now + 1h.
+    startsAt: z.string().datetime({ offset: true }).optional(),
+    endsAt: z.string().datetime({ offset: true }).optional(),
+    type: z.enum(['online', 'in-person']).optional(),
+    reminders: z.array(z.number().int().min(0).max(10080)).max(10).optional(),
+    // Organizer display name used in the invitation message.
+    organizerName: z.string().max(200).nullable().optional(),
   })
   .strict();
 
 export const sendMeetingMessageSchema = z
   .object({
-    text: z.string().min(1).max(8192).optional(),
+    // Minutes and recaps can be long, so allow more than a chat message.
+    text: z.string().min(1).max(100_000).optional(),
     mediaObjectKey: z.string().max(512).nullable().optional(),
+    // System posts (minutes / recap) render with a label instead of a sender.
+    isSystem: z.boolean().optional(),
+    senderName: z.string().max(200).nullable().optional(),
+  })
+  .strict();
+
+export const addMeetingParticipantsSchema = z
+  .object({
+    userIds: z.array(z.string().min(1).max(128)).min(1).max(100),
+    organizerName: z.string().max(200).nullable().optional(),
+  })
+  .strict();
+
+export const meetingMinutesSchema = z
+  .object({ minutes: z.string().min(1).max(100_000) })
+  .strict();
+
+export const meetingRecordingStateSchema = z.object({ isRecording: z.boolean() }).strict();
+
+export const addMeetingRecordingSchema = z
+  .object({
+    objectKey: z.string().min(1).max(512),
+    durationMs: z.number().int().nonnegative().max(24 * 60 * 60 * 1000),
+    // Run AI minutes generation in the background right away (default true).
+    autoSummarize: z.boolean().optional(),
   })
   .strict();

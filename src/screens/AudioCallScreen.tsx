@@ -11,14 +11,12 @@ import {
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useCallContext } from '../context/CallContext';
+import { useWebRTC } from '../hooks/useWebRTC';
 import { useAuth } from '../hooks/useAuth';
 import { useFloatingCall } from '../context/FloatingCallContext';
-import { usePhoneBook } from '../hooks/usePhoneBook';
-import { normalizePhone } from '../utils/phoneUtils';
+import { useRingtone } from '../hooks/useRingtone';
+import { endpoints } from '../api/endpoints';
 import { SignalingService } from '../services/signalingService';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
 
 import { AppText, AppIcon, AppBg, useGlass } from '../context/ThemeContext';
@@ -39,7 +37,6 @@ export default function AudioCallScreen() {
   const { user } = useAuth();
   const { minimizeCall, updateDuration } = useFloatingCall();
   const { bevel } = useGlass();
-  const { resolveName } = usePhoneBook();
 
   const [muted,        setMuted]        = useState(false);
   const [speakerOn,    setSpeakerOn]    = useState(false);
@@ -48,82 +45,47 @@ export default function AudioCallScreen() {
   const [callStatus,   setCallStatus]   = useState<string>('connecting');
   const [showQuality,  setShowQuality]  = useState(false);
 
-  // ── Live info about the other party (authoritative name + photo + presence) ──
-  // otherParty from route params can be stale or missing a photo, so we also
-  // subscribe to users/{otherParty.userId} for the real displayName, photoURL
-  // and online flag. The online flag drives the "Ringing" vs "Calling" label.
-  const [liveName,   setLiveName]   = useState<string | null>(null);
-  const [livePhoto,  setLivePhoto]  = useState<string | null>(null);
-  const [livePhone,  setLivePhone]  = useState<string | null>(null);
-  const [peerOnline, setPeerOnline] = useState<boolean | null>(null);
-  // Firestore call status ('ringing' | 'accepted' | 'connected' | ...), as
-  // opposed to the local WebRTC connectionState.
-  const [remoteCallStatus, setRemoteCallStatus] = useState<string>(isOutgoing ? 'ringing' : 'accepted');
-  // Shared answer timestamp (ms since epoch) written to the call doc when the
-  // callee answers. BOTH sides derive the duration from this single value, so
-  // the caller and receiver always display the exact same elapsed time — no
-  // matter when each device's WebRTC media actually connects.
-  const [startTimeMs, setStartTimeMs] = useState<number | null>(null);
-
-  // Use the shared CallContext WebRTC instance — the same one that
-  // useOutgoingCall / useIncomingCallAnswer used to initiate/answer the call.
+  // WebRTC hook for managing peer connection and streams
   const {
     connectionState,
     networkQuality,
+    initializePeerConnection,
+    createOffer,
+    createAnswer,
+    setRemoteAnswer,
+    addIceCandidate,
     toggleMute: toggleMuteWebRTC,
     startNetworkMonitoring,
     cleanup: cleanupWebRTC,
-  } = useCallContext();
+  } = useWebRTC({
+    onConnectionStateChange: (state) => {
+      console.log('[AudioCall] Connection state:', state);
+      if (state === 'connected') {
+        setCallStatus('connected');
+        startNetworkMonitoring();
+      } else if (state === 'disconnected' || state === 'failed') {
+        setCallStatus('disconnected');
+      }
+    },
+    onNetworkQualityChange: (quality) => {
+      console.log('[AudioCall] Network quality:', quality);
+      if (quality === 'poor' || quality === 'fair') {
+        setShowQuality(true);
+        setTimeout(() => setShowQuality(false), 3000);
+      }
+    },
+  });
 
-  // Observe connection state for UI
-  const startNetworkMonitoringRef = useRef(startNetworkMonitoring);
-  useEffect(() => { startNetworkMonitoringRef.current = startNetworkMonitoring; }, [startNetworkMonitoring]);
-
-  useEffect(() => {
-    if (connectionState === 'connected') {
-      setCallStatus('connected');
-      startNetworkMonitoringRef.current();
-    } else if (connectionState === 'disconnected' || connectionState === 'failed') {
-      setCallStatus('disconnected');
-    }
-  }, [connectionState]);
-
-  useEffect(() => {
-    if (networkQuality === 'poor' || networkQuality === 'fair') {
-      setShowQuality(true);
-      const t = setTimeout(() => setShowQuality(false), 3000);
-      return () => clearTimeout(t);
-    }
-  }, [networkQuality]);
-
-  // Build contact from otherParty.
-  // Name rule: if the other party's phone is in THIS device's phone book, show
-  // the saved contact name; otherwise fall back to their live/display name.
-  const rawName = (liveName ?? otherParty.displayName ?? '').trim();
-  const phoneToResolve = livePhone
-    ?? (/^\+?[0-9\s()-]{6,}$/.test(rawName) ? rawName : null);
-  const resolvedName = (phoneToResolve
-    ? resolveName(normalizePhone(phoneToResolve), rawName || 'Unknown')
-    : (rawName || 'Unknown')) || 'Unknown';
-  const resolvedPhoto = livePhoto ?? otherParty.photoUrl ?? null;
-
-  const initialsOf = (name: string) => {
-    const parts = name.trim().split(/\s+/).filter(Boolean);
-    if (parts.length === 0) return '?';
-    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-    return (parts[0][0] + parts[1][0]).toUpperCase();
-  };
-
-  const contact: Contact & { photoUrl: string | null } = {
+  // Build contact from otherParty
+  const contact: Contact = {
     id: parseInt(otherParty.userId) || -2,
-    name: resolvedName,
-    avatar: initialsOf(resolvedName),
+    name: otherParty.displayName,
+    avatar: otherParty.displayName.split(' ').map((n) => n[0]).join('').toUpperCase(),
     color: COLORS.blue,
     status: 'online',
     lastMsg: '',
     time: '',
     unread: 0,
-    photoUrl: resolvedPhoto,
   };
 
   const [participants, setParticipants] = useState<Contact[]>([contact]);
@@ -131,60 +93,63 @@ export default function AudioCallScreen() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const unsubscribeCallRef = useRef<(() => void) | null>(null);
 
-  // ── Live subscribe to the other party's user doc (name/photo/presence) ──────
+  // Ringtone — play while connecting (outgoing), stop when connected or screen unmounts
+  const ringtone = useRingtone();
   useEffect(() => {
-    if (!otherParty.userId) return;
-    const fsDb = db as ReturnType<typeof firestore>;
-    const unsub = fsDb.collection('users').doc(otherParty.userId).onSnapshot((snap) => {
-      if (!snap.exists()) return;
-      const data = snap.data() ?? {};
-      if (typeof data.displayName === 'string' && data.displayName.trim()) {
-        setLiveName(data.displayName.trim());
-      }
-      if (typeof data.photoURL === 'string' && data.photoURL) {
-        setLivePhoto(data.photoURL);
-      }
-      if (typeof data.phone === 'string' && data.phone) {
-        setLivePhone(data.phone);
-      }
-      setPeerOnline(!!data.online);
-    }, (err) => {
-      console.warn('[AudioCall] user presence subscription failed:', err);
-    });
-    return () => unsub();
-  }, [otherParty.userId]);
+    if (isOutgoing) ringtone.play();
+    return () => { ringtone.stop(); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Stop ringtone the moment the call connects
+  useEffect(() => {
+    if (callStatus === 'connected') ringtone.stop();
+  }, [callStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Initialize WebRTC and call setup
   useEffect(() => {
     const setupCall = async () => {
       try {
-        const fsDb = db as ReturnType<typeof firestore>;
-        const callRef = fsDb.collection('calls').doc(callId);
+        // Duration is managed locally; the backend call record has startedAt
+        // from POST /calls. No separate read needed.
 
-        // Watch the Firestore call doc for status transitions. The signaling
-        // hooks (useOutgoingCall / useIncomingCallAnswer) handle the WebRTC
-        // offer/answer; here we mirror status + the shared startTime into the
-        // UI and tear down when the call ends. Applies to both caller & callee.
-        unsubscribeCallRef.current = callRef.onSnapshot((snapshot) => {
-          const data = snapshot.data();
-          if (!data) return;
-          if (typeof data.status === 'string') {
-            setRemoteCallStatus(data.status);
-          }
-          // startTime is written (serverTimestamp) the moment the callee
-          // answers. Both sides read the SAME value → identical durations.
-          const st = data.startTime ?? data.startedAt;
-          if (st) {
-            const ms = typeof st.toDate === 'function' ? st.toDate().getTime() : new Date(st).getTime();
-            if (!Number.isNaN(ms)) setStartTimeMs(ms);
-          }
-          if (data.status === 'ended' || data.status === 'rejected' || data.status === 'missed') {
-            navigation.goBack();
-          }
-        });
+        // Initialize WebRTC peer connection for audio only
+        await initializePeerConnection(false); // false for audio-only call
 
-        // NOTE: the duration timer is driven by a separate effect off the
-        // shared startTime — not here — so it doesn't tick while ringing.
+        if (isOutgoing) {
+          console.log('[AudioCall] Creating offer as caller...');
+          const offer = await createOffer(false);
+          await SignalingService.saveOffer(callId, offer);
+
+          // Listen for answer from callee via socket
+          unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, (data) => {
+            if (data?.answer) {
+              setRemoteAnswer(data.answer).catch(console.error);
+            }
+            if (data?.iceCandidates) {
+              data.iceCandidates.forEach((candidate: any) => {
+                addIceCandidate(candidate).catch(console.error);
+              });
+            }
+            if (data?.status === 'ended') navigation.goBack();
+          });
+        } else {
+          console.log('[AudioCall] Waiting for offer as callee...');
+          unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, async (data) => {
+            if (data?.offer) {
+              const answer = await createAnswer(data.offer);
+              await SignalingService.saveAnswer(callId, answer);
+            }
+            if (data?.iceCandidates) {
+              data.iceCandidates.forEach((candidate: any) => {
+                addIceCandidate(candidate).catch(console.error);
+              });
+            }
+            if (data?.status === 'ended') navigation.goBack();
+          });
+        }
+
+        // Start call timer
+        timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
       } catch (error) {
         console.error('[AudioCall] Setup failed:', error);
         setCallStatus('failed');
@@ -199,29 +164,6 @@ export default function AudioCallScreen() {
       cleanupWebRTC();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Duration timer: driven by the shared startTime ─────────────────────────
-  // Once the callee answers, the call doc gets a serverTimestamp `startTime`.
-  // Both caller and callee compute duration = now - startTime, so they always
-  // agree to the second regardless of when each side's media connects. The
-  // timer never counts while the call is still ringing (startTimeMs is null).
-  const isConnected = startTimeMs != null;
-  useEffect(() => {
-    if (startTimeMs == null) {
-      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-      setDuration(0);
-      return;
-    }
-    const tick = () => {
-      const secs = Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000));
-      setDuration(secs);
-    };
-    tick(); // set immediately so there's no 1s lag
-    timerRef.current = setInterval(tick, 1000);
-    return () => {
-      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    };
-  }, [startTimeMs]);
 
   // Handle Android back button - minimize call instead of ending it
   useEffect(() => {
@@ -254,58 +196,13 @@ export default function AudioCallScreen() {
   const fmt = (s: number) =>
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
-  // ── Status label shown under the name ───────────────────────────────────────
-  // Connected  → show the running duration.
-  // Outgoing & still ringing/accepted:
-  //    callee online  → "Ringing…"  (their device is reachable and alerting)
-  //    callee offline → "Calling…"  (not reachable yet / no internet)
-  //    presence unknown yet → "Calling…" (neutral default while we resolve it)
-  // Incoming (answered side) before media connects → "Connecting…".
-  const statusLabel = (() => {
-    // Answered: the shared startTime exists → show the synced running duration.
-    if (startTimeMs != null) return fmt(duration);
-    if (callStatus === 'failed' || callStatus === 'disconnected'
-        || remoteCallStatus === 'ended' || remoteCallStatus === 'rejected'
-        || remoteCallStatus === 'missed') return 'Call ended';
-    // Not answered yet: ringing/calling for the caller, connecting for callee.
-    if (isOutgoing) {
-      return peerOnline ? 'Ringing…' : 'Calling…';
-    }
-    return 'Connecting…';
-  })();
-
   const hangUp = async () => {
+    ringtone.stop();
     try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      const callRef = fsDb.collection('calls').doc(callId);
-
-      await callRef.update({
-        status: 'ended',
-        endedAt: new Date(),
-        duration,
-      });
-
-      // Save call history for both parties
-      const callSnap = await callRef.get();
-      const callData = callSnap.data();
-      if (callData) {
-        const durationVal = duration > 0 ? duration : null;
-        const status = duration > 0 ? 'completed' : 'missed';
-        await SignalingService.saveToCallHistory(
-          callData.caller.userId, callId,
-          callData.callee, callData.type,
-          'outgoing', status, durationVal,
-        );
-        await SignalingService.saveToCallHistory(
-          callData.callee.userId, callId,
-          callData.caller, callData.type,
-          'incoming', status, durationVal,
-        );
-      }
+      await endpoints.endCall(callId);
     } catch (error) {
       console.error('[AudioCall] Failed to end call:', error);
     }
-
     cleanupWebRTC();
     navigation.goBack();
   };
@@ -333,24 +230,9 @@ export default function AudioCallScreen() {
     }
   };
 
-  // Switch to video — save duration and cleanly transition
+  // Switch to video — cleanly transition while keeping the call alive
   const switchToVideo = async () => {
     if (timerRef.current) clearInterval(timerRef.current);
-    
-    // Save current duration to Firestore before switching
-    try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('calls').doc(callId).update({
-        lastDuration: duration,
-        videoUpgradeRequest: {
-          requestedBy: user?.uid || 'unknown',
-          timestamp: new Date(),
-        },
-      });
-    } catch (error) {
-      console.error('[AudioCall] Failed to save duration:', error);
-    }
-    
     cleanupWebRTC();
     navigation.replace('VideoCall', { callId, isOutgoing, otherParty });
   };
@@ -398,11 +280,11 @@ export default function AudioCallScreen() {
       {/* ── Main area ── */}
       <View style={styles.mainArea}>
         <View style={styles.avatarRing}>
-          <Avatar initials={contact.avatar} color={contact.color} size={110} imageUrl={contact.photoUrl} />
+          <Avatar initials={contact.avatar} color={contact.color} size={110} />
         </View>
         <AppText fixedColor style={styles.callerName}>{contact.name}</AppText>
         <AppText fixedColor style={styles.callStatus}>
-          {statusLabel}
+          {callStatus === 'connecting' ? 'Connecting...' : 'Audio call'} · {fmt(duration)}
         </AppText>
         {participants.length > 1 && (
           <View style={styles.extraRow}>
@@ -444,9 +326,7 @@ export default function AudioCallScreen() {
         <View style={{ flex: 1 }}>
           <AppText fixedColor style={styles.topName}>{contact.name}</AppText>
           <AppText fixedColor style={styles.topStatus}>
-            {isConnected
-              ? `${fmt(duration)} · ${participants.length} participant${participants.length > 1 ? 's' : ''}`
-              : statusLabel}
+            {fmt(duration)} · {participants.length} participant{participants.length > 1 ? 's' : ''}
           </AppText>
         </View>
 
@@ -559,8 +439,8 @@ const styles = StyleSheet.create({
     borderRadius: 20,
   },
   iconBtnActive: {
-    backgroundColor: 'rgba(30,156,240,0.35)',
-    borderColor: 'rgba(30,156,240,0.55)',
+    backgroundColor: 'rgba(9,178,238,0.35)',
+    borderColor: 'rgba(9,178,238,0.55)',
   },
   topName:   { fontSize: 15, fontWeight: '700', color: '#fff' },
   topStatus: { fontSize: 11, color: 'rgba(255,255,255,0.65)', marginTop: 2 },

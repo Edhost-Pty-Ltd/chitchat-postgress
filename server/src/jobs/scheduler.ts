@@ -1,7 +1,12 @@
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { getEnv } from '../config/env.js';
 import { logger } from '../config/logger.js';
-import { runStatusCleanup, runMessageCleanup, runStaleCallCleanup } from './cleanup.js';
+import {
+  runStatusCleanup,
+  runMessageCleanup,
+  runStaleCallCleanup,
+  runLinkTokenCleanup,
+} from './cleanup.js';
 
 function connection(): ConnectionOptions {
   const url = new URL(getEnv().REDIS_URL);
@@ -15,7 +20,7 @@ function connection(): ConnectionOptions {
 
 export const QUEUE_CLEANUP = 'cleanup';
 
-export type CleanupJobName = 'status' | 'message' | 'stale-call';
+export type CleanupJobName = 'status' | 'message' | 'stale-call' | 'link-token';
 
 // Repeatable schedules (Req 11.1-11.3). BullMQ dedupes a repeatable job by its
 // name + pattern across all producers, so adding it on every instance still
@@ -24,6 +29,7 @@ const SCHEDULES: { name: CleanupJobName; pattern: string }[] = [
   { name: 'status', pattern: '0 * * * *' }, // hourly
   { name: 'message', pattern: '0 3 * * *' }, // daily at 03:00
   { name: 'stale-call', pattern: '*/30 * * * *' }, // every 30 minutes
+  { name: 'link-token', pattern: '15 * * * *' }, // hourly (expired companion link requests)
 ];
 
 let cleanupQueue: Queue | null = null;
@@ -52,6 +58,8 @@ async function runJob(name: CleanupJobName): Promise<unknown> {
       return runMessageCleanup();
     case 'stale-call':
       return runStaleCallCleanup();
+    case 'link-token':
+      return runLinkTokenCleanup();
   }
 }
 

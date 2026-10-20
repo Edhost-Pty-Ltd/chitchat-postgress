@@ -4,6 +4,11 @@ import { encodeCursor, decodeCursor, clampLimit } from '../../domain/cursor.js';
 
 export const MESSAGE_TTL_MS = 72 * 60 * 60 * 1000; // 72h (Req 5.3)
 
+// The viewer's per-user "clear chat" cutoff ($1 = chat id, $2 = viewer id).
+const CLEARED_CUTOFF_SQL = `COALESCE(
+  (SELECT cleared_at FROM chat_members cm WHERE cm.chat_id = $1 AND cm.user_id = $2),
+  '-infinity'::timestamptz)`;
+
 export type MessageType =
   | 'text'
   | 'image'
@@ -12,7 +17,10 @@ export type MessageType =
   | 'file'
   | 'location'
   | 'system'
-  | 'catalog';
+  | 'catalog'
+  | 'poll'
+  | 'order'
+  | 'contact';
 
 export interface MessageInput {
   clientId?: string | null;
@@ -28,6 +36,10 @@ export interface MessageInput {
   catalogItem?: unknown;
   replyTo?: unknown;
   subtype?: string | null;
+  // Embedded card payloads for the branch features (mirror the client shapes).
+  poll?: unknown;        // { question, options:[{id,text}], multiple }
+  order?: unknown;       // { items:[{id,name,price,imageObjectKey,quantity}], total, currency }
+  contact?: unknown;     // { name, phone, userId, registered, photoObjectKey, contacts?:[...] }
 }
 
 export interface StoredMessage {
@@ -47,6 +59,9 @@ export interface StoredMessage {
   catalogItem: unknown;
   replyTo: unknown;
   subtype: string | null;
+  poll: unknown;
+  order: unknown;
+  contact: unknown;
   createdAt: string;
   expiresAt: string;
   deletedForEveryone: boolean;
@@ -73,6 +88,9 @@ interface MessageRow {
   catalog_item: unknown;
   reply_to: unknown;
   subtype: string | null;
+  poll: unknown;
+  order_data: unknown;
+  contact_data: unknown;
   created_at: Date;
   expires_at: Date;
   deleted_for_everyone: boolean;
@@ -95,6 +113,16 @@ function previewFor(input: MessageInput): string {
       return '📍 Location';
     case 'catalog':
       return '🛍️ Product';
+    case 'poll': {
+      const q = (input.poll as { question?: string } | null)?.question;
+      return q ? `📊 ${q}` : '📊 Poll';
+    }
+    case 'order':
+      return '🛒 Order';
+    case 'contact': {
+      const n = (input.contact as { name?: string } | null)?.name;
+      return n ? `👤 ${n}` : '👤 Contact';
+    }
     default:
       return 'New message';
   }
@@ -117,11 +145,45 @@ async function hydrateReceipts(ids: string[]): Promise<Map<string, { delivered: 
   return map;
 }
 
+/**
+ * Load current poll votes for the given poll messages and return a map of
+ * messageId → { optionId → voterId[] }. The authoritative vote state lives in
+ * the poll_votes table; the message's embedded poll.votes is projected from it
+ * at read time so concurrent voters never clobber each other (Req: poll votes).
+ */
+async function hydratePollVotes(ids: string[]): Promise<Map<string, Record<string, string[]>>> {
+  const map = new Map<string, Record<string, string[]>>();
+  if (ids.length === 0) return map;
+  const res = await query<{ message_id: string; option_id: string; voter_id: string }>(
+    `SELECT message_id, option_id, voter_id FROM poll_votes
+       WHERE message_id = ANY($1::uuid[]) ORDER BY voted_at ASC`,
+    [ids],
+  );
+  for (const r of res.rows) {
+    const entry = map.get(r.message_id) ?? {};
+    (entry[r.option_id] ??= []).push(r.voter_id);
+    map.set(r.message_id, entry);
+  }
+  return map;
+}
+
 function rowToMessage(
   row: MessageRow,
   receipts: Map<string, { delivered: string[]; read: string[] }>,
+  pollVotes?: Map<string, Record<string, string[]>>,
 ): StoredMessage {
   const r = receipts.get(row.id) ?? { delivered: [], read: [] };
+
+  // Project live votes into the embedded poll payload.
+  let poll = row.poll as { question: string; options: { id: string; text: string }[]; multiple: boolean; votes?: Record<string, string[]> } | null;
+  if (poll && pollVotes) {
+    const votes = pollVotes.get(row.id) ?? {};
+    // Ensure every option key exists so the client renders 0-vote options.
+    const full: Record<string, string[]> = {};
+    for (const o of poll.options ?? []) full[o.id] = votes[o.id] ?? [];
+    poll = { ...poll, votes: full };
+  }
+
   return {
     id: row.id,
     chatId: row.chat_id,
@@ -139,6 +201,9 @@ function rowToMessage(
     catalogItem: row.catalog_item,
     replyTo: row.reply_to,
     subtype: row.subtype,
+    poll,
+    order: row.order_data,
+    contact: row.contact_data,
     createdAt: row.created_at.toISOString(),
     expiresAt: row.expires_at.toISOString(),
     deletedForEveryone: row.deleted_for_everyone,
@@ -178,8 +243,8 @@ export async function sendMessage(
       `INSERT INTO messages
          (chat_id, sender_id, client_id, type, text, media_object_key, thumbnail_object_key,
           file_name, file_size, mime_type, duration_ms, location, catalog_item, reply_to, subtype,
-          expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+          poll, order_data, contact_data, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
        RETURNING *`,
       [
         chatId,
@@ -197,6 +262,9 @@ export async function sendMessage(
         input.catalogItem != null ? JSON.stringify(input.catalogItem) : null,
         input.replyTo != null ? JSON.stringify(input.replyTo) : null,
         input.subtype ?? null,
+        input.poll != null ? JSON.stringify(input.poll) : null,
+        input.order != null ? JSON.stringify(input.order) : null,
+        input.contact != null ? JSON.stringify(input.contact) : null,
         expiresAt,
       ],
     );
@@ -245,8 +313,11 @@ export async function sendMessage(
     return { row, created: true };
   });
 
-  const receipts = await hydrateReceipts([result.row.id]);
-  return { message: rowToMessage(result.row, receipts), created: result.created };
+  const [receipts, votes] = await Promise.all([
+    hydrateReceipts([result.row.id]),
+    hydratePollVotes(result.row.type === 'poll' ? [result.row.id] : []),
+  ]);
+  return { message: rowToMessage(result.row, receipts, votes), created: result.created };
 }
 
 export interface Page {
@@ -279,6 +350,7 @@ export async function listMessages(
          AND m.expires_at > now()
          AND m.deleted_for_everyone = false
          AND NOT (m.deleted_for @> to_jsonb($2::text))
+         AND m.created_at > ${CLEARED_CUTOFF_SQL}
          ${keyset}
        ORDER BY m.created_at DESC, m.id DESC
        LIMIT ${limit + 1}`,
@@ -287,8 +359,12 @@ export async function listMessages(
 
   const hasMore = res.rows.length > limit;
   const pageRows = hasMore ? res.rows.slice(0, limit) : res.rows;
-  const receipts = await hydrateReceipts(pageRows.map((r) => r.id));
-  const messages = pageRows.map((r) => rowToMessage(r, receipts));
+  const pollIds = pageRows.filter((r) => r.type === 'poll').map((r) => r.id);
+  const [receipts, votes] = await Promise.all([
+    hydrateReceipts(pageRows.map((r) => r.id)),
+    hydratePollVotes(pollIds),
+  ]);
+  const messages = pageRows.map((r) => rowToMessage(r, receipts, votes));
   const last = pageRows[pageRows.length - 1];
   return {
     messages,
@@ -308,13 +384,18 @@ export async function messagesAfter(
          AND m.expires_at > now()
          AND m.deleted_for_everyone = false
          AND NOT (m.deleted_for @> to_jsonb($2::text))
+         AND m.created_at > ${CLEARED_CUTOFF_SQL}
          AND m.created_at > (SELECT created_at FROM messages WHERE id = $3)
        ORDER BY m.created_at ASC, m.id ASC
        LIMIT 500`,
     [chatId, viewerId, afterMessageId],
   );
-  const receipts = await hydrateReceipts(res.rows.map((r) => r.id));
-  return res.rows.map((r) => rowToMessage(r, receipts));
+  const pollIds = res.rows.filter((r) => r.type === 'poll').map((r) => r.id);
+  const [receipts, votes] = await Promise.all([
+    hydrateReceipts(res.rows.map((r) => r.id)),
+    hydratePollVotes(pollIds),
+  ]);
+  return res.rows.map((r) => rowToMessage(r, receipts, votes));
 }
 
 /** Record delivery for a recipient (Req 5.6). Returns the sender to notify. */
@@ -419,4 +500,80 @@ export async function editMessage(
   // Re-hydrate receipts for the single updated row.
   const receipts = await hydrateReceipts([res.rows[0].id]);
   return rowToMessage(res.rows[0], receipts);
+}
+
+/** A message with its chat id and type — used to authorize poll voting. */
+export async function getMessageMeta(
+  messageId: string,
+): Promise<{ chatId: string; type: MessageType; poll: { options: { id: string }[]; multiple: boolean } | null } | null> {
+  const res = await query<{ chat_id: string; type: MessageType; poll: { options: { id: string }[]; multiple: boolean } | null }>(
+    'SELECT chat_id, type, poll FROM messages WHERE id = $1',
+    [messageId],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return { chatId: row.chat_id, type: row.type, poll: row.poll };
+}
+
+/**
+ * Toggle a voter's vote on a poll option and return the refreshed message.
+ * - Single-choice polls: selecting an option clears the voter from all other
+ *   options; tapping the already-selected option retracts it.
+ * - Multiple-choice polls: plain per-option toggle.
+ * The unique (message, option, voter) PK makes concurrent votes safe without a
+ * read-modify-write of a votes map (the Firestore bug this replaces).
+ */
+export async function votePoll(
+  messageId: string,
+  voterId: string,
+  optionId: string,
+): Promise<StoredMessage | null> {
+  await withTransaction(async (client) => {
+    const meta = await client.query<{ type: MessageType; poll: { multiple: boolean } | null }>(
+      'SELECT type, poll FROM messages WHERE id = $1 FOR UPDATE',
+      [messageId],
+    );
+    const row = meta.rows[0];
+    if (!row || row.type !== 'poll' || !row.poll) return;
+    const multiple = !!row.poll.multiple;
+
+    const existing = await client.query(
+      'SELECT 1 FROM poll_votes WHERE message_id = $1 AND option_id = $2 AND voter_id = $3',
+      [messageId, optionId, voterId],
+    );
+    const alreadyVoted = existing.rowCount! > 0;
+
+    if (!multiple) {
+      // Single-choice: clear all of this voter's votes on this poll first.
+      await client.query('DELETE FROM poll_votes WHERE message_id = $1 AND voter_id = $2', [
+        messageId,
+        voterId,
+      ]);
+      // Tapping the already-selected option retracts; any other selects.
+      if (!alreadyVoted) {
+        await client.query(
+          'INSERT INTO poll_votes (message_id, option_id, voter_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+          [messageId, optionId, voterId],
+        );
+      }
+    } else if (alreadyVoted) {
+      await client.query(
+        'DELETE FROM poll_votes WHERE message_id = $1 AND option_id = $2 AND voter_id = $3',
+        [messageId, optionId, voterId],
+      );
+    } else {
+      await client.query(
+        'INSERT INTO poll_votes (message_id, option_id, voter_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+        [messageId, optionId, voterId],
+      );
+    }
+  });
+
+  const res = await query<MessageRow>('SELECT * FROM messages WHERE id = $1', [messageId]);
+  if (!res.rows[0]) return null;
+  const [receipts, votes] = await Promise.all([
+    hydrateReceipts([messageId]),
+    hydratePollVotes([messageId]),
+  ]);
+  return rowToMessage(res.rows[0], receipts, votes);
 }

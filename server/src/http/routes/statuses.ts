@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requirePrimaryDevice } from '../middleware/auth.js';
 import { parse } from '../validate.js';
 import { Errors } from '../errors.js';
 import {
@@ -25,14 +25,14 @@ import {
   getRecipients,
   recordSend,
 } from '../../db/repositories/broadcasts.js';
-import { getOrCreateDirectChat, getMembers } from '../../db/repositories/chats.js';
+import { getOrCreateDirectChat } from '../../db/repositories/chats.js';
 import { sendMessage, type MessageType } from '../../db/repositories/messages.js';
-import { isBlocked, blockedEitherWay } from '../../db/repositories/blocks.js';
+import { isBlocked } from '../../db/repositories/blocks.js';
 import { getUserById } from '../../db/repositories/users.js';
 import { emitToUser } from '../../realtime/emitter.js';
-import { enqueueMessagePush, enqueueDeleteObject } from '../../jobs/queues.js';
+import { enqueueDeleteObject } from '../../jobs/queues.js';
+import { fanOutMessage, notificationName } from '../../domain/messaging.js';
 import { chatPeers } from '../../realtime/presence.js';
-import { logger } from '../../config/logger.js';
 
 export async function registerStatusRoutes(app: FastifyInstance): Promise<void> {
   // GET /statuses — own + visible others, with unviewed indicators (Req 9.2, 9.4).
@@ -94,6 +94,9 @@ export async function registerStatusRoutes(app: FastifyInstance): Promise<void> 
     { preHandler: requireAuth },
     async (request) => {
       const viewerId = request.identity!.userId;
+      // A companion browsing statuses must not mark them viewed on the owner's
+      // behalf (old useStatus skipped markAsViewed on companions).
+      if (request.identity!.isCompanion) return { ok: true, skipped: true };
       const ownerId = await recordView(request.params.id, viewerId);
       if (ownerId && ownerId !== viewerId) {
         emitToUser(ownerId, 'status:viewed', { statusId: request.params.id, viewerId });
@@ -103,9 +106,10 @@ export async function registerStatusRoutes(app: FastifyInstance): Promise<void> 
   );
 
   // DELETE /statuses/:id — delete + request media cleanup (Req 9.5).
+  // Companions can post and view statuses but not delete them.
   app.delete<{ Params: { id: string } }>(
     '/statuses/:id',
-    { preHandler: requireAuth },
+    { preHandler: [requireAuth, requirePrimaryDevice] },
     async (request) => {
       const userId = request.identity!.userId;
       const owner = await getStatusOwner(request.params.id);
@@ -162,7 +166,7 @@ export async function registerStatusRoutes(app: FastifyInstance): Promise<void> 
 
       const recipients = await getRecipients(request.params.id);
       const sender = await getUserById(userId);
-      const senderName = sender?.display_name ?? sender?.phone_number ?? 'New message';
+      const senderName = notificationName(sender);
 
       let sent = 0;
       const skipped: string[] = [];
@@ -178,23 +182,8 @@ export async function registerStatusRoutes(app: FastifyInstance): Promise<void> 
           text: body.text ?? null,
           mediaObjectKey: body.mediaObjectKey ?? null,
         });
-        // Deliver + push like a normal message.
-        const others = (await getMembers(chatId)).filter((id) => id !== userId);
-        const blocked = await blockedEitherWay(userId, others);
-        for (const uid of others) {
-          if (!blocked.has(uid)) emitToUser(uid, 'message:new', { message });
-        }
-        try {
-          await enqueueMessagePush({
-            chatId,
-            messageId: message.id,
-            senderId: userId,
-            title: senderName,
-            body: body.text ?? '📢 Broadcast',
-          });
-        } catch (err) {
-          logger.warn({ err, messageId: message.id }, 'broadcast push enqueue failed');
-        }
+        // Deliver + push like a normal message (and let auto-responders reply).
+        await fanOutMessage(message, senderName);
         sent += 1;
       }
 

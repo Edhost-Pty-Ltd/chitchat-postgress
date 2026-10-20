@@ -7,21 +7,68 @@ declare module 'fastify' {
   }
 }
 
-/**
- * Fastify preHandler that verifies the Bearer token and attaches the resolved
- * identity to the request (Req 2.2, 2.4). Returns 401 with a machine-readable
- * code on any auth failure (Req 2.5). Handlers read `request.identity.userId`
- * and never trust a user id from the body (Req 2.11).
- */
-export async function requireAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+async function authenticate(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  allowAnonymous: boolean,
+): Promise<void> {
   const token = parseBearer(request.headers.authorization);
   try {
     request.identity = await verifyToken(token);
   } catch (err) {
     if (err instanceof AuthError) {
-      await reply.code(401).send({ error: { code: err.code, message: err.message } });
+      const status = err.code === 'AUTH_NOT_CONFIGURED' ? 503 : 401;
+      await reply.code(status).send({ error: { code: err.code, message: err.message } });
       return;
     }
     throw err;
+  }
+  if (request.identity?.isAnonymous && !allowAnonymous) {
+    await reply.code(403).send({
+      error: { code: 'AUTH_ANONYMOUS_NOT_ALLOWED', message: 'Sign in to use this feature' },
+    });
+  }
+}
+
+/**
+ * Fastify preHandler that verifies the Bearer token and attaches the resolved
+ * identity to the request (Req 2.2, 2.4). Returns 401 with a machine-readable
+ * code on any auth failure (Req 2.5). Handlers read `request.identity.userId`
+ * and never trust a user id from the body (Req 2.11). Anonymous link-request
+ * sessions are refused here.
+ */
+export async function requireAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  await authenticate(request, reply, false);
+}
+
+/**
+ * Like requireAuth, but also accepts the anonymous session a not-yet-linked
+ * companion device uses while it creates and polls its link request.
+ */
+export async function requireAuthAllowAnonymous(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  await authenticate(request, reply, true);
+}
+
+/**
+ * Owner-only actions (privacy, blocks, phone/profile changes, linking and
+ * removing devices, deleting statuses, managing businesses) are not available
+ * on companion devices — mirrors the old Firestore `!isCompanion()` rules.
+ * Use after requireAuth: `{ preHandler: [requireAuth, requirePrimaryDevice] }`.
+ */
+export async function requirePrimaryDevice(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  if (reply.sent) return;
+  if (request.identity?.isCompanion) {
+    await reply.code(403).send({
+      error: {
+        code: 'COMPANION_NOT_ALLOWED',
+        message: 'This action is only available on your primary device',
+      },
+    });
   }
 }

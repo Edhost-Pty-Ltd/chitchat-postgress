@@ -66,11 +66,12 @@ export async function mergeLocalMessages(
     for (const m of incoming)  map.set(m.messageId, m);
 
     // Sort ascending by timestamp. A null timestamp means the message was just
-    // sent and its server timestamp hasn't resolved yet — it's the newest, so
-    // sort it to the BOTTOM (treat as +Infinity), not the top.
+    // sent and its serverTimestamp() hasn't resolved yet — it's the newest
+    // message, so it must sort to the BOTTOM (treat null as +Infinity), not the
+    // top. Using 0 here would date it to 1970 and float it above everything.
     const merged = Array.from(map.values()).sort((a, b) => {
-      const ta = a.timestamp?.getTime() ?? Number.MAX_SAFE_INTEGER;
-      const tb = b.timestamp?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      const ta = a.timestamp?.getTime() ?? Number.POSITIVE_INFINITY;
+      const tb = b.timestamp?.getTime() ?? Number.POSITIVE_INFINITY;
       return ta - tb;
     });
 
@@ -86,55 +87,5 @@ export async function clearLocalMessages(chatId: string): Promise<void> {
     await AsyncStorage.removeItem(KEY(chatId));
   } catch (err) {
     console.warn('[useLocalMessages] clear error:', err);
-  }
-}
-
-/** Remove a single message from the local cache (called when a user deletes it). */
-export async function removeLocalMessage(chatId: string, messageId: string): Promise<void> {
-  try {
-    const existing = await loadLocalMessages(chatId);
-    const next = existing.filter((m) => m.messageId !== messageId);
-    await AsyncStorage.setItem(KEY(chatId), JSON.stringify(next.map(serialise)));
-  } catch (err) {
-    console.warn('[useLocalMessages] removeLocalMessage error:', err);
-  }
-}
-
-// ─── Per-user "delete for me" ids ─────────────────────────────────────────────
-// Message ids the user deleted FOR THEMSELVES. Kept locally so the deletion
-// survives Firestore snapshots (which would otherwise re-add the message) and
-// never touches the shared doc — the other member keeps their copy. No network
-// write, so it works regardless of Firestore security rules.
-
-const DELETED_KEY = (chatId: string) => `deleted_msgs_${chatId}`;
-
-/** Load the set of message ids this user has deleted for themselves. */
-export async function loadDeletedIds(chatId: string): Promise<string[]> {
-  try {
-    const raw = await AsyncStorage.getItem(DELETED_KEY(chatId));
-    return raw ? (JSON.parse(raw) as string[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-/** Mark one or more message ids as deleted-for-me. Returns the updated set. */
-export async function addDeletedIds(chatId: string, ids: string[]): Promise<string[]> {
-  try {
-    const existing = await loadDeletedIds(chatId);
-    const merged = Array.from(new Set([...existing, ...ids]));
-    await AsyncStorage.setItem(DELETED_KEY(chatId), JSON.stringify(merged));
-    return merged;
-  } catch {
-    return ids;
-  }
-}
-
-/** Clear the deleted-for-me set (used when the whole chat is cleared/deleted). */
-export async function clearDeletedIds(chatId: string): Promise<void> {
-  try {
-    await AsyncStorage.removeItem(DELETED_KEY(chatId));
-  } catch {
-    /* no-op */
   }
 }

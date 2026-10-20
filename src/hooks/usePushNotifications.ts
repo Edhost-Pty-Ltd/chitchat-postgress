@@ -1,98 +1,65 @@
 // ─── usePushNotifications Hook ────────────────────────────────────────────────
-// Handles expo-notifications setup, permissions, and push token registration.
-//
-// COMPANION NOTE
-//   The parameter is the OWNER uid (the account whose notifications we want to
-//   receive). On a companion device this is different from the Firebase Auth
-//   uid. Tokens are stored per-device in a subcollection so both the primary
-//   and its companions register independently:
-//
-//       users/{ownerUid}/pushTokens/{deviceId}   → { token, platform, updatedAt }
-//
-//   A server-side sender must fan out to all docs in that subcollection.
-
 import { useState, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
-import { DEVICE_ID_KEY } from './useLinkedDevices';
+import { registerChatReplyCategory, handleNotificationReply } from './useNotificationReply';
+import { endpoints } from '../api/endpoints';
 
 let Notifications: any = null;
 try {
   Notifications = require('expo-notifications');
   Notifications.setNotificationHandler({
     handleNotification: async () => ({
-      shouldPlaySound: true,
-      shouldSetBadge: true,
-      shouldShowBanner: true,
-      shouldShowList: true,
+      shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: true,
+      shouldShowBanner: true, shouldShowList: true,
     }),
   });
 } catch {
-  console.warn('[usePushNotifications] expo-notifications not available. Push notifications disabled.');
+  console.warn('[usePushNotifications] expo-notifications not available.');
 }
 
-// ── Safe unsubscribe helper ───────────────────────────────────────────────────
 function removeSubscription(sub: any) {
   if (!sub) return;
   try {
-    if (typeof sub.remove === 'function') {
-      sub.remove();
-      return;
-    }
-    if (typeof sub === 'function') {
-      sub();
-    }
-  } catch (err) {
-    console.warn('[usePushNotifications] Error removing subscription (ignored):', err);
-  }
+    if (typeof sub.remove === 'function') { sub.remove(); return; }
+    if (typeof sub === 'function') sub();
+  } catch {}
 }
 
-function generateDeviceId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
-async function getDeviceId(): Promise<string> {
-  let id = await AsyncStorage.getItem(DEVICE_ID_KEY);
-  if (!id) {
-    id = generateDeviceId();
-    await AsyncStorage.setItem(DEVICE_ID_KEY, id);
-  }
-  return id;
-}
-
-export function usePushNotifications(ownerUid: string | null) {
+export function usePushNotifications(userId: string | null) {
   const [expoPushToken, setExpoPushToken] = useState<string | null>(null);
-  const [notification, setNotification] = useState<any | null>(null);
-  const notificationListener = useRef<any>();
-  const responseListener = useRef<any>();
+  const [notification,  setNotification]  = useState<any | null>(null);
+  const notificationListener = useRef<any>(null);
+  const responseListener     = useRef<any>(null);
 
   useEffect(() => {
-    if (!ownerUid || !Notifications) return;
+    if (!userId || !Notifications) return;
+
+    registerChatReplyCategory();
 
     registerForPushNotificationsAsync().then((token) => {
-      if (token) {
-        setExpoPushToken(token);
-        savePushToken(ownerUid, token);
-      }
+      if (token) { setExpoPushToken(token); savePushToken(userId, token); }
     });
 
     notificationListener.current = Notifications.addNotificationReceivedListener((notif: any) => {
-      console.log('[usePushNotifications] Notification received:', notif);
       setNotification(notif);
     });
 
-    responseListener.current = Notifications.addNotificationResponseReceivedListener((response: any) => {
-      console.log('[usePushNotifications] Notification response:', response);
-      handleNotificationResponse(response);
+    responseListener.current = Notifications.addNotificationResponseReceivedListener(async (response: any) => {
+      const handled = await handleNotificationReply(response);
+      if (!handled) handleNotificationResponse(response);
     });
 
+    if (Notifications.getLastNotificationResponseAsync) {
+      Notifications.getLastNotificationResponseAsync()
+        .then((response: any) => { if (response) handleNotificationReply(response); })
+        .catch(() => {});
+    }
+
     return () => {
-      if (notificationListener.current) removeSubscription(notificationListener.current);
-      if (responseListener.current)     removeSubscription(responseListener.current);
+      removeSubscription(notificationListener.current);
+      removeSubscription(responseListener.current);
     };
-  }, [ownerUid]);
+  }, [userId]);
 
   return { expoPushToken, notification };
 }
@@ -113,58 +80,38 @@ async function registerForPushNotificationsAsync(): Promise<string | null> {
 
   const { status: existingStatus } = await Notifications.getPermissionsAsync();
   let finalStatus = existingStatus;
-
   if (existingStatus !== 'granted') {
     const { status } = await Notifications.requestPermissionsAsync();
     finalStatus = status;
   }
-
   if (finalStatus !== 'granted') return null;
 
   try {
     const token = (await Notifications.getExpoPushTokenAsync({
       projectId: 'e68eeca5-8ee9-4c30-b23f-8cd3616b7c21',
     })).data;
-    console.log('[usePushNotifications] Push token:', token);
     return token;
-  } catch (error) {
-    console.error('[usePushNotifications] Error getting push token:', error);
+  } catch {
     return null;
   }
 }
 
-async function savePushToken(ownerUid: string, token: string) {
+async function savePushToken(userId: string, token: string) {
   try {
-    const deviceId = await getDeviceId();
-    const fsDb = db as ReturnType<typeof firestore>;
-
-    await fsDb
-      .collection('users').doc(ownerUid)
-      .collection('pushTokens').doc(deviceId)
-      .set(
-        {
-          token,
-          platform: Platform.OS,
-          updatedAt: firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      );
-
-    // console.log('[usePushNotifications] Push token saved for ownerUid:', ownerUid, 'device:', deviceId);
+    const res = await endpoints.registerPushToken(token, Platform.OS);
+    if (!res.ok) console.error('[usePushNotifications] Backend token register failed:', res.error);
   } catch (error) {
     console.error('[usePushNotifications] Error saving push token:', error);
   }
 }
 
-function handleNotificationResponse(response: any) {
-  const data = response.notification.request.content.data;
-  console.log('[usePushNotifications] Notification data:', data);
+export async function removePushTokenFromBackend(token: string): Promise<void> {
+  try { await endpoints.removePushToken(token); } catch {}
 }
+
+function handleNotificationResponse(_response: any) {}
 
 export async function sendLocalNotification(title: string, body: string, data?: any) {
   if (!Notifications) return;
-  await Notifications.scheduleNotificationAsync({
-    content: { title, body, data },
-    trigger: null,
-  });
+  await Notifications.scheduleNotificationAsync({ content: { title, body, data }, trigger: null });
 }

@@ -13,6 +13,8 @@ export interface ChatSummary {
   lastMessageAt: string | null;
   unreadCount: number;
   role: 'admin' | 'member';
+  /** This user's "clear chat" cutoff (messages at/before it are hidden for them). */
+  clearedAt: string | null;
 }
 
 /** The two member ids sorted and joined → a stable key for a direct chat. */
@@ -140,14 +142,103 @@ export async function updateGroup(chatId: string, patch: GroupPatch): Promise<vo
          ON CONFLICT DO NOTHING`,
         [chatId, uid],
       );
-    }
-    for (const uid of patch.removeMembers ?? []) {
-      await client.query('DELETE FROM chat_members WHERE chat_id = $1 AND user_id = $2', [
+      // Re-added members are no longer "past" members.
+      await client.query('DELETE FROM chat_past_members WHERE chat_id = $1 AND user_id = $2', [
         chatId,
         uid,
       ]);
     }
+    for (const uid of patch.removeMembers ?? []) {
+      await removeMemberTx(client, chatId, uid);
+    }
   });
+}
+
+/** Remove a member and remember them as a past member of the group. */
+async function removeMemberTx(
+  client: { query: (sql: string, params: unknown[]) => Promise<{ rowCount: number | null }> },
+  chatId: string,
+  userId: string,
+): Promise<void> {
+  const res = await client.query('DELETE FROM chat_members WHERE chat_id = $1 AND user_id = $2', [
+    chatId,
+    userId,
+  ]);
+  if ((res.rowCount ?? 0) > 0) {
+    await client.query(
+      `INSERT INTO chat_past_members (chat_id, user_id, display_name)
+       SELECT $1, u.id, COALESCE(u.display_name, u.phone_number) FROM users u WHERE u.id = $2
+       ON CONFLICT (chat_id, user_id) DO UPDATE
+         SET left_at = now(), display_name = EXCLUDED.display_name`,
+      [chatId, userId],
+    );
+  }
+}
+
+/** A member leaves a group themselves (no admin rights needed). */
+export async function leaveChat(chatId: string, userId: string): Promise<void> {
+  await withTransaction(async (client) => {
+    // If the last admin leaves, hand admin to the longest-standing member.
+    const role = await client.query<{ role: string }>(
+      'SELECT role FROM chat_members WHERE chat_id = $1 AND user_id = $2',
+      [chatId, userId],
+    );
+    await removeMemberTx(client, chatId, userId);
+    if (role.rows[0]?.role === 'admin') {
+      const admins = await client.query(
+        "SELECT 1 FROM chat_members WHERE chat_id = $1 AND role = 'admin'",
+        [chatId],
+      );
+      if ((admins.rowCount ?? 0) === 0) {
+        await client.query(
+          `UPDATE chat_members SET role = 'admin'
+            WHERE chat_id = $1 AND user_id = (
+              SELECT user_id FROM chat_members WHERE chat_id = $1 ORDER BY joined_at ASC LIMIT 1
+            )`,
+          [chatId],
+        );
+      }
+    }
+  });
+}
+
+export interface PastMember {
+  userId: string;
+  displayName: string | null;
+  leftAt: string;
+}
+
+export async function listPastMembers(chatId: string): Promise<PastMember[]> {
+  const res = await query<{ user_id: string; display_name: string | null; left_at: Date }>(
+    'SELECT user_id, display_name, left_at FROM chat_past_members WHERE chat_id = $1 ORDER BY left_at DESC',
+    [chatId],
+  );
+  return res.rows.map((r) => ({
+    userId: r.user_id,
+    displayName: r.display_name,
+    leftAt: r.left_at.toISOString(),
+  }));
+}
+
+/** Was this user ever a member (current or past)? Used to authorize past-member reads. */
+export async function wasMember(chatId: string, userId: string): Promise<boolean> {
+  const res = await query(
+    `SELECT 1 FROM chat_members WHERE chat_id = $1 AND user_id = $2
+     UNION ALL
+     SELECT 1 FROM chat_past_members WHERE chat_id = $1 AND user_id = $2`,
+    [chatId, userId],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+/** Per-user "clear chat": hide everything up to now for this user only. */
+export async function clearChatForUser(chatId: string, userId: string): Promise<string> {
+  const res = await query<{ cleared_at: Date }>(
+    `UPDATE chat_members SET cleared_at = now(), unread_count = 0
+      WHERE chat_id = $1 AND user_id = $2 RETURNING cleared_at`,
+    [chatId, userId],
+  );
+  return (res.rows[0]?.cleared_at ?? new Date()).toISOString();
 }
 
 /**
@@ -166,28 +257,35 @@ export async function listChats(userId: string): Promise<ChatSummary[]> {
     unread_count: number;
     role: 'admin' | 'member';
     members: string[];
+    cleared_at: Date | null;
   }>(
     `SELECT c.id, c.type, c.group_name, c.group_photo_object_key,
             c.last_message_text, c.last_message_sender_id, c.last_message_at,
-            cm.unread_count, cm.role,
+            cm.unread_count, cm.role, cm.cleared_at,
             ARRAY(SELECT user_id FROM chat_members m WHERE m.chat_id = c.id) AS members
        FROM chats c
        JOIN chat_members cm ON cm.chat_id = c.id AND cm.user_id = $1
       ORDER BY c.last_message_at DESC NULLS LAST`,
     [userId],
   );
-  return res.rows.map((r) => ({
-    chatId: r.id,
-    type: r.type,
-    groupName: r.group_name,
-    groupPhotoObjectKey: r.group_photo_object_key,
-    members: r.members,
-    lastMessage: r.last_message_text,
-    lastSenderId: r.last_message_sender_id,
-    lastMessageAt: r.last_message_at ? r.last_message_at.toISOString() : null,
-    unreadCount: r.unread_count,
-    role: r.role,
-  }));
+  return res.rows.map((r) => {
+    // Hide a preview the user already cleared.
+    const cleared =
+      r.cleared_at !== null && r.last_message_at !== null && r.last_message_at <= r.cleared_at;
+    return {
+      chatId: r.id,
+      type: r.type,
+      groupName: r.group_name,
+      groupPhotoObjectKey: r.group_photo_object_key,
+      members: r.members,
+      lastMessage: cleared ? null : r.last_message_text,
+      lastSenderId: cleared ? null : r.last_message_sender_id,
+      lastMessageAt: r.last_message_at ? r.last_message_at.toISOString() : null,
+      unreadCount: r.unread_count,
+      role: r.role,
+      clearedAt: r.cleared_at ? r.cleared_at.toISOString() : null,
+    };
+  });
 }
 
 export async function totalUnread(userId: string): Promise<number> {

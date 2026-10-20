@@ -28,6 +28,9 @@ describe('verifyToken', () => {
       userId: 'user-123',
       firebaseUid: 'user-123',
       phoneNumber: '+15550001',
+      isCompanion: false,
+      deviceId: null,
+      isAnonymous: false,
     });
     expect(upsert).toHaveBeenCalledWith('user-123', '+15550001');
   });

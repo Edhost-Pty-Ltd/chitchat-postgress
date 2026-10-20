@@ -13,7 +13,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   View, TouchableOpacity, StyleSheet, Dimensions, Platform,
   Modal, ScrollView, Pressable, Animated, ActivityIndicator,
-  BackHandler, Alert, AlertButton, Share,
+  BackHandler, Alert, AlertButton, Share, AppState,
 } from 'react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -24,14 +24,11 @@ import { useIncomingCallAnswer } from '../hooks/useIncomingCallAnswer';
 import { useAuth } from '../hooks/useAuth';
 import { useFloatingCall } from '../context/FloatingCallContext';
 import { useContacts } from '../hooks/useContacts';
-import { usePhoneBook } from '../hooks/usePhoneBook';
-import { normalizePhone } from '../utils/phoneUtils';
 import { useMeetingRoom } from '../hooks/useMeetingRoom';
-import firestore from '@react-native-firebase/firestore';
-import storage from '@react-native-firebase/storage';
-import { db } from '../config/firebase';
-import { getOrCreateDirectChat } from '../hooks/useChatActions';
+import { endpoints } from '../api/endpoints';
 import { SignalingService } from '../services/signalingService';
+import { socketClient } from '../realtime/socket';
+import { getOrCreateDirectChat } from '../hooks/useChatActions';
 import { useAudioRecorder, AudioModule, RecordingPresets, setAudioModeAsync } from 'expo-audio';
 import { documentDirectory, copyAsync, readAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 import * as Print from 'expo-print';
@@ -196,7 +193,7 @@ export default function VideoCallScreen() {
   const {
     room, loading: roomLoading,
     join, leave, muteUser, unmuteUser, muteAll, unmuteAll,
-    removeUser, addParticipants, saveMinutes, addRecording, endMeeting, setRecordingState,
+    removeUser, addParticipants, saveMinutes, addRecording, endMeeting,
   } = useMeetingRoom(meetingId);
 
   const isOrganizer = !!user?.uid && room.organizerId === user.uid;
@@ -210,20 +207,10 @@ export default function VideoCallScreen() {
   const [callStatus, setCallStatus]     = useState<string>('connecting');
   const [showQuality, setShowQuality]   = useState(false);
   const [switchingCamera, setSwitchingCamera] = useState(false);
-
-  // Live other-party info (name/photo/presence) + Firestore call status, used
-  // for the "Ringing"/"Calling" label and to show the callee's photo. Only
-  // meaningful for 1:1 calls (not the meeting-room mode).
-  const [liveName,   setLiveName]   = useState<string | null>(null);
-  const [livePhoto,  setLivePhoto]  = useState<string | null>(null);
-  const [livePhone,  setLivePhone]  = useState<string | null>(null);
-  const [peerOnline, setPeerOnline] = useState<boolean | null>(null);
-  const [remoteCallStatus, setRemoteCallStatus] = useState<string>(isOutgoing ? 'ringing' : 'accepted');
-  // Shared answer timestamp (ms). Both sides derive 1:1 call duration from this
-  // so caller and receiver always show the exact same elapsed time.
-  const [startTimeMs, setStartTimeMs] = useState<number | null>(null);
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [showCameraToggle, setShowCameraToggle] = useState(false);
+  // Incremented on every camera flip to force RTCView to remount with the new track
+  const [flipKey, setFlipKey] = useState(0);
 
   // Screen share
   const [screenSharing, setScreenSharing] = useState(false);
@@ -280,7 +267,6 @@ export default function VideoCallScreen() {
   const { initiateCall: initiateOutgoingCall } = useOutgoingCall();
   const { answerCall } = useIncomingCallAnswer();
   const { contacts } = useContacts();
-  const { resolveName } = usePhoneBook();
 
   // The actual stream that should be displayed locally
   const activeLocalStream = screenSharing && screenShareStreamRef.current 
@@ -301,30 +287,14 @@ export default function VideoCallScreen() {
   }, [networkQuality]);
 
   // ── Contact build (other party) ─────────────────────────────────
-  // Prefer live Firestore name/photo, falling back to the navigation params.
-  const otherContact: Contact & { photoUrl: string | null } = useMemo(() => {
-    const rawName = (liveName ?? otherParty.displayName ?? '').trim();
-    // Resolve against this device's phone book so a saved contact's name shows.
-    const phoneToResolve = livePhone
-      ?? (/^\+?[0-9\s()-]{6,}$/.test(rawName) ? rawName : null);
-    const nameRule = phoneToResolve
-      ? resolveName(normalizePhone(phoneToResolve), rawName || 'Unknown')
-      : (rawName || 'Unknown');
-    const displayName = meetingTitleFallback(routeMeetingTitle, nameRule || otherParty.displayName);
-    const parts = (nameRule || 'XX').split(/\s+/).filter(Boolean);
-    const initials = parts.length >= 2
-      ? (parts[0][0] + parts[1][0]).toUpperCase()
-      : (parts[0] || 'XX').slice(0, 2).toUpperCase();
-    return {
-      id: parseInt(otherParty.userId) || -2,
-      name: displayName,
-      avatar: initials,
-      color: COLORS.blue,
-      status: 'online',
-      lastMsg: '', time: '', unread: 0,
-      photoUrl: livePhoto ?? otherParty.photoUrl ?? null,
-    };
-  }, [otherParty, routeMeetingTitle, liveName, livePhoto, livePhone, resolveName]);
+  const otherContact: Contact = useMemo(() => ({
+    id: parseInt(otherParty.userId) || -2,
+    name: meetingTitleFallback(routeMeetingTitle, otherParty.displayName),
+    avatar: (otherParty.displayName || 'XX').split(' ').map((n: string) => n[0]).join('').toUpperCase(),
+    color: COLORS.blue,
+    status: 'online',
+    lastMsg: '', time: '', unread: 0,
+  }), [otherParty, routeMeetingTitle]);
 
   const [participants, setParticipants] = useState<Participant[]>([
     { id: `remote-${otherParty.userId}`, contact: otherContact, isLocal: false },
@@ -336,54 +306,33 @@ export default function VideoCallScreen() {
   const remoteStreamRef = useRef<any>(null);
   useEffect(() => { remoteStreamRef.current = remoteStream; }, [remoteStream]);
 
-  // ── Live subscribe to the other party's user doc (1:1 calls only) ───────────
-  useEffect(() => {
-    if (isMeeting || !otherParty.userId) return;
-    const fsDb = db as ReturnType<typeof firestore>;
-    const unsub = fsDb.collection('users').doc(otherParty.userId).onSnapshot((snap) => {
-      if (!snap.exists()) return;
-      const data = snap.data() ?? {};
-      if (typeof data.displayName === 'string' && data.displayName.trim()) {
-        setLiveName(data.displayName.trim());
-      }
-      if (typeof data.photoURL === 'string' && data.photoURL) {
-        setLivePhoto(data.photoURL);
-      }
-      if (typeof data.phone === 'string' && data.phone) {
-        setLivePhone(data.phone);
-      }
-      setPeerOnline(!!data.online);
-    }, (err) => {
-      console.warn('[VideoCall] user presence subscription failed:', err);
-    });
-    return () => unsub();
-  }, [isMeeting, otherParty.userId]);
-
   // ── Fetch meeting schedule (end time for countdown) ─────────────
   useEffect(() => {
     if (!isMeeting || !meetingId) return;
-    const unsub = firestore().collection('meetings').doc(meetingId).onSnapshot(doc => {
-      const data = doc.data();
-      if (!data) return;
-      if (data.endDate) setMeetingEndTime(data.endDate.toDate());
-      if (data.date)    setMeetingStartTime(data.date.toDate());
-
-      // Meeting ended for all — navigate everyone (including non-organizers) away
-      if (data.endedAt && data.isActive === false) {
-        if (isOrganizer) {
-          // Organizer sees the report
-          if (!reportOpen) buildAndShowReport(data).catch(() => {});
-        } else {
-          // Participants get a brief alert then go back to Calendar
-          Alert.alert(
-            'Meeting ended',
-            'The organizer has ended this meeting.',
-            [{ text: 'OK', onPress: () => navigation.goBack() }],
-            { cancelable: false }
-          );
+    // Poll via REST on mount, then refresh on socket meeting:updated events.
+    const fetchMeeting = async () => {
+      try {
+        const res = await endpoints.getMeeting(meetingId);
+        if (!res.ok) return;
+        const data = res.data.state as any;
+        if (data?.endDate) setMeetingEndTime(new Date(data.endDate));
+        if (data?.date)    setMeetingStartTime(new Date(data.date));
+        if (data?.endedAt && data?.isActive === false) {
+          if (isOrganizer) {
+            if (!reportOpen) buildAndShowReport(data).catch(() => {});
+          } else {
+            Alert.alert(
+              'Meeting ended',
+              'The organizer has ended this meeting.',
+              [{ text: 'OK', onPress: () => navigation.goBack() }],
+              { cancelable: false }
+            );
+          }
         }
-      }
-    });
+      } catch {}
+    };
+    void fetchMeeting();
+    const unsub = socketClient.subscribe('meeting:updated', fetchMeeting);
     return () => unsub();
   }, [isMeeting, meetingId, isOrganizer]); // eslint-disable-line
 
@@ -419,17 +368,12 @@ export default function VideoCallScreen() {
     if (prev.length > 0) {
       const newlyJoined = current.filter(id => !prev.includes(id) && id !== user?.uid);
       if (newlyJoined.length > 0 && minutesText) {
-        // Broadcast a recap to room chat so newcomers see prior context
-        firestore()
-          .collection('meetings').doc(meetingId).collection('messages')
-          .add({
-            senderId: 'system',
-            senderName: 'Meeting Recap',
-            text: `📋 Recap of what was discussed before you joined:\n\n${minutesText}`,
-            isSystem: true,
-            timestamp: firestore.FieldValue.serverTimestamp(),
-          })
-          .catch(err => console.warn('[VideoCall] recap post failed:', err));
+        // Broadcast a recap via socket meeting:message so newcomers see prior context
+        socketClient.emit('meeting:message', {
+          meetingId,
+          text: `📋 Recap of what was discussed before you joined:\n\n${minutesText}`,
+          isSystem: true,
+        });
       }
     }
     prevJoinedRef.current = current;
@@ -440,11 +384,11 @@ export default function VideoCallScreen() {
     const setupCall = async () => {
       try {
         if (Platform.OS !== 'web' && !permission?.granted) await requestPermission();
+        await initializePeerConnection(true);
 
         // Meeting joins don't use a calls/{callId} document — skip all calls
         // Firestore ops to avoid the permission-denied error.
         if (isMeeting) {
-          await initializePeerConnection(true);
           setCallStatus('connected');
           timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
 
@@ -469,48 +413,37 @@ export default function VideoCallScreen() {
           return;
         }
 
-        // ── 1:1 call ─────────────────────────────────────────────
-        // The WebRTC offer/answer negotiation is fully managed by useOutgoingCall
-        // (caller) and useIncomingCallAnswer (callee) — those hooks already called
-        // initializePeerConnection + createOffer/createAnswer before navigating here.
-        // This effect only reads persisted duration and listens for UI-level events.
-        const fsDb = db as ReturnType<typeof firestore>;
-        const callRef = fsDb.collection('calls').doc(callId);
-        const callSnapshot = await callRef.get();
-        const callData = callSnapshot.data();
-
-        if (callData?.lastDuration) setDuration(callData.lastDuration);
-        else if (callData?.startedAt) {
-          const startTime = callData.startedAt.toDate().getTime();
-          setDuration(Math.max(0, Math.floor((Date.now() - startTime) / 1000)));
+        // Duration is tracked locally. Use SignalingService for WebRTC signaling.
+        if (isOutgoing) {
+          const offer = await createOffer(true);
+          await SignalingService.saveOffer(callId, offer);
+          unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, (data) => {
+            if (data?.answer && !remoteStreamRef.current) {
+              setRemoteAnswer(data.answer).catch(console.error);
+            }
+            if (data?.iceCandidates) {
+              data.iceCandidates.forEach((candidate: any) => {
+                addIceCandidate(candidate).catch(console.error);
+              });
+            }
+            if (data?.status === 'ended') navigation.goBack();
+          });
+        } else {
+          unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, async (data) => {
+            if (data?.offer && !remoteStreamRef.current) {
+              const answer = await createAnswer(data.offer);
+              await SignalingService.saveAnswer(callId, answer);
+            }
+            if (data?.iceCandidates) {
+              data.iceCandidates.forEach((candidate: any) => {
+                addIceCandidate(candidate).catch(console.error);
+              });
+            }
+            if (data?.status === 'ended') navigation.goBack();
+          });
         }
 
-        if (callData?.localIsMain === true) {
-          setParticipants([
-            { id: 'local', contact: LOCAL_CONTACT, isLocal: true },
-            { id: `remote-${otherParty.userId}`, contact: otherContact, isLocal: false },
-          ]);
-        }
-
-        // Listen only for UI-level events — NOT for offer/answer (the hooks handle that)
-        unsubscribeCallRef.current = callRef.onSnapshot((snapshot) => {
-          const data = snapshot.data();
-          if (data?.videoUpgradeRequest && data.videoUpgradeRequest.requestedBy !== user?.uid) {
-            setShowCameraToggle(true);
-          }
-          if (typeof data?.status === 'string') setRemoteCallStatus(data.status);
-          const st = data?.startTime ?? data?.startedAt;
-          if (st) {
-            const ms = typeof st.toDate === 'function' ? st.toDate().getTime() : new Date(st).getTime();
-            if (!Number.isNaN(ms)) setStartTimeMs(ms);
-          }
-          if (data?.status === 'ended' || data?.status === 'rejected' || data?.status === 'missed') {
-            navigation.goBack();
-          }
-        });
-
-        // Duration timer is driven by a separate effect off the shared
-        // startTime (1:1) or on join (meetings).
+        timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
       } catch (error) {
         console.error('[VideoCall] Setup failed:', error);
         setCallStatus('failed');
@@ -530,36 +463,6 @@ export default function VideoCallScreen() {
     if (connectionState === 'connected') startNetworkMonitoring();
   }, [connectionState, startNetworkMonitoring]);
 
-  // ── Duration timer ──────────────────────────────────────────────
-  // Meetings start counting on join. 1:1 calls derive the duration from the
-  // SHARED startTime written when the callee answered, so both the caller and
-  // the receiver always show identical elapsed time, and nothing counts while
-  // the call is still ringing.
-  const videoConnected = isMeeting ? callStatus === 'connected' : startTimeMs != null;
-  useEffect(() => {
-    if (isMeeting) {
-      // Local incrementing timer for meetings (joined immediately).
-      if (!timerRef.current) {
-        timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
-      }
-      return () => {
-        if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-      };
-    }
-    // 1:1 path — compute from the shared startTime.
-    if (startTimeMs == null) {
-      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-      setDuration(0);
-      return;
-    }
-    const tick = () => setDuration(Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000)));
-    tick();
-    timerRef.current = setInterval(tick, 1000);
-    return () => {
-      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    };
-  }, [isMeeting, startTimeMs]);
-
   // ── React to being muted by organizer ───────────────────────────
   useEffect(() => {
     if (!isMeeting || !user?.uid) return;
@@ -574,11 +477,7 @@ export default function VideoCallScreen() {
   useEffect(() => {
     const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
       const isLocalMain = participants[0]?.isLocal || false;
-      const fsDbMinimize = db as ReturnType<typeof firestore>;
-      fsDbMinimize.collection('calls').doc(callId)
-        .update({ localIsMain: isLocalMain })
-        .catch(() => {});
-
+      // localIsMain is a UI hint — no persistence needed on backend path.
       minimizeCall({
         callId,
         displayName: otherParty.displayName,
@@ -597,6 +496,33 @@ export default function VideoCallScreen() {
     });
     return () => backHandler.remove();
   }, [duration, callId, isOutgoing, otherParty, participants, minimizeCall, navigation, activeLocalStream]);
+
+  // ── iOS: minimize on background / lock screen ───────────────────
+  // On iOS there is no hardware back button, so the Android handler above
+  // never fires when the user locks the phone or swipes home. AppState
+  // 'background'/'inactive' catches both cases.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'background' || nextState === 'inactive') {
+        const isLocalMain = participants[0]?.isLocal || false;
+        minimizeCall({
+          callId,
+          displayName: otherParty.displayName,
+          avatar: otherParty.displayName.split(' ').map((n: string) => n[0]).join('').toUpperCase(),
+          color: COLORS.blue,
+          duration: fmt(duration),
+          isVideo: true,
+          isOutgoing,
+          localStream: activeLocalStream,
+          remoteStream,
+          localIsMain: isLocalMain,
+          otherParty,
+        });
+        navigation.goBack();
+      }
+    });
+    return () => sub.remove();
+  }, [duration, callId, isOutgoing, otherParty, participants, minimizeCall, navigation, activeLocalStream, remoteStream]);
 
   useEffect(() => { updateDuration(fmt(duration)); }, [duration]); // eslint-disable-line
 
@@ -632,6 +558,8 @@ export default function VideoCallScreen() {
       const facingMode = newFacing === 'front' ? 'user' : 'environment';
       await switchCameraWebRTC(facingMode);
       setFacing(newFacing);
+      // Bump key so the local StreamTile remounts with the new video track
+      setFlipKey((k) => k + 1);
     } catch (err) {
       console.error('[VideoCall] flip failed:', err);
     } finally {
@@ -742,22 +670,18 @@ export default function VideoCallScreen() {
       try {
         setIsRecording(false);
         if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
-        setRecordingState(false).catch(() => {});
         await audioRecorder.stop();
         const uri = audioRecorder.uri;
         if (uri) {
           const newPath = `${documentDirectory}Meeting_${meetingId ?? callId}_${Date.now()}.m4a`;
           await copyAsync({ from: uri, to: newPath });
           try {
-            const filename = newPath.split('/').pop() ?? `recording_${Date.now()}.m4a`;
-            const storageRef = storage().ref(`meetings/${meetingId ?? callId}/${filename}`);
-            await storageRef.putFile(newPath);
-            const url = await storageRef.getDownloadURL();
+            // Recording upload via S3 presigned URLs (media service follow-up task).
+            const url = newPath; // local URI until media upload is wired
             await addRecording({ url, durationMs: recordingMs });
             lastRecordingUrlRef.current = url;
           } catch (upErr) {
-            console.warn('[VideoCall] Upload failed, saving local only:', upErr);
-            Alert.alert('Saved Locally', `Recording saved locally but not uploaded.`);
+            console.warn('[VideoCall] Recording registration failed:', upErr);
           }
           transcribeRecording(newPath).catch(() => {});
         }
@@ -777,8 +701,6 @@ export default function VideoCallScreen() {
       setIsRecording(true);
       setRecordingMs(0);
       recordingTimerRef.current = setInterval(() => setRecordingMs(ms => ms + 1000), 1000);
-      // Notify all participants via Firestore
-      setRecordingState(true).catch(() => {});
     } catch (err) {
       console.error('[VideoCall] start recording failed:', err);
     }
@@ -811,17 +733,10 @@ export default function VideoCallScreen() {
       setMinutesText(text);
       if (isMeeting) {
         await saveMinutes(text);
-        // Auto-post summary to chat if this is a meeting
+        // Auto-post summary to the in-meeting chat via the backend.
         if (meetingId) {
-          firestore()
-            .collection('meetings').doc(meetingId).collection('messages')
-            .add({
-              senderId: 'system',
-              senderName: 'Meeting Minutes',
-              text: `📋 Meeting minutes generated:\n\n${text}`,
-              isSystem: true,
-              timestamp: firestore.FieldValue.serverTimestamp(),
-            })
+          endpoints
+            .sendMeetingMessage(meetingId, { text: `📋 Meeting minutes generated:\n\n${text}` })
             .catch(() => {});
         }
       }
@@ -934,17 +849,23 @@ export default function VideoCallScreen() {
         });
       });
 
-      // Merge with Firestore meeting doc if available
+      // Merge with the backend meeting state if available. The backend returns
+      // ISO date strings; coerce them with `new Date(...)`.
+      const toDate = (v: unknown): Date | null => {
+        if (!v) return null;
+        const d = new Date(v as string);
+        return Number.isNaN(d.getTime()) ? null : d;
+      };
       let startedAt: Date | null = sessionStartRef.current;
       let endedAt: Date | null = null;
-      if (meetingDoc) {
-        if (meetingDoc.date?.toDate) startedAt = meetingDoc.date.toDate();
-        if (meetingDoc.endedAt?.toDate) endedAt = meetingDoc.endedAt.toDate();
-      } else if (meetingId) {
-        const snap = await firestore().collection('meetings').doc(meetingId).get();
-        const data = snap.data();
-        if (data?.date?.toDate) startedAt = data.date.toDate();
-        if (data?.endedAt?.toDate) endedAt = data.endedAt.toDate();
+      let doc = meetingDoc;
+      if (!doc && meetingId) {
+        const res = await endpoints.getMeeting(meetingId);
+        if (res.ok) doc = res.data.state;
+      }
+      if (doc) {
+        startedAt = toDate((doc as any).date) ?? startedAt;
+        endedAt = toDate((doc as any).endedAt);
       }
 
       const totalSeconds = startedAt
@@ -1018,59 +939,24 @@ export default function VideoCallScreen() {
 
   // ── Actions ─────────────────────────────────────────────────────
   const doHangUp = useCallback(async (endForAll: boolean) => {
-    // Only update the calls document for 1:1 calls — meeting joins don't have one
     if (!isMeeting) {
       try {
-        const fsDb = db as ReturnType<typeof firestore>;
-        const callRef = fsDb.collection('calls').doc(callId);
-
-        await callRef.update({
-          status: 'ended', endedAt: new Date(), duration,
-        });
-
-        // Save call history for both parties
-        const callSnap = await callRef.get();
-        const callData = callSnap.data();
-        if (callData) {
-          const durationVal = duration > 0 ? duration : null;
-          const status = duration > 0 ? 'completed' : 'missed';
-          await SignalingService.saveToCallHistory(
-            callData.caller.userId, callId,
-            callData.callee, callData.type,
-            'outgoing', status, durationVal,
-          );
-          await SignalingService.saveToCallHistory(
-            callData.callee.userId, callId,
-            callData.caller, callData.type,
-            'incoming', status, durationVal,
-          );
-        }
+        await endpoints.endCall(callId);
       } catch (err) {
         console.warn('[VideoCall] end call update failed:', err);
       }
     }
 
     if (isMeeting && meetingId) {
-      // Mark local user left
       const me = user?.uid && attendanceRef.current.get(user.uid);
       if (me) me.leftAt = new Date();
 
       if (endForAll && isOrganizer) {
         try {
           await endMeeting();
-          await firestore().collection('meetings').doc(meetingId).update({
-            isActive: false,
-            endedAt: firestore.FieldValue.serverTimestamp(),
-          });
         } catch (e) {
-          console.warn('[VideoCall] endMeeting update failed:', e);
+          console.warn('[VideoCall] endMeeting failed:', e);
         }
-      } else {
-        try {
-          await firestore().collection('meetings').doc(meetingId).update({
-            isActive: true,
-          });
-        } catch {}
       }
     }
 
@@ -1086,15 +972,15 @@ export default function VideoCallScreen() {
           await copyAsync({ from: uri, to: newPath });
           let uploadedUrl: string | null = null;
           try {
-            const filename = newPath.split('/').pop() ?? `recording_${Date.now()}.m4a`;
-            const storageRef = storage().ref(`meetings/${meetingId ?? callId}/${filename}`);
-            await storageRef.putFile(newPath);
-            uploadedUrl = await storageRef.getDownloadURL();
+            // Recording upload uses the S3 media service (presigned URL path).
+            // The `mediaService` will be wired here in the media follow-up task.
+            // For now, local URI is passed to addRecording and transcribeRecording.
+            uploadedUrl = newPath;
             const elapsed = recordingMs;
             await addRecording({ url: uploadedUrl, durationMs: elapsed });
             lastRecordingUrlRef.current = uploadedUrl;
           } catch (upErr) {
-            console.warn('[VideoCall] upload on hangup failed:', upErr);
+            console.warn('[VideoCall] recording registration failed:', upErr);
           }
           // Auto-generate minutes from the recording — don't await so we don't
           // block navigation; transcribeRecording sets isSummarizing and saves
@@ -1114,7 +1000,7 @@ export default function VideoCallScreen() {
 
     cleanupWebRTC();
     navigation.goBack();
-  }, [callId, duration, isMeeting, meetingId, isOrganizer, endMeeting, user?.uid, isRecording,
+  }, [callId, isMeeting, meetingId, isOrganizer, endMeeting, user?.uid, isRecording,
       audioRecorder, recordingMs, addRecording, transcribeRecording, cleanupWebRTC, navigation]);
 
   const hangUp = useCallback(() => {
@@ -1147,12 +1033,7 @@ export default function VideoCallScreen() {
 
   const switchToAudio = async () => {
     if (timerRef.current) clearInterval(timerRef.current);
-    if (!isMeeting) {
-      try {
-        const fsDb = db as ReturnType<typeof firestore>;
-        await fsDb.collection('calls').doc(callId).update({ lastDuration: duration });
-      } catch {}
-    }
+    // Duration is tracked locally; no persistence needed on backend path.
     cleanupWebRTC();
     navigation.replace('AudioCall', { callId, isOutgoing, otherParty, meetingId: meetingId ?? undefined });
   };
@@ -1219,25 +1100,9 @@ export default function VideoCallScreen() {
       : 'Time is up'
     : null;
 
-  // 1:1 ringing/calling label (mirrors AudioCallScreen):
-  //  connected → duration · participants; outgoing & ringing → Ringing/Calling
-  //  depending on whether the callee is online; accepted → Connecting…
-  const oneToOneStatusLabel = (() => {
-    if (startTimeMs != null) return fmt(duration);
-    if (callStatus === 'failed' || callStatus === 'disconnected'
-        || remoteCallStatus === 'ended' || remoteCallStatus === 'rejected'
-        || remoteCallStatus === 'missed') return 'Call ended';
-    if (isOutgoing) {
-      return peerOnline ? 'Ringing…' : 'Calling…';
-    }
-    return 'Connecting…';
-  })();
-
   const topStatusText = isMeeting
     ? `${fmt(duration)} · ${joinedCount} participant${joinedCount === 1 ? '' : 's'}`
-    : (videoConnected
-        ? `${fmt(duration)} · ${participants.length} participant${participants.length === 1 ? '' : 's'}`
-        : oneToOneStatusLabel);
+    : `${fmt(duration)} · ${participants.length} participant${participants.length === 1 ? '' : 's'}`;
 
   return (
     <View style={styles.root}>
@@ -1251,6 +1116,7 @@ export default function VideoCallScreen() {
             stream={activeLocalStream}
             mirror={!screenSharing && facing === 'front'}
             muted
+            key={`local-${flipKey}`}
             fallback={canShowCamera
               ? <CameraTile facing={facing} />
               : <View style={[StyleSheet.absoluteFill, { backgroundColor: '#0a1a30' }]} />}
@@ -1263,19 +1129,10 @@ export default function VideoCallScreen() {
         )}
         {!mainP.isLocal && !remoteStream && (
           <View style={styles.mainAvatarOverlay}>
-            <Avatar
-              initials={mainP.contact.avatar}
-              color={mainP.contact.color}
-              size={120}
-              imageUrl={(mainP.contact as any).photoUrl ?? null}
-            />
+            <Avatar initials={mainP.contact.avatar} color={mainP.contact.color} size={120} />
             <AppText fixedColor style={styles.mainName}>{mainP.contact.name}</AppText>
             <AppText fixedColor style={styles.mainSub}>
-              {isRecording
-                ? `● Recording ${fmt(Math.floor(recordingMs / 1000))}`
-                : (isMeeting
-                    ? `In call · ${fmt(duration)}`
-                    : (videoConnected ? `In call · ${fmt(duration)}` : oneToOneStatusLabel))}
+              {isRecording ? `● Recording ${fmt(Math.floor(recordingMs / 1000))}` : `In call · ${fmt(duration)}`}
             </AppText>
           </View>
         )}
@@ -1330,16 +1187,6 @@ export default function VideoCallScreen() {
           <AppIcon name="people-outline" size={16} color="#fff" fixedColor />
           <AppText fixedColor style={styles.aloneText}>
             You're the only one here. Share the meeting link to invite others.
-          </AppText>
-        </View>
-      )}
-
-      {/* ── Recording indicator for non-organizer participants ── */}
-      {isMeeting && !isOrganizer && room.isRecording && (
-        <View style={styles.recordingNoticeBanner}>
-          <View style={styles.recordingNoticeDot} />
-          <AppText fixedColor style={styles.recordingNoticeText}>
-            This meeting is being recorded
           </AppText>
         </View>
       )}
@@ -1499,6 +1346,21 @@ export default function VideoCallScreen() {
           <AppText fixedColor style={styles.controlLabel}>Audio only</AppText>
         </View>
 
+        {/* Camera on/off toggle — clearly labelled so it's distinct from screen share */}
+        <View style={styles.controlCol}>
+          <TouchableOpacity
+            style={[styles.controlBtn, !cameraEnabled && styles.controlBtnActive]}
+            onPress={() => {
+              const next = !cameraEnabled;
+              setCameraEnabled(next);
+              toggleVideo(next);
+            }}
+          >
+            <AppIcon name={cameraEnabled ? 'videocam-outline' : 'videocam-off-outline'} size={24} color="#fff" fixedColor />
+          </TouchableOpacity>
+          <AppText fixedColor style={styles.controlLabel}>{cameraEnabled ? 'Camera' : 'Cam off'}</AppText>
+        </View>
+
         <View style={styles.controlCol}>
           <TouchableOpacity style={styles.hangUpBtn} onPress={hangUp}>
             <AppIcon name="call" size={28} color="#fff" fixedColor />
@@ -1647,7 +1509,7 @@ export default function VideoCallScreen() {
 
               <View style={styles.reportActions}>
                 <TouchableOpacity
-                  style={[styles.reportBtn, { backgroundColor: 'rgba(30,156,240,0.15)', borderColor: 'rgba(30,156,240,0.35)' }]}
+                  style={[styles.reportBtn, { backgroundColor: 'rgba(9,178,238,0.15)', borderColor: 'rgba(9,178,238,0.35)' }]}
                   onPress={exportMinutesPdf}
                   disabled={!minutesText}
                 >
@@ -1749,8 +1611,8 @@ const styles = StyleSheet.create({
     gap: 3,
   },
   sideBtnActive: {
-    backgroundColor: 'rgba(30,156,240,0.35)',
-    borderColor: 'rgba(30,156,240,0.55)',
+    backgroundColor: 'rgba(9,178,238,0.35)',
+    borderColor: 'rgba(9,178,238,0.55)',
   },
   sideBtnDisabled: { opacity: 0.6 },
 
@@ -1822,37 +1684,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 8,
     paddingVertical: 10, paddingHorizontal: 14,
     borderRadius: RADIUS.md,
-    backgroundColor: 'rgba(30,156,240,0.72)',
+    backgroundColor: 'rgba(9,178,238,0.72)',
     ...SHADOW.card,
   },
   aloneText: { flex: 1, fontSize: 13, fontWeight: '600', color: '#fff' },
-
-  recordingNoticeBanner: {
-    position: 'absolute',
-    top: Platform.OS === 'ios' ? 140 : 120,
-    alignSelf: 'center',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    backgroundColor: 'rgba(0,0,0,0.72)',
-    paddingVertical: 7,
-    paddingHorizontal: 14,
-    borderRadius: RADIUS.full,
-    borderWidth: 1,
-    borderColor: 'rgba(239,68,68,0.5)',
-  },
-  recordingNoticeDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#ef4444',
-  },
-  recordingNoticeText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#fff',
-    letterSpacing: 0.2,
-  },
 
   summarizingOverlay: {
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
@@ -1891,7 +1726,7 @@ const styles = StyleSheet.create({
   reportContent: { paddingHorizontal: 18, paddingBottom: 40, paddingTop: 6 },
   reportMeta: {
     borderRadius: RADIUS.lg, padding: 14, gap: 8,
-    borderWidth: 1, borderColor: 'rgba(30,156,240,0.20)',
+    borderWidth: 1, borderColor: 'rgba(9,178,238,0.20)',
   },
   reportMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   reportMetaText: { fontSize: 13 },

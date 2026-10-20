@@ -17,23 +17,13 @@ const OVERLAY_WIDTH = 120;
 const OVERLAY_HEIGHT = 180;
 const EDGE_PADDING = 16;
 
-// Lazily resolve RTCView for native video rendering.
-// IMPORTANT: @livekit/react-native-webrtc constructs `new NativeEventEmitter()`
-// at the top of its module. If required during app startup (before the native
-// bridge is ready) WebRTCModule is null and it throws, crashing the whole app.
-// So we defer the require to first render, by which time the bridge is ready.
-let _rtcViewResolved = false;
+// Try to load RTCView for native video rendering
 let RTCView: any = null;
-function getRTCView(): any {
-  if (_rtcViewResolved) return RTCView;
-  _rtcViewResolved = true;
-  if (Platform.OS === 'web') return RTCView;
-  try {
-    RTCView = require('@livekit/react-native-webrtc').RTCView;
-  } catch {
-    RTCView = null;
-  }
-  return RTCView;
+try {
+  const rtc = require('@livekit/react-native-webrtc');
+  RTCView = rtc.RTCView;
+} catch {
+  RTCView = null;
 }
 
 // Video tile component for rendering streams
@@ -67,10 +57,9 @@ const VideoTile = React.memo(({ stream, mirror }: { stream: any; mirror?: boolea
     });
   }
 
-  const RTCViewComp = getRTCView();
-  if (RTCViewComp) {
+  if (RTCView) {
     return (
-      <RTCViewComp
+      <RTCView
         key={stream.id} // Force remount when stream changes
         streamURL={stream.toURL()}
         style={StyleSheet.absoluteFill}

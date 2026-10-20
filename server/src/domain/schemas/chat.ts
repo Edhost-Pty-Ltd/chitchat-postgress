@@ -9,7 +9,59 @@ export const messageTypeSchema = z.enum([
   'location',
   'system',
   'catalog',
+  'poll',
+  'order',
+  'contact',
 ]);
+
+// ─── Embedded card payloads (poll / order / contact) ─────────────────────────
+export const pollPayloadSchema = z
+  .object({
+    question: z.string().min(1).max(512),
+    options: z
+      .array(z.object({ id: z.string().min(1).max(64), text: z.string().min(1).max(256) }).strict())
+      .min(2)
+      .max(12),
+    multiple: z.boolean(),
+  })
+  .strict();
+
+export const orderPayloadSchema = z
+  .object({
+    items: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1).max(128),
+            name: z.string().min(1).max(256),
+            price: z.string().max(64),
+            imageObjectKey: z.string().max(512).nullable().optional(),
+            quantity: z.number().int().positive().max(9999),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(200),
+    total: z.string().max(64).nullable().optional(),
+    currency: z.string().max(16).default(''),
+  })
+  .strict();
+
+const sharedContactSchema = z
+  .object({
+    name: z.string().max(256),
+    phone: z.string().max(64),
+    userId: z.string().max(128).nullable().optional(),
+    registered: z.boolean().optional(),
+    photoObjectKey: z.string().max(512).nullable().optional(),
+  })
+  .strict();
+
+export const contactPayloadSchema = sharedContactSchema
+  .extend({ contacts: z.array(sharedContactSchema).max(200).optional() })
+  .strict();
+
+export const votePollSchema = z.object({ optionId: z.string().min(1).max(64) }).strict();
 
 export const createChatSchema = z
   .object({
@@ -45,6 +97,9 @@ export const sendMessageSchema = z
     catalogItem: z.unknown().optional(),
     replyTo: z.unknown().optional(),
     subtype: z.string().max(64).nullable().optional(),
+    poll: pollPayloadSchema.optional(),
+    order: orderPayloadSchema.optional(),
+    contact: contactPayloadSchema.optional(),
   })
   .strict();
 

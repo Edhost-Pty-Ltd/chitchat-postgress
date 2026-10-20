@@ -39,6 +39,13 @@ export function createGateway(httpServer: HttpServer): IOServer {
     const token = socket.handshake.auth?.token as string | undefined;
     try {
       socket.identity = await verifyToken(token);
+      // Anonymous link-request sessions only use REST polling, never sockets.
+      if (socket.identity.isAnonymous) {
+        const e = new Error('Sign in to connect') as Error & { data?: unknown };
+        e.data = { code: 'AUTH_ANONYMOUS_NOT_ALLOWED' };
+        next(e);
+        return;
+      }
       next();
     } catch (err) {
       if (err instanceof AuthError) {
