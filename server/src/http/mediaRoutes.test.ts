@@ -150,6 +150,73 @@ describe('Slice 6 media', () => {
     expect(res.statusCode).toBe(200);
     const urls = res.json().urls;
     expect(urls['avatars/d1/pic.jpg']).toBeTruthy();
+    // A stranger (no shared chat) must not get another user's avatar when that
+    // user's default profilePhoto privacy is 'Contacts' (FINDING-1 regression).
     expect(urls['avatars/someoneelse/pic.jpg']).toBeUndefined();
+  });
+
+  it('honors profilePhoto=Everyone and denies when Nobody (FINDING-1, Req 4.9)', async () => {
+    if (guard()) return;
+    await app!.inject({ method: 'GET', url: '/me', headers: auth('owner') });
+    await app!.inject({ method: 'GET', url: '/me', headers: auth('stranger') });
+
+    // Owner opens their photo to everyone → a stranger can read it.
+    await app!.inject({
+      method: 'PUT',
+      url: '/me/privacy',
+      headers: auth('owner'),
+      payload: {
+        lastSeen: 'Contacts', profilePhoto: 'Everyone', statusVisibility: 'Everyone',
+        groups: 'Contacts', calls: 'Contacts', readReceipts: true, disappearingMessages: true,
+      },
+    });
+    let res = await app!.inject({
+      method: 'POST', url: '/media/download-url', headers: auth('stranger'),
+      payload: { objectKeys: ['avatars/owner/pic.jpg'] },
+    });
+    expect(res.json().urls['avatars/owner/pic.jpg']).toBeTruthy();
+
+    // Owner locks it to nobody → the stranger is denied, but the owner still reads it.
+    await app!.inject({
+      method: 'PUT',
+      url: '/me/privacy',
+      headers: auth('owner'),
+      payload: {
+        lastSeen: 'Contacts', profilePhoto: 'Nobody', statusVisibility: 'Everyone',
+        groups: 'Contacts', calls: 'Contacts', readReceipts: true, disappearingMessages: true,
+      },
+    });
+    res = await app!.inject({
+      method: 'POST', url: '/media/download-url', headers: auth('stranger'),
+      payload: { objectKeys: ['avatars/owner/pic.jpg'] },
+    });
+    expect(res.json().urls['avatars/owner/pic.jpg']).toBeUndefined();
+
+    res = await app!.inject({
+      method: 'POST', url: '/media/download-url', headers: auth('owner'),
+      payload: { objectKeys: ['avatars/owner/pic.jpg'] },
+    });
+    expect(res.json().urls['avatars/owner/pic.jpg']).toBeTruthy();
+  });
+
+  it('rejects path-traversal and malformed keys (FINDING-2)', async () => {
+    if (guard()) return;
+    await app!.inject({ method: 'GET', url: '/me', headers: auth('t1') });
+    const res = await app!.inject({
+      method: 'POST', url: '/media/download-url', headers: auth('t1'),
+      payload: {
+        objectKeys: [
+          'avatars/t1/../someoneelse/pic.jpg',
+          'avatars//pic.jpg',
+          'secrets/t1/key.pem',
+          'avatars/t1/pic.jpg', // the one legitimate key
+        ],
+      },
+    });
+    const urls = res.json().urls;
+    expect(urls['avatars/t1/../someoneelse/pic.jpg']).toBeUndefined();
+    expect(urls['avatars//pic.jpg']).toBeUndefined();
+    expect(urls['secrets/t1/key.pem']).toBeUndefined();
+    expect(urls['avatars/t1/pic.jpg']).toBeTruthy();
   });
 });

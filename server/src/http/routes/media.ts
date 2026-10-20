@@ -13,8 +13,11 @@ import {
   MediaValidationError,
   type MediaCategory,
 } from '../../media/presign.js';
-import { isMember } from '../../db/repositories/chats.js';
+import { isMember, sharesChatWith } from '../../db/repositories/chats.js';
 import { isMeetingParticipant } from '../../db/repositories/meetings.js';
+import { getPrivacySettings } from '../../db/repositories/privacy.js';
+import { canViewStatusMediaKey } from '../../db/repositories/statuses.js';
+import { isVisibleTo } from '../../domain/privacy.js';
 
 const UPLOAD_LIMIT = 60; // upload-url requests per window
 const UPLOAD_WINDOW_SEC = 60;
@@ -45,29 +48,64 @@ async function authorizeWrite(
   throw Errors.forbidden('Unauthorized media category');
 }
 
+// Per-category object-key shapes. Keys are authorized by matching one of these
+// exactly, which also rejects path traversal ('..'), empty segments, and
+// unexpected prefixes before any authorization decision (FINDING-2).
+//   avatars/{ownerId}/{file}
+//   status/{ownerId}/{file}
+//   chats/{chatId}/(media|voice)/{file}
+//   groups/{chatId}/{file}
+//   meetings/{meetingId}/{file}
+const SEG = '[\\w.-]+'; // no slashes, no '..' (a bare '..' can't match \w.- plus length, but we also reject below)
+const KEY_PATTERNS = {
+  avatars: new RegExp(`^avatars/(${SEG})/${SEG}$`),
+  status: new RegExp(`^status/(${SEG})/${SEG}$`),
+  chats: new RegExp(`^chats/(${SEG})/(?:media|voice)/${SEG}$`),
+  groups: new RegExp(`^groups/(${SEG})/${SEG}$`),
+  meetings: new RegExp(`^meetings/(${SEG})/${SEG}$`),
+} as const;
+
+function hasTraversal(objectKey: string): boolean {
+  return objectKey.split('/').some((seg) => seg === '' || seg === '.' || seg === '..');
+}
+
 /**
- * Authorize read of an object key. The caller may read their own avatar/status,
- * any other user's avatar (needed to display profile photos in chat), and any
- * chat/group/meeting object they are a member/participant of (Req 10.6).
+ * Authorize read of an object key (Req 10.6). Keys must match a known
+ * per-category shape; then:
+ *   - avatars: owner always; others only if the owner's profilePhoto privacy
+ *     permits it (Everyone, or Contacts when the viewer shares a chat).
+ *   - status: owner always; others only if a status referencing the key is
+ *     currently visible to the viewer (block + visibility re-checked here).
+ *   - chats/groups: chat membership. meetings: participation.
+ * Anything else is denied.
  */
 async function authorizeRead(userId: string, objectKey: string): Promise<boolean> {
-  const parts = objectKey.split('/');
-  const kind = parts[0];
-  if (kind === 'avatars') {
-    // Any authenticated user may read any avatar — needed for profile photo display.
-    return true;
+  if (hasTraversal(objectKey)) return false;
+
+  const avatar = KEY_PATTERNS.avatars.exec(objectKey);
+  if (avatar) {
+    const ownerId = avatar[1];
+    if (ownerId === userId) return true;
+    const privacy = await getPrivacySettings(ownerId);
+    return isVisibleTo(privacy.profilePhoto, await sharesChatWith(ownerId, userId));
   }
-  if (kind === 'status') {
-    // Status media: owner always allowed; others are handled by visibility rules
-    // enforced at the status list level, so allow any authenticated user here.
-    return true;
+
+  const status = KEY_PATTERNS.status.exec(objectKey);
+  if (status) {
+    const ownerId = status[1];
+    if (ownerId === userId) return true;
+    return canViewStatusMediaKey(userId, objectKey);
   }
-  if (kind === 'chats' || kind === 'groups') {
-    return isMember(parts[1], userId);
-  }
-  if (kind === 'meetings') {
-    return isMeetingParticipant(parts[1], userId);
-  }
+
+  const chat = KEY_PATTERNS.chats.exec(objectKey);
+  if (chat) return isMember(chat[1], userId);
+
+  const group = KEY_PATTERNS.groups.exec(objectKey);
+  if (group) return isMember(group[1], userId);
+
+  const meeting = KEY_PATTERNS.meetings.exec(objectKey);
+  if (meeting) return isMeetingParticipant(meeting[1], userId);
+
   return false;
 }
 

@@ -45,6 +45,24 @@ export async function getMembers(chatId: string): Promise<string[]> {
   return res.rows.map((r) => r.user_id);
 }
 
+/**
+ * True when `a` and `b` share at least one chat. This is the backend's
+ * definition of "contact" for privacy decisions (it matches the 'contacts'
+ * branch of listVisibleStatuses). Used to gate Contacts-scoped resources such
+ * as profile-photo reads (Req 4.4).
+ */
+export async function sharesChatWith(a: string, b: string): Promise<boolean> {
+  if (a === b) return true;
+  const res = await query(
+    `SELECT 1 FROM chat_members m1
+       JOIN chat_members m2 ON m1.chat_id = m2.chat_id
+      WHERE m1.user_id = $1 AND m2.user_id = $2
+      LIMIT 1`,
+    [a, b],
+  );
+  return res.rowCount! > 0;
+}
+
 /** Create or fetch the direct chat between two users (Req 5.1). */
 export async function getOrCreateDirectChat(a: string, b: string): Promise<string> {
   const key = directKey(a, b);

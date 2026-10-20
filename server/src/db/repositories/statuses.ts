@@ -199,6 +199,54 @@ export async function getStatusOwner(statusId: string): Promise<string | null> {
   return res.rows[0]?.user_id ?? null;
 }
 
+/**
+ * Authorize a status media download for `viewerId` by object key. True when a
+ * status that references this key (as media or thumbnail) is either owned by
+ * the viewer or currently visible to them under the same block + visibility
+ * rules enforced by listVisibleStatuses (Req 9.2, 10.6, Property 15).
+ *
+ * This is the per-fetch re-check that closes the IDOR where any authenticated
+ * user could sign a download URL for any status key (the list endpoint is no
+ * longer treated as sufficient authorization).
+ */
+export async function canViewStatusMediaKey(
+  viewerId: string,
+  objectKey: string,
+): Promise<boolean> {
+  const res = await query<{ ok: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM statuses s
+        WHERE (s.media_object_key = $2 OR s.thumbnail_object_key = $2)
+          AND s.expires_at > now()
+          AND (
+            s.user_id = $1
+            OR (
+              NOT EXISTS (
+                SELECT 1 FROM blocked_users b
+                 WHERE (b.blocker_id = $1 AND b.blocked_id = s.user_id)
+                    OR (b.blocker_id = s.user_id AND b.blocked_id = $1)
+              )
+              AND (
+                s.visibility = 'everyone'
+                OR (s.visibility = 'contacts' AND EXISTS (
+                      SELECT 1 FROM chat_members a
+                      JOIN chat_members b2 ON a.chat_id = b2.chat_id
+                      WHERE a.user_id = s.user_id AND b2.user_id = $1))
+                OR (s.visibility = 'except' AND NOT EXISTS (
+                      SELECT 1 FROM status_visibility_users v
+                      WHERE v.status_id = s.id AND v.mode = 'except' AND v.user_id = $1))
+                OR (s.visibility = 'only' AND EXISTS (
+                      SELECT 1 FROM status_visibility_users v
+                      WHERE v.status_id = s.id AND v.mode = 'only' AND v.user_id = $1))
+              )
+            )
+          )
+     ) AS ok`,
+    [viewerId, objectKey],
+  );
+  return res.rows[0]?.ok ?? false;
+}
+
 /** Delete a status, returning its media object key for cleanup (Req 9.5). */
 export async function deleteStatus(statusId: string, userId: string): Promise<string | null> {
   const res = await query<{ media_object_key: string | null }>(
