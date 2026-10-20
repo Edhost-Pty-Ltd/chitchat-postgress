@@ -1,13 +1,14 @@
 // ─── Screen: Linked Devices ──────────────────────────────────────────────────
 //
-// Devices tab — real Firestore-backed linked devices, QR scanning, code entry,
+// Devices tab — backend-backed linked devices, QR scanning, code entry,
 // and remote sign-out.
 //
 // COMPANION NOTE
 //   On a companion device the entire Devices tab is read-only. Every action
-//   (link, remove, remove all) is disabled and greyed out. The user sees a
-//   notice at the top explaining that device management happens on the
-//   primary phone.
+//   (link, remove, remove all) is locked and greyed out; tapping a lock shows
+//   a "Managed on your primary device" notice instead of calling the API
+//   (those routes are owner-only on the backend). The user also sees a notice
+//   at the top explaining that device management happens on the primary phone.
 //
 import React, {
   useState, useCallback,
@@ -77,8 +78,10 @@ interface DeviceCardProps {
   fontFamily: string;
   readOnly?: boolean;
   onRemove?: () => void;
+  /** Read-only variant: tapping the lock explains why removal is unavailable. */
+  onLockedPress?: () => void;
 }
-function DeviceCard({ device, FG, textColor, fontFamily, readOnly, onRemove }: DeviceCardProps) {
+function DeviceCard({ device, FG, textColor, fontFamily, readOnly, onRemove, onLockedPress }: DeviceCardProps) {
   const { bevel } = useGlass();
   return (
     <View style={[S.card, bevel, readOnly && S.cardReadOnly]}>
@@ -122,9 +125,11 @@ function DeviceCard({ device, FG, textColor, fontFamily, readOnly, onRemove }: D
         </TouchableOpacity>
       )}
       {!device.isCurrent && readOnly && (
-        <View style={S.logoutBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+        <TouchableOpacity onPress={onLockedPress} disabled={!onLockedPress} style={S.logoutBtn}
+          activeOpacity={0.7} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          accessibilityRole="button" accessibilityLabel={`Remove ${device.name} (managed on your primary device)`}>
           <AppIcon name="lock-closed-outline" size={18} color={COLORS.sub} />
-        </View>
+        </TouchableOpacity>
       )}
     </View>
   );
@@ -149,8 +154,24 @@ export default function LinkedDevicesScreen() {
   const [pendingDev, setPendingDev] = useState<LinkedDevice | 'all' | null>(null);
   const [removing,   setRemoving]   = useState(false);
 
+  // ── Companion guard ──────────────────────────────────────────────────────
+  // Linking and removing devices are owner-only (the backend returns 403
+  // COMPANION_NOT_ALLOWED), so a companion gets this notice instead.
+  const noAuthority = useCallback((action = 'do that') => {
+    Alert.alert(
+      'Managed on your primary device',
+      `You can't ${action} from a companion device. Open ChitChat on the phone you signed in with to do this.`,
+    );
+  }, []);
+
   const doRemoveDev = useCallback(async () => {
     if (!ownerUid || !pendingDev) return;
+    if (isCompanion) {
+      // Owner-only on the backend; never call the API from a companion.
+      setPendingDev(null);
+      noAuthority('remove devices');
+      return;
+    }
     setRemoving(true);
     try {
       if (pendingDev === 'all') {
@@ -164,15 +185,7 @@ export default function LinkedDevicesScreen() {
       setRemoving(false);
       setPendingDev(null);
     }
-  }, [ownerUid, pendingDev, myDeviceId]);
-
-  // ── Companion guard ──────────────────────────────────────────────────────
-  const noAuthority = useCallback((action = 'do that') => {
-    Alert.alert(
-      'Not available on this device',
-      `You don't have authority to ${action} from a companion device. Please use the primary phone.`,
-    );
-  }, []);
+  }, [ownerUid, pendingDev, myDeviceId, isCompanion, noAuthority]);
 
   // ── Link device ──────────────────────────────────────────────────────────
   type LinkMode = 'choose' | 'scan' | 'enter-code' | null;
@@ -257,9 +270,11 @@ export default function LinkedDevicesScreen() {
         </TouchableOpacity>
         <AppText style={[S.title, { color: textColor, fontFamily }]}>Linked Devices</AppText>
         {isCompanion ? (
-          <View style={S.addBtnDisabled}>
+          <TouchableOpacity style={S.addBtnDisabled} activeOpacity={0.7}
+            onPress={() => noAuthority('link devices')}
+            accessibilityRole="button" accessibilityLabel="Link a device (managed on your primary device)">
             <Ionicons name="lock-closed" size={18} color={COLORS.sub} />
-          </View>
+          </TouchableOpacity>
         ) : (
           <TouchableOpacity style={S.addBtn} onPress={() => { setLinkError(null); setLinkMode('choose'); }}>
             <LinearGradient colors={GRADIENTS.primary} style={S.addBtnGrad}>
@@ -359,6 +374,7 @@ export default function LinkedDevicesScreen() {
                       fontFamily={fontFamily}
                       readOnly={isCompanion}
                       onRemove={() => setPendingDev(d)}
+                      onLockedPress={() => noAuthority('remove devices')}
                     />
                   ))}
                 </>

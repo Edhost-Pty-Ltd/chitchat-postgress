@@ -18,8 +18,7 @@ import Svg, {
   Circle, Rect, G, Text as SvgText, Defs,
   LinearGradient as SvgLinearGradient, Stop,
 } from 'react-native-svg';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
 import { useAuth } from '../context/AuthContext';
 import { useChats } from '../hooks/useChats';
 import { BottomNav } from '../components';
@@ -28,7 +27,7 @@ import { RootStackParamList } from '../types';
 import {
   AppBg, AppText, AppIcon, useForeground, useTypography, useGlass,
 } from '../context/ThemeContext';
-import { useMessageAnalytics, computeAndSaveMessageStats, deliveryRate, readRate } from '../hooks/useMessageAnalytics';
+import { useMessageAnalytics, deliveryRate, readRate } from '../hooks/useMessageAnalytics';
 import { INDUSTRY_CATEGORIES } from '../types';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList>;
@@ -125,30 +124,50 @@ export default function DashboardScreen() {
   const [loading,    setLoading]    = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  // ── Live message analytics ────────────────────────────────────────────────
-  const { stats: msgStats } = useMessageAnalytics(userId);
+  // ── Message analytics (server-computed) ───────────────────────────────────
+  const { stats: msgStats, refreshStats } = useMessageAnalytics(userId);
 
-  // ── Live subscription to the owner's user doc ─────────────────────────────
-  useEffect(() => {
+  // ── Load the owner's business profile + profile-view counters ─────────────
+  // Replaces the Firestore users/{uid} snapshot. /me carries the business
+  // profile as first-class fields (catalogItems, catalogCollections, industry,
+  // address, workSchedule; `about` is the business description). Profile-view
+  // counters come from /me/profile-views.
+  const loadProfile = useCallback(async () => {
     if (!userId) { setLoading(false); return; }
-    const fsDb = db as ReturnType<typeof firestore>;
-    const unsub = fsDb.collection('users').doc(userId).onSnapshot(
-      (snap) => {
-        setProfile(snap.exists() ? (snap.data() as UserProfile) : null);
-        setLoading(false);
-      },
-      (err) => {
-        console.warn('[Dashboard] user snapshot error:', err?.message, err?.message);
-        setLoading(false);
-      },
-    );
-    return () => unsub();
+    try {
+      const [meRes, viewsRes] = await Promise.all([
+        endpoints.getMe(),
+        endpoints.getProfileViews(),
+      ]);
+      if (meRes.ok) {
+        const me = meRes.data;
+        setProfile({
+          displayName:  me.displayName ?? undefined,
+          email:        me.email ?? undefined,
+          website:      me.website ?? undefined,
+          phone:        me.phoneNumber ?? undefined,
+          catalog:      me.catalogItems ?? [],
+          collections:  me.catalogCollections ?? [],
+          industry:     me.industry ?? undefined,
+          description:  me.about ?? undefined,
+          address:      me.address ?? undefined,
+          workSchedule: me.workSchedule ?? undefined,
+          profileViews: viewsRes.ok ? viewsRes.data.profileViews : 0,
+          profileViewsToday: viewsRes.ok ? viewsRes.data.profileViewsToday : 0,
+        });
+      } else {
+        setProfile(null);
+      }
+    } catch (err) {
+      console.warn('[Dashboard] profile load error:', err);
+    } finally {
+      setLoading(false);
+    }
   }, [userId]);
 
-  // Compute message stats on first load (creates/updates the counter doc)
   useEffect(() => {
-    if (userId) computeAndSaveMessageStats(userId).catch(() => {});
-  }, [userId]);
+    void loadProfile();
+  }, [loadProfile]);
 
   // ── Chat-based live analytics ─────────────────────────────────────────────
   const analytics = useMemo(() => {
@@ -235,10 +254,10 @@ export default function DashboardScreen() {
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
-    // Trigger a fresh message stats scan in the background
-    if (userId) computeAndSaveMessageStats(userId).catch(() => {});
+    // Refresh server-computed message stats + profile in the background.
+    void Promise.all([refreshStats(), loadProfile()]).catch(() => {});
     setTimeout(() => setRefreshing(false), 600);
-  }, [userId]);
+  }, [refreshStats, loadProfile]);
 
   const initials = (displayName || 'You')
     .split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
@@ -1138,6 +1157,7 @@ function ProfileCompletenessCard({
           </LinearGradient>
         </TouchableOpacity>
       )}
+
     </View>
   );
 }
@@ -1213,6 +1233,7 @@ function ActionRow({
       </View>
       <AppText style={[styles.actionLabel, { color: textColor }]}>{label}</AppText>
       <AppIcon name="chevron-forward" size={16} color={fgSecondary} />
+
     </TouchableOpacity>
   );
 }

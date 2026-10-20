@@ -72,7 +72,7 @@ export interface InternalNote {
 export interface CatalogCollection {
   id:        string;
   name:      string;
-  emoji?:    string | null;  // null-safe — Firestore rejects undefined
+  emoji?:    string | null;  // null-safe (stored in the catalog JSON blob)
   createdAt: number;
 }
 
@@ -87,7 +87,7 @@ export interface CatalogItem {
 
 // ─── Broadcast ───────────────────────────────────────────────────────────────
 export interface BroadcastList {
-  id:          string;        // Firestore doc id
+  id:          string;        // broadcast list id
   name:        string;        // e.g. "VIP Customers"
   recipients:  string[];      // Firebase UIDs
   createdBy:   string;        // sender UID
@@ -131,7 +131,7 @@ export interface Message {
   type: MessageType;
 }
 
-// ─── Real-time Chat Message (Firestore) ───────────────────────────────────────
+// ─── Real-time Chat Message ───────────────────────────────────────────────────
 export interface ChatMessage {
   messageId: string;
   senderId: string;
@@ -179,7 +179,7 @@ export interface StatusUpdate {
   time: string;
 }
 
-// ─── Firestore Status Update ───────────────────────────────────────────────────
+// ─── Status Update ─────────────────────────────────────────────────────────────
 export interface FireStatus {
   statusId: string;
   userId: string;

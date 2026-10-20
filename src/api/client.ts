@@ -3,7 +3,8 @@
 // token to every request (Req 2.2, 2.3), returns typed results (Req 3.4), and
 // distinguishes network failures from HTTP errors (Req 3.5).
 
-import { API_URL } from '../config/env';
+import { API_URL } from '../config/env'
+ 
 import { ApiError, NetworkError, type ApiResult } from './errors';
 import {
   createFirebaseTokenSource,
@@ -31,12 +32,9 @@ export interface ApiClientConfig {
 }
 
 async function defaultIsOffline(): Promise<boolean> {
-  try {
-    // Lazy import so this module stays importable outside a native runtime
-    // (e.g. in node-based unit tests, which inject their own isOffline).
+  try { 
     const { default: NetInfo } = await import('@react-native-community/netinfo');
-    const state = await NetInfo.fetch();
-    // isConnected can be null on some platforms; only treat explicit false as offline.
+    const state = await NetInfo.fetch(); 
     return state.isConnected === false;
   } catch {
     return false;

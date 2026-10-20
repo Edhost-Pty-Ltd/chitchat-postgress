@@ -1,24 +1,25 @@
 // ─── useMessages Hook ─────────────────────────────────────────────────────────
-// Real-time listener for messages inside a single chat.
+// Real-time messages for a single chat, backed by the REST API (initial load)
+// and Socket.IO (live updates). Media is stored as object keys; this hook
+// resolves them to short-lived download URLs via mediaService so the UI keeps
+// working with plain URL fields on FireMessage.
 //
 // COMPANION NOTE
 //   `ownerUid` is the account whose chats we're reading. On the primary device
-//   it equals the Firebase Auth uid; on a companion it's the owner's uid, and
-//   the companion's auth uid is different. Every write is attributed to
-//   `ownerUid`:
-//
-//     • senderId     = ownerUid
-//     • readBy       = ownerUid
-//     • deliveredTo  = ownerUid
-//
-//   That way a message sent from the companion looks identical to one sent
-//   from the owner's phone — same tick state, same read receipts.
+//   it equals the Firebase Auth uid; on a companion it's the owner's uid.
+//   Reads/sends are attributed to `ownerUid` (the backend derives the sender
+//   from the authenticated identity, which is the owner's uid on both).
 
-import { useState, useEffect, useCallback } from 'react';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { endpoints } from '../api/endpoints';
+import type { BackendMessage, ContactPayload } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
+import { mediaService } from '../services/mediaService';
 import { fetchUserPrivacySettings } from './usePrivacySettings';
-import { loadLocalMessages, mergeLocalMessages, clearLocalMessages, removeLocalMessage, loadDeletedIds, addDeletedIds, clearDeletedIds } from './useLocalMessages';
+import {
+  loadLocalMessages, mergeLocalMessages, clearLocalMessages, removeLocalMessage,
+  loadDeletedIds, addDeletedIds, clearDeletedIds,
+} from './useLocalMessages';
 import { CatalogItem } from '../types';
 
 export interface FireMessage {
@@ -88,18 +89,164 @@ export interface FireMessage {
 function toDate(raw: any): Date | null {
   if (!raw) return null;
   if (typeof raw.toDate === 'function') return raw.toDate();
-  return new Date(raw);
+  const d = new Date(raw);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// Describe an ApiError | NetworkError without touching ApiError-only fields.
+function errText(error: { kind: 'api' | 'network'; message: string; code?: string }): string {
+  return error.kind === 'api' ? (error.code ?? error.message) : error.message;
+}
+
+// ── Per-user "cleared at" cutoff ──────────────────────────────────────────────
+// "Clear chat" is per user and server-side: POST /chats/:id/clear records the
+// caller's cutoff, GET messages stops returning anything older to them, and the
+// chat summary carries it as `clearedAt`. The server also emits `chat:cleared`
+// { chatId, clearedAt } to the caller's devices. Only the local message cache
+// (which also keeps messages past the server's TTL) needs pruning to match.
+
+function parseMs(iso: string | null | undefined): number {
+  const ms = iso ? Date.parse(iso) : NaN;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+/** Sent at/before the cutoff. Undated (pending) messages are the newest: kept. */
+function isClearedBy(m: FireMessage, cutoffMs: number): boolean {
+  return cutoffMs > 0 && !!m.timestamp && m.timestamp.getTime() <= cutoffMs;
+}
+
+/** This user's cutoff for the chat, from the chat summary (0 if none/unknown). */
+async function fetchClearedAt(chatId: string): Promise<number> {
+  const res = await endpoints.listChats();
+  if (!res.ok) return 0;
+  return parseMs(res.data.chats.find((c) => c.chatId === chatId)?.clearedAt);
+}
+
+/** Drop cached messages the user has cleared (e.g. on another device). */
+async function pruneLocalBefore(chatId: string, cutoffMs: number): Promise<void> {
+  const cached = await loadLocalMessages(chatId);
+  const kept = cached.filter((m) => !isClearedBy(m, cutoffMs));
+  if (kept.length === cached.length) return;
+  await clearLocalMessages(chatId);
+  if (kept.length > 0) await mergeLocalMessages(chatId, kept);
+}
+
+// ── BackendMessage → FireMessage ──────────────────────────────────────────────
+// Resolves object keys to download URLs using a prefetched key→url map so a
+// batch of messages only needs one /media/download-url round-trip.
+
+function collectObjectKeys(messages: BackendMessage[]): string[] {
+  const keys = new Set<string>();
+  for (const m of messages) {
+    if (m.mediaObjectKey) keys.add(m.mediaObjectKey);
+    if (m.thumbnailObjectKey) keys.add(m.thumbnailObjectKey);
+    if (m.order?.items) {
+      for (const it of m.order.items) if (it.imageObjectKey) keys.add(it.imageObjectKey);
+    }
+    if (m.contact?.photoObjectKey) keys.add(m.contact.photoObjectKey);
+    if (m.contact?.contacts) {
+      for (const c of m.contact.contacts) if (c.photoObjectKey) keys.add(c.photoObjectKey);
+    }
+  }
+  return Array.from(keys);
+}
+
+function mapContact(contact: ContactPayload, urls: Record<string, string>): FireMessage['contact'] {
+  const resolve = (key?: string | null) => (key ? urls[key] ?? null : null);
+  const base = {
+    name: contact.name,
+    phone: contact.phone,
+    userId: contact.userId ?? null,
+    registered: !!contact.registered,
+    photoURL: resolve(contact.photoObjectKey),
+  };
+  if (contact.contacts && contact.contacts.length > 0) {
+    return {
+      ...base,
+      contacts: contact.contacts.map((c) => ({
+        name: c.name,
+        phone: c.phone,
+        userId: c.userId ?? null,
+        registered: !!c.registered,
+        photoURL: resolve(c.photoObjectKey),
+      })),
+    };
+  }
+  return base;
+}
+
+function mapBackendMessage(m: BackendMessage, urls: Record<string, string>): FireMessage {
+  const resolve = (key?: string | null) => (key ? urls[key] ?? null : null);
+  const mediaUrl = resolve(m.mediaObjectKey);
+  const thumbUrl = resolve(m.thumbnailObjectKey);
+
+  const type = (m.type ?? 'text') as FireMessage['type'];
+
+  return {
+    messageId:    m.id,
+    senderId:     m.senderId,
+    text:         m.text ?? null,
+    imageUrl:     type === 'image' ? mediaUrl : null,
+    voiceUrl:     type === 'voice' ? mediaUrl : null,
+    videoUrl:     type === 'video' ? mediaUrl : null,
+    fileUrl:      type === 'file'  ? mediaUrl : null,
+    type,
+    timestamp:    toDate(m.createdAt),
+    expiresAt:    toDate(m.expiresAt),
+    readBy:       m.readBy ?? [],
+    deliveredTo:  m.deliveredTo ?? [],
+    duration:     m.durationMs ?? null,
+    fileName:     m.fileName ?? null,
+    fileSize:     m.fileSize ?? null,
+    mimeType:     m.mimeType ?? null,
+    thumbnailUrl: thumbUrl,
+    blockedMessage: false,
+    catalogItem:  (m.catalogItem as CatalogItem | null) ?? null,
+    order:        m.order
+      ? {
+          items: m.order.items.map((it) => ({
+            id: it.id,
+            name: it.name,
+            price: it.price,
+            imageUri: resolve(it.imageObjectKey),
+            quantity: it.quantity,
+          })),
+          total: m.order.total ?? null,
+          currency: m.order.currency,
+        }
+      : null,
+    contact:      m.contact ? mapContact(m.contact, urls) : null,
+    poll:         m.poll
+      ? {
+          question: m.poll.question,
+          options: m.poll.options,
+          votes: m.poll.votes ?? {},
+          multiple: m.poll.multiple,
+        }
+      : null,
+    location:     (m.location as FireMessage['location']) ?? null,
+    isLiveLocation: false,
+    liveLocationExpiry: null,
+    replyTo:      (m.replyTo as FireMessage['replyTo']) ?? null,
+    edited:       m.edited ?? false,
+    editedAt:     toDate(m.editedAt),
+    forwarded:    (m.subtype === 'forwarded'),
+  };
 }
 
 export function useMessages(chatId: string | null, ownerUid: string | null) {
   const [messages, setMessages] = useState<FireMessage[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
-  // Per-user "cleared" cutoff: messages at/before this time are hidden for this
-  // user only (set when they clear the chat). Does not affect the other member.
+  // This user's server-side "cleared" cutoff (ms): messages at/before it are
+  // hidden for this user only. Does not affect the other members.
   const [clearedAt, setClearedAt] = useState<number>(0);
-  // Message ids this user deleted "for me" (local-only, survives snapshots).
+  // Message ids this user deleted "for me" (local-only, survives reloads).
   const [deletedIds, setDeletedIds] = useState<Set<string>>(new Set());
+
+  // Keep the live chatId available inside socket handlers without re-subscribing.
+  const chatIdRef = useRef<string | null>(chatId);
+  chatIdRef.current = chatId;
 
   // Load the per-user deleted-for-me set for this chat.
   useEffect(() => {
@@ -115,113 +262,137 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     });
   }, [chatId]);
 
-  // Watch this user's per-user clear cutoff on the chat doc
-  useEffect(() => {
-    if (!chatId || !ownerUid) { setClearedAt(0); return; }
-    const fsDb = db as ReturnType<typeof firestore>;
-    const unsub = fsDb.collection('chats').doc(chatId).onSnapshot((snap) => {
-      const raw = snap.exists() ? (snap.data()?.clearedAt?.[ownerUid]) : null;
-      const ms = raw?.toMillis ? raw.toMillis() : (raw ? new Date(raw).getTime() : 0);
-      setClearedAt(ms || 0);
-    }, () => {});
-    return () => unsub();
-  }, [chatId, ownerUid]);
+  // The cutoff belongs to one chat; it is re-read from the server on load.
+  useEffect(() => { setClearedAt(0); }, [chatId]);
 
-  // Real-time listener
+  // Apply the server's cutoff: hide everything at/before it now and prune the
+  // local cache so a later reload can't bring those messages back.
+  const applyClearedAt = useCallback(async (targetChatId: string, cutoffMs: number) => {
+    if (cutoffMs <= 0 || targetChatId !== chatIdRef.current) return;
+    setClearedAt((prev) => Math.max(prev, cutoffMs));
+    setMessages((prev) => prev.filter((m) => !isClearedBy(m, cutoffMs)));
+    await pruneLocalBefore(targetChatId, cutoffMs);
+  }, []);
+
+  // Apply a batch of backend messages into state + local cache.
+  const applyBackendMessages = useCallback(async (incoming: BackendMessage[]) => {
+    const activeChatId = chatIdRef.current;
+    if (!activeChatId) return;
+    const urls = await mediaService.getDownloadUrls(collectObjectKeys(incoming));
+    const mapped = incoming
+      .filter((m) => !m.deletedForEveryone)
+      .map((m) => mapBackendMessage(m, urls));
+    if (mapped.length === 0) return;
+    await mergeLocalMessages(activeChatId, mapped).catch(() => {});
+    const merged = await loadLocalMessages(activeChatId);
+    setMessages(merged);
+  }, []);
+
+  // Initial load + live socket updates.
   useEffect(() => {
     if (!chatId) return;
+    let active = true;
     setLoading(true);
 
-    const fsDb = db as ReturnType<typeof firestore>;
-    const unsub = fsDb
-      .collection('chats').doc(chatId).collection('messages')
-      .orderBy('timestamp', 'asc')
-      .onSnapshot(
-        (snap) => {
-          const firestoreMsgs: FireMessage[] = snap.docs.map((doc) => {
-            const d = doc.data();
-            return {
-              messageId:          doc.id,
-              senderId:           d.senderId,
-              text:               d.text       ?? null,
-              imageUrl:           d.imageUrl   ?? null,
-              voiceUrl:           d.voiceUrl   ?? null,
-              videoUrl:           d.videoUrl   ?? null,
-              fileUrl:            d.fileUrl    ?? null,
-              type:               d.type       ?? 'text',
-              timestamp:          toDate(d.timestamp),
-              expiresAt:          toDate(d.expiresAt),
-              readBy:             d.readBy     ?? [],
-              deliveredTo:        d.deliveredTo ?? [],
-              duration:           d.duration   ?? null,
-              fileName:           d.fileName   ?? null,
-              fileSize:           d.fileSize   ?? null,
-              mimeType:           d.mimeType   ?? null,
-              thumbnailUrl:       d.thumbnailUrl ?? null,
-              blockedMessage:     d.blockedMessage ?? false,
-              catalogItem:        d.catalogItem ?? null,
-              order:              d.order      ?? null,
-              contact:            d.contact    ?? null,
-              poll:               d.poll       ?? null,
-              location:           d.location   ?? null,
-              isLiveLocation:     d.isLiveLocation ?? false,
-              liveLocationExpiry: toDate(d.liveLocationExpiry),
-              replyTo:            d.replyTo    ?? null,
-              edited:             d.edited     ?? false,
-              editedAt:           toDate(d.editedAt),
-              forwarded:          d.forwarded  ?? false,
-            };
+    const load = async () => {
+      // The server already leaves out messages older than this user's cutoff;
+      // the cutoff itself is only needed to prune the local cache, which may
+      // predate a clear made on another device.
+      const [res, cutoff] = await Promise.all([
+        endpoints.listMessages(chatId),
+        fetchClearedAt(chatId),
+      ]);
+      if (!active) return;
+      if (cutoff > 0) await applyClearedAt(chatId, cutoff);
+      if (!active) return;
+      if (res.ok) {
+        const urls = await mediaService.getDownloadUrls(collectObjectKeys(res.data.messages));
+        if (!active) return;
+        const mapped = res.data.messages
+          .filter((m) => !m.deletedForEveryone)
+          .map((m) => mapBackendMessage(m, urls));
+        await mergeLocalMessages(chatId, mapped).catch(() => {});
+        const merged = await loadLocalMessages(chatId);
+        if (!active) return;
+        setMessages(merged);
+        setLoading(false);
+
+        if (ownerUid) {
+          fetchUserPrivacySettings(ownerUid).then((privacy) => {
+            markAsRead(chatId, ownerUid, mapped, privacy.readReceipts);
           });
+        }
+      } else {
+        setError(errText(res.error));
+        setLoading(false);
+      }
+    };
 
-          mergeLocalMessages(chatId, firestoreMsgs).catch(() => {});
-          loadLocalMessages(chatId).then((merged) => {
-            setMessages(merged);
-            setLoading(false);
+    // Join the chat room and load, then refetch on reconnect so no live message
+    // is missed while the socket was down.
+    void socketClient.connect()
+      .then(() => { socketClient.joinChat(chatId); return load(); })
+      .catch(() => load());
+
+    const onNew = (payload: unknown) => {
+      const message = (payload as { message?: BackendMessage })?.message;
+      if (!message || message.chatId !== chatIdRef.current) return;
+      void applyBackendMessages([message]).then(() => {
+        if (ownerUid && message.senderId !== ownerUid) {
+          fetchUserPrivacySettings(ownerUid).then((privacy) => {
+            if (privacy.readReceipts) {
+              socketClient.emit('message:read', {
+                chatId: message.chatId,
+                messageIds: [message.id],
+              });
+            }
           });
+        }
+      });
+    };
 
-          if (ownerUid) {
-            fetchUserPrivacySettings(ownerUid).then((privacy) => {
-              markAsRead(chatId, ownerUid, privacy.readReceipts);
-            });
-          }
-        },
-        (err) => { setError(err.message); setLoading(false); },
-      );
+    const onDeleted = (payload: unknown) => {
+      const p = payload as { chatId?: string; messageId?: string };
+      if (!p?.messageId || p.chatId !== chatIdRef.current) return;
+      setMessages((prev) => prev.filter((m) => m.messageId !== p.messageId));
+      if (chatIdRef.current) removeLocalMessage(chatIdRef.current, p.messageId).catch(() => {});
+    };
 
-    return () => unsub();
-  }, [chatId, ownerUid]);
+    const onEditedOrPoll = (payload: unknown) => {
+      const message = (payload as { message?: BackendMessage })?.message;
+      if (!message || message.chatId !== chatIdRef.current) return;
+      void applyBackendMessages([message]);
+    };
+
+    // This user cleared the open chat (here or on another of their devices).
+    const onCleared = (payload: unknown) => {
+      const p = payload as { chatId?: string; clearedAt?: string };
+      if (!p?.chatId || p.chatId !== chatIdRef.current) return;
+      void applyClearedAt(p.chatId, parseMs(p.clearedAt));
+    };
+
+    const unsubs = [
+      socketClient.subscribe('message:new', onNew),
+      socketClient.subscribe('message:deleted', onDeleted),
+      socketClient.subscribe('message:edited', onEditedOrPoll),
+      socketClient.subscribe('poll:updated', onEditedOrPoll),
+      socketClient.subscribe('chat:cleared', onCleared),
+      socketClient.subscribe('client:reconnect', () => { void load(); }),
+    ];
+
+    return () => {
+      active = false;
+      unsubs.forEach((u) => u());
+      socketClient.leaveChat(chatId);
+    };
+  }, [chatId, ownerUid, applyBackendMessages, applyClearedAt]);
 
   async function sendMessage(text: string): Promise<boolean> {
     if (!chatId || !ownerUid || !text.trim()) return false;
     try {
-      const trimmed = text.trim();
-      const fsDb = db as ReturnType<typeof firestore>;
-      const chatRef = fsDb.collection('chats').doc(chatId);
-
-      // Fetch members so we can increment unread counts for everyone else
-      const chatSnap = await chatRef.get();
-      const members: string[] = chatSnap.exists ? (chatSnap.data()?.members ?? []) : [];
-      const otherMembers = members.filter((id) => id !== ownerUid);
-      const unreadIncrements = Object.fromEntries(
-        otherMembers.map((id) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
-      );
-
-      await fsDb.collection('chats').doc(chatId).collection('messages').add({
-        senderId:    ownerUid,
-        text:        trimmed,
-        imageUrl:    null,
-        voiceUrl:    null,
-        type:        'text',
-        timestamp:   firestore.FieldValue.serverTimestamp(),
-        readBy:      [ownerUid],
-        deliveredTo: [],
-      });
-      await chatRef.update({
-        'lastMessage.text':      trimmed,
-        'lastMessage.senderId':  ownerUid,
-        'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-        ...unreadIncrements,
-      });
+      const res = await endpoints.sendMessage(chatId, { type: 'text', text: text.trim() });
+      if (!res.ok) { setError(errText(res.error)); return false; }
+      await applyBackendMessages([res.data.message]);
       return true;
     } catch (err: any) {
       setError(err.message);
@@ -229,12 +400,9 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     }
   }
 
-  // Delete a single message in real time: remove it from the in-memory list and
-  // the local cache immediately, then delete the Firestore doc.
-  // Delete FOR THIS USER ONLY ("delete for me"). Purely local — we never touch
-  // the shared Firestore doc, so the other member keeps their copy and there's
-  // no permission concern. The id is recorded in a persistent local set so the
-  // message stays hidden even after Firestore snapshots re-deliver it.
+  // Delete FOR THIS USER ONLY ("delete for me"). Purely local — the backend copy
+  // for other members is untouched. The id is recorded in a persistent local set
+  // so the message stays hidden even if the backend re-delivers it on reconnect.
   const deleteMessage = useCallback(async (messageId: string) => {
     if (!chatId || !messageId) return;
     setDeletedIds((prev) => new Set(prev).add(messageId));
@@ -243,36 +411,25 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     await addDeletedIds(chatId, [messageId]);
   }, [chatId]);
 
-  // Clear every message in the chat: delete the Firestore docs, wipe the local
-  // cache, and immediately empty the in-memory list so the UI updates in real
-  // time without needing to leave and re-enter the screen.
-  // Clear chat FOR THIS USER ONLY. Records a per-user cutoff timestamp on the
-  // chat doc; messages are NOT deleted from Firestore, so the other member keeps
-  // their full history. The local cache is wiped and the UI empties instantly.
+  // Clear chat FOR THIS USER ONLY. The server records the cutoff and stops
+  // returning older messages to this user; nothing is deleted, so the other
+  // members keep their full history. Throws if the server refuses, leaving the
+  // list as it was.
   const clearMessages = useCallback(async () => {
     if (!chatId || !ownerUid) return;
-    setMessages([]);
-    setClearedAt(Date.now());
-    setDeletedIds(new Set());
-    await clearLocalMessages(chatId);
-    await clearDeletedIds(chatId);
-    try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('chats').doc(chatId).set(
-        { clearedAt: { [ownerUid]: firestore.FieldValue.serverTimestamp() } },
-        { merge: true },
-      );
-    } catch (err: any) {
-      setError(err.message);
-      throw err;
+    const res = await endpoints.clearChat(chatId);
+    if (!res.ok) {
+      setError(errText(res.error));
+      throw new Error(`clearChat failed: ${errText(res.error)}`);
     }
-  }, [chatId, ownerUid]);
+    setDeletedIds(new Set());
+    await clearDeletedIds(chatId);
+    await applyClearedAt(chatId, parseMs(res.data.clearedAt));
+  }, [chatId, ownerUid, applyClearedAt]);
 
   // Optimistically insert a locally-built message so it appears instantly,
-  // before the Firestore snapshot round-trips. The real snapshot (same
-  // messageId) overwrites it on arrival, so this is safe to call right after a
-  // successful send. Used for poll/order/contact cards which are written via
-  // useChatActions (outside this hook's own sendMessage path).
+  // before the server round-trips. The real message (same messageId) overwrites
+  // it on arrival. Used for poll/order/contact cards written via useChatActions.
   const addOptimisticMessage = useCallback((partial: Partial<FireMessage> & { messageId: string }) => {
     if (!chatId) return;
     const echo: FireMessage = {
@@ -312,46 +469,31 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
   // and any they deleted "for me".
   const visibleMessages = messages.filter((m) => {
     if (deletedIds.has(m.messageId)) return false;
-    if (clearedAt > 0 && (m.timestamp?.getTime() ?? 0) <= clearedAt) return false;
+    if (isClearedBy(m, clearedAt)) return false;
     return true;
   });
 
   return { messages: visibleMessages, loading, error, sendMessage, clearMessages, deleteMessage, addOptimisticMessage };
 }
 
-async function markAsRead(chatId: string, ownerUid: string, readReceipts = true) {
+// ── Mark incoming messages as read ────────────────────────────────────────────
+// Unread counters are maintained server-side when the chat is opened. We emit
+// read receipts over the socket for messages from other members (respecting the
+// reader's readReceipts privacy setting), mirroring the old Firestore readBy
+// batch update.
+function markAsRead(
+  chatId: string,
+  ownerUid: string,
+  messages: FireMessage[],
+  readReceipts = true,
+) {
   try {
-    const fsDb = db as ReturnType<typeof firestore>;
-    await fsDb.collection('chats').doc(chatId).update({
-      [`unreadCounts.${ownerUid}`]: 0,
-    });
-
     if (!readReceipts) return;
-
-    const snap = await fsDb
-      .collection('chats').doc(chatId).collection('messages')
-      .orderBy('timestamp', 'desc')
-      .get();
-
-    const batch = fsDb.batch();
-    snap.docs.forEach((docSnap) => {
-      const data = docSnap.data();
-      const deliveredTo = data.deliveredTo || [];
-      const readBy      = data.readBy      || [];
-      if (data.senderId === ownerUid) return;
-
-      if (!deliveredTo.includes(ownerUid)) {
-        batch.update(docSnap.ref, {
-          deliveredTo: firestore.FieldValue.arrayUnion(ownerUid),
-          readBy:      firestore.FieldValue.arrayUnion(ownerUid),
-        });
-      } else if (!readBy.includes(ownerUid)) {
-        batch.update(docSnap.ref, {
-          readBy: firestore.FieldValue.arrayUnion(ownerUid),
-        });
-      }
-    });
-    await batch.commit();
+    const unreadIds = messages
+      .filter((m) => m.senderId !== ownerUid && !(m.readBy ?? []).includes(ownerUid))
+      .map((m) => m.messageId);
+    if (unreadIds.length === 0) return;
+    socketClient.emit('message:read', { chatId, messageIds: unreadIds });
   } catch (error) {
     console.warn('[useMessages] Error marking messages:', error);
   }

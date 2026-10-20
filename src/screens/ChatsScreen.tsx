@@ -18,13 +18,15 @@ import { useChatPrefs, MAX_PINNED } from '../hooks/useChatPrefs';
 import { SwipeableRow } from '../components/SwipeableRow';
 import { ChatPreviewModal } from '../components/ChatPreviewModal';
 import { clearLocalMessages } from '../hooks/useLocalMessages';
-import { fetchUserPrivacySettings, isVisibleTo } from '../hooks/usePrivacySettings';
+import { isVisibleTo } from '../hooks/usePrivacySettings';
 import { useStatus } from '../hooks/useStatus';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
 import { resolveDisplayName } from '../utils/resolveDisplayName';
 import { normalizePhone } from '../utils/phoneUtils';
-import { db } from '../config/firebase';
-import firestore from '@react-native-firebase/firestore';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { endpoints } from '../api/endpoints';
+import { socketClient } from '../realtime/socket';
+import { mediaService } from '../services/mediaService';
 import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
 import { RootStackParamList } from '../types';
 
@@ -96,7 +98,7 @@ function classifyChat(c: ChatPreview): 'direct' | 'group' {
 function describeSaveError(err: any): string {
   const code = err?.code;
   if (code === 'permission-denied') {
-    return 'Permission denied. Add a Firestore rule for users/{uid}/chatLabels.';
+    return 'Permission denied.';
   }
   if (code === 'unavailable' || code === 'failed-precondition') {
     return 'No connection. Check your internet and try again.';
@@ -109,6 +111,84 @@ function describeSaveError(err: any): string {
   }
   if (err?.message) return err.message;
   return 'Could not save the label. Please try again.';
+}
+
+/** Runs `fn` over `items` with at most `limit` calls in flight. */
+async function forEachLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await fn(items[next++]);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+function sortLabels(items: ChatLabel[]): ChatLabel[] {
+  return [...items].sort((a, b) => a.createdAt - b.createdAt);
+}
+
+// ── Legacy local chat labels ─────────────────────────────────────────────────
+// Before the label endpoints existed, labels were kept per owner in
+// AsyncStorage. The first load that still finds that copy retires it: if the
+// server has no labels yet the local ones are uploaded first, all or nothing
+// (a failed run deletes what it created and keeps the copy, so the next load
+// retries cleanly). Returns true when labels were uploaded.
+const LEGACY_LABELS_KEY = (uid: string) => `chat_labels_${uid}`;
+
+async function migrateLocalChatLabels(uid: string, serverHasLabels: boolean): Promise<boolean> {
+  let local: Partial<ChatLabel>[] = [];
+  try {
+    const raw = await AsyncStorage.getItem(LEGACY_LABELS_KEY(uid));
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) local = parsed;
+  } catch {
+    // Unreadable copy: nothing to upload, just retire it below.
+  }
+
+  let uploaded = false;
+  if (!serverHasLabels && local.length > 0) {
+    const ids = (v: unknown): string[] =>
+      (Array.isArray(v) ? v : [])
+        .filter((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= 128)
+        .slice(0, 500);
+    const ordered = [...local].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+    const created: string[] = [];
+    for (const l of ordered) {
+      const title = typeof l.title === 'string' ? l.title.trim().slice(0, 60) : '';
+      if (!title) continue;
+      const res = await endpoints.createChatLabel({
+        title,
+        memberIds: ids(l.memberIds),
+        groupIds: ids(l.groupIds),
+      });
+      if (!res.ok) {
+        console.warn('[ChatsScreen] Uploading local chat labels failed:', res.error.message);
+        await Promise.all(created.map((id) => endpoints.deleteChatLabel(id)));
+        return false;
+      }
+      created.push(res.data.label.id);
+    }
+    uploaded = created.length > 0;
+  }
+
+  try {
+    await AsyncStorage.removeItem(LEGACY_LABELS_KEY(uid));
+  } catch {
+    /* retried on the next load */
+  }
+  return uploaded;
+}
+
+// One migration per owner at a time (effects can run twice in dev), so the
+// local labels can't be uploaded twice.
+const labelMigrations = new Map<string, Promise<boolean>>();
+function migrateLocalChatLabelsOnce(uid: string, serverHasLabels: boolean): Promise<boolean> {
+  let run = labelMigrations.get(uid);
+  if (!run) {
+    run = migrateLocalChatLabels(uid, serverHasLabels).finally(() => labelMigrations.delete(uid));
+    labelMigrations.set(uid, run);
+  }
+  return run;
 }
 
 function makeSyntheticChat(userId: string, memberId: string): ChatPreview {
@@ -391,18 +471,18 @@ function NewGroupSheet({
     if (!contacts.length) { setPrivacyLoading(false); return; }
     let cancelled = false;
     (async () => {
-      const fsDb = db as ReturnType<typeof firestore>;
+      // Each contact's "groups" privacy (who may add them to a group) comes from
+      // their public profile; contacts set to 'Nobody' can't be selected. A
+      // failed lookup falls back to 'Everyone', as before.
       const map = new Map<string, string>();
-      await Promise.all(
-        contacts.map(async (c) => {
-          try {
-            const snap = await fsDb.collection('users').doc(c.userId).get();
-            map.set(c.userId, snap.exists() ? (snap.data()!.privacyGroups ?? 'Everyone') : 'Everyone');
-          } catch {
-            map.set(c.userId, 'Everyone');
-          }
-        })
-      );
+      await forEachLimit(contacts, 8, async (c) => {
+        try {
+          const res = await endpoints.getUser(c.userId);
+          map.set(c.userId, (res.ok && res.data.privacy?.groups) || 'Everyone');
+        } catch {
+          map.set(c.userId, 'Everyone');
+        }
+      });
       if (!cancelled) { setPrivacyMap(map); setPrivacyLoading(false); }
     })();
     return () => { cancelled = true; };
@@ -1265,7 +1345,17 @@ export default function ChatsScreen() {
   const { bevel, iconButton }     = useGlass();
   const insets = useSafeAreaInsets();
 
-  const { chats, loading: chatsLoading } = useChats(userId);
+  const { chats, loading: chatsLoading, reload: reloadChats } = useChats(userId);
+  // useChats returns a fresh `reload` each render; keep the latest in a ref.
+  const reloadChatsRef = useRef(reloadChats);
+  reloadChatsRef.current = reloadChats;
+
+  // A clear (here, in the chat screen or on another of my devices) hides that
+  // chat's preview server-side; refresh the list when one happens.
+  useEffect(() => {
+    if (!userId) return;
+    return socketClient.subscribe('chat:cleared', () => reloadChatsRef.current());
+  }, [userId]);
   const { contacts, loading: contactsLoading, reload: reloadContacts, hasPermission, error: contactsError } = useContacts();
   const { pinned, favourites, mutedChats, togglePin, toggleFavourite, toggleMute, loadMutedFor } = useChatPrefs(userId);
 
@@ -1340,102 +1430,81 @@ export default function ChatsScreen() {
   const [labels, setLabels] = useState<ChatLabel[]>([]);
   const pendingLabelIdRef = useRef<string | null>(null);
 
+  // Chat labels live on the backend (/me/chat-labels, the old users/{uid}/
+  // chatLabels docs) and sync across the owner's devices: every change emits
+  // `labels:updated` to them and we refetch (also after a socket reconnect, in
+  // case an update was missed while offline).
+  const refreshLabels = useCallback(async (): Promise<void> => {
+    const res = await endpoints.listChatLabels();
+    if (res.ok) setLabels(sortLabels(res.data.labels));
+    else console.warn('[ChatsScreen] chat labels load failed:', res.error.message);
+  }, []);
+
   useEffect(() => {
     if (!userId) { setLabels([]); return; }
-    const fsDb = db as ReturnType<typeof firestore>;
-    const unsub = fsDb
-      .collection('users')
-      .doc(userId)
-      .collection('chatLabels')
-      .onSnapshot(
-        (snap) => {
-          const items: ChatLabel[] = snap.docs.map((d) => {
-            const data = d.data() || {};
-            return {
-              id:        d.id,
-              title:     data.title ?? '',
-              memberIds: Array.isArray(data.memberIds) ? data.memberIds : [],
-              groupIds:  Array.isArray(data.groupIds)  ? data.groupIds  : [],
-              createdAt: data.createdAt ?? 0,
-              updatedAt: data.updatedAt ?? 0,
-            };
-          });
-          items.sort((a, b) => a.createdAt - b.createdAt);
-          setLabels(items);
-        },
-        (err) => {
-          console.error('[ChatsScreen] chatLabels snapshot error:', err?.message, err?.message, err);
-        },
-      );
-    return () => unsub();
-  }, [userId]);
+    let cancelled = false;
+    (async () => {
+      const res = await endpoints.listChatLabels();
+      if (cancelled) return;
+      if (!res.ok) {
+        console.warn('[ChatsScreen] chat labels load failed:', res.error.message);
+        return;
+      }
+      let items = res.data.labels;
+      // One-time: retire the AsyncStorage label store older builds used.
+      if (await migrateLocalChatLabelsOnce(userId, items.length > 0)) {
+        const again = await endpoints.listChatLabels();
+        if (again.ok) items = again.data.labels;
+      }
+      if (!cancelled) setLabels(sortLabels(items));
+    })();
+    const refetch = () => { if (!cancelled) void refreshLabels(); };
+    const unsubs = [
+      socketClient.subscribe('labels:updated', refetch),
+      socketClient.subscribe('client:reconnect', refetch),
+    ];
+    return () => { cancelled = true; unsubs.forEach((u) => u()); };
+  }, [userId, refreshLabels]);
 
   const createLabel = useCallback(async (
     title: string, memberIds: string[], groupIds: string[],
   ): Promise<string | null> => {
     if (!userId) throw new Error('Not signed in');
-    const fsDb = db as ReturnType<typeof firestore>;
-    const now = Date.now();
-
-    const docRef = fsDb
-      .collection('users')
-      .doc(userId)
-      .collection('chatLabels')
-      .doc();
-
-    await docRef.set({
-      title,
-      memberIds,
-      groupIds,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    setLabels((prev) => {
-      if (prev.some((l) => l.id === docRef.id)) return prev;
-      const next = [
-        ...prev,
-        { id: docRef.id, title, memberIds, groupIds, createdAt: now, updatedAt: now },
-      ];
-      next.sort((a, b) => a.createdAt - b.createdAt);
-      return next;
-    });
-
-    return docRef.id;
+    const res = await endpoints.createChatLabel({ title, memberIds, groupIds });
+    if (!res.ok) throw res.error;
+    const label = res.data.label;
+    setLabels((prev) => (prev.some((l) => l.id === label.id) ? prev : sortLabels([...prev, label])));
+    return label.id;
   }, [userId]);
 
+  // Update/delete apply locally first so toggles feel instant; on failure the
+  // server copy is reloaded and the error re-thrown for the caller to show.
   const updateLabel = useCallback(async (
     labelId: string, title: string, memberIds: string[], groupIds: string[],
   ): Promise<void> => {
     if (!userId) throw new Error('Not signed in');
-    const fsDb = db as ReturnType<typeof firestore>;
-    const now = Date.now();
-    await fsDb
-      .collection('users')
-      .doc(userId)
-      .collection('chatLabels')
-      .doc(labelId)
-      .update({ title, memberIds, groupIds, updatedAt: now });
-
-    setLabels((prev) =>
-      prev.map((l) =>
-        l.id === labelId ? { ...l, title, memberIds, groupIds, updatedAt: now } : l,
-      ),
-    );
-  }, [userId]);
+    setLabels((prev) => prev.map((l) =>
+      l.id === labelId ? { ...l, title, memberIds, groupIds, updatedAt: Date.now() } : l,
+    ));
+    const res = await endpoints.updateChatLabel(labelId, { title, memberIds, groupIds });
+    if (!res.ok) {
+      void refreshLabels();
+      throw res.error;
+    }
+    const saved = res.data.label;
+    setLabels((prev) => prev.map((l) => (l.id === labelId ? saved : l)));
+  }, [userId, refreshLabels]);
 
   const deleteLabel = useCallback(async (labelId: string): Promise<void> => {
     if (!userId) throw new Error('Not signed in');
-    const fsDb = db as ReturnType<typeof firestore>;
-    await fsDb
-      .collection('users')
-      .doc(userId)
-      .collection('chatLabels')
-      .doc(labelId)
-      .delete();
-
     setLabels((prev) => prev.filter((l) => l.id !== labelId));
-  }, [userId]);
+    const res = await endpoints.deleteChatLabel(labelId);
+    // Already gone (e.g. deleted on another device) counts as success.
+    if (!res.ok && !(res.error.kind === 'api' && res.error.status === 404)) {
+      void refreshLabels();
+      throw res.error;
+    }
+  }, [userId, refreshLabels]);
 
   // Returns the identifier used to place a chat inside a label:
   //  - group chats are tracked by chatId in `groupIds`
@@ -1497,7 +1566,7 @@ export default function ChatsScreen() {
     return map;
   }, [contacts]);
 
-  const firestoreUsersMap = useMemo(() => {
+  const memberInfoMap = useMemo(() => {
     const map = new Map<string, { displayName: string; phone: string; photoURL?: string; contactPhotoUri?: string }>();
     for (const c of contacts) {
       map.set(c.userId, {
@@ -1516,7 +1585,7 @@ export default function ChatsScreen() {
   }, [contacts, memberInfo]);
 
   // The chat list should only render once names can be resolved. A direct chat
-  // is "ready" when its other member is present in firestoreUsersMap (from
+  // is "ready" when its other member is present in memberInfoMap (from
   // contacts or the async member fetch). This prevents the flash of "Unknown".
   // Safety net: never let name resolution block the list indefinitely. If
   // names haven't resolved within a few seconds (e.g. a member doc is missing
@@ -1535,10 +1604,10 @@ export default function ChatsScreen() {
     for (const chat of chats) {
       if ((chat.type ?? 'direct') === 'group') continue;
       const otherId = chat.members.find((id) => id !== userId);
-      if (otherId && !firestoreUsersMap.has(otherId)) return false;
+      if (otherId && !memberInfoMap.has(otherId)) return false;
     }
     return true;
-  }, [chats, userId, firestoreUsersMap, forceNamesReady]);
+  }, [chats, userId, memberInfoMap, forceNamesReady]);
 
   useEffect(() => {
     if (!chats.length || !userId) return;
@@ -1557,21 +1626,23 @@ export default function ChatsScreen() {
     if (unknownIds.size === 0) return;
 
     (async () => {
-      const fsDb = db as ReturnType<typeof firestore>;
       const newInfo = new Map(memberInfo);
       const newPrivacy = new Map(privacyPhotoMap);
 
       for (const uid of unknownIds) {
         try {
-          const snap = await fsDb.collection('users').doc(uid).get();
-          if (snap.exists()) {
-            const data = snap.data()!;
+          const res = await endpoints.getUser(uid);
+          if (res.ok) {
+            const data = res.data;
+            const photoURL = data.avatarObjectKey
+              ? await mediaService.getDownloadUrl(data.avatarObjectKey)
+              : null;
             newInfo.set(uid, {
-              displayName: data.displayName ?? data.phone ?? uid,
-              phone: data.phone ?? '',
-              photoURL: data.photoURL || null,
+              displayName: data.displayName ?? data.phoneNumber ?? uid,
+              phone: data.phoneNumber ?? '',
+              photoURL: photoURL || undefined,
             });
-            newPrivacy.set(uid, data.privacyProfilePhoto ?? 'Contacts');
+            newPrivacy.set(uid, data.privacy?.profilePhoto ?? 'Contacts');
           } else {
             // Member doc doesn't exist (e.g. a legacy/synthetic chat whose
             // "member" id is actually a phone number, or a deleted account).
@@ -1602,15 +1673,16 @@ export default function ChatsScreen() {
     if (!needed.length) return;
 
     (async () => {
+      // Each contact's profile-photo privacy, from their public profile.
       const updates = new Map<string, string>();
-      await Promise.all(
-        needed.map(async (c) => {
-          try {
-            const privacy = await fetchUserPrivacySettings(c.userId);
-            updates.set(c.userId, privacy.profilePhoto);
-          } catch {}
-        })
-      );
+      await forEachLimit(needed, 8, async (c) => {
+        try {
+          const res = await endpoints.getUser(c.userId);
+          if (res.ok) updates.set(c.userId, res.data.privacy?.profilePhoto ?? 'Contacts');
+          // Not found etc.: cache the default; network errors retry next time.
+          else if (res.error.kind === 'api') updates.set(c.userId, 'Contacts');
+        } catch {}
+      });
       if (updates.size > 0) {
         setPrivacyPhotoMap((prev) => new Map([...prev, ...updates]));
       }
@@ -1627,11 +1699,11 @@ export default function ChatsScreen() {
     if (!userId) return [];
     return groupChats.map((g) => ({
       chatId: g.chatId,
-      name:   resolveDisplayName(g, userId, contactsMap, firestoreUsersMap),
+      name:   resolveDisplayName(g, userId, contactsMap, memberInfoMap),
       photoURL: null,
       memberCount: g.members.length,
     }));
-  }, [groupChats, userId, contactsMap, firestoreUsersMap]);
+  }, [groupChats, userId, contactsMap, memberInfoMap]);
 
   const currentLabel = useMemo(
     () => (tab === 'Chats' || tab === 'Groups' || tab === 'Broadcast')
@@ -1700,10 +1772,10 @@ export default function ChatsScreen() {
     return base
       .filter((c) => {
         if (!userId) return false;
-        return resolveDisplayName(c, userId, contactsMap, firestoreUsersMap).toLowerCase().includes(q);
+        return resolveDisplayName(c, userId, contactsMap, memberInfoMap).toLowerCase().includes(q);
       })
       .sort(byRecent);
-  }, [tab, groupChats, labels, chats, query, userId, contactsMap, firestoreUsersMap, pinned]);
+  }, [tab, groupChats, labels, chats, query, userId, contactsMap, memberInfoMap, pinned]);
 
   // Scroll to first unread chat or bottom when data updates
   useEffect(() => {
@@ -1807,46 +1879,48 @@ export default function ChatsScreen() {
   }, []);
 
   // ── Actions-menu operations ──────────────────────────────────────
-  // Clear chat FOR THIS USER ONLY — records a per-user cutoff; the other member
-  // keeps their messages. Nothing is deleted from Firestore.
-  const actionClearChat = useCallback(async (chatId: string) => {
-    if (!userId) return;
+  // Clear chat FOR THIS USER ONLY — the server records this user's cutoff:
+  // older messages are no longer returned to them and the list hides the
+  // cleared preview. The other members keep their messages.
+  const actionClearChat = useCallback(async (chatId: string): Promise<boolean> => {
+    if (!userId) return false;
     try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('chats').doc(chatId).set(
-        { clearedAt: { [userId]: firestore.FieldValue.serverTimestamp() } },
-        { merge: true },
-      );
+      const res = await endpoints.clearChat(chatId);
+      if (!res.ok) throw new Error(res.error.message);
       await clearLocalMessages(chatId);
+      reloadChatsRef.current();
+      return true;
     } catch (err) {
       console.error('[ChatsScreen] clear chat failed:', err);
       Alert.alert('Error', 'Could not clear chat.');
+      return false;
     }
   }, [userId]);
 
-  // Delete chat FOR THIS USER ONLY — clears their view and removes them from the
-  // chat members so it leaves their list. The other member is unaffected.
+  // Delete chat FOR THIS USER ONLY — clears their view and, for a group, leaves
+  // it (any member may; the server records them as a past member) so it drops
+  // off their list. A direct chat is only cleared: the server reuses the same
+  // 1-to-1 chat whenever either side reopens it, so leaving would cut this user
+  // off from it. The other members are unaffected.
   const actionDeleteChat = useCallback(async (chatId: string) => {
     if (!userId) return;
+    const chat = chats.find((c) => c.chatId === chatId);
+    const isGroupChat = !!chat && classifyChat(chat) === 'group';
+    if (!(await actionClearChat(chatId)) || !isGroupChat) return;
     try {
-      await actionClearChat(chatId);
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('chats').doc(chatId).update({
-        members: firestore.FieldValue.arrayRemove(userId),
-      }).catch(() => {});
+      const res = await endpoints.leaveChat(chatId);
+      if (!res.ok) throw new Error(res.error.message);
+      reloadChatsRef.current();
     } catch (err) {
       console.error('[ChatsScreen] delete chat failed:', err);
       Alert.alert('Error', 'Could not delete chat.');
     }
-  }, [actionClearChat, userId]);
+  }, [actionClearChat, userId, chats]);
 
   const actionBlock = useCallback(async (otherUid: string, name: string, photo: string | null) => {
     if (!userId) return;
     try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('users').doc(userId).collection('blockedUsers').doc(otherUid).set({
-        blockedAt: new Date(), displayName: name, photoURL: photo || null,
-      });
+      await endpoints.blockUser(otherUid, { displayName: name, photoObjectKey: photo || null });
       Alert.alert('Contact Blocked', `${name} has been blocked.`);
     } catch (err) {
       console.error('[ChatsScreen] block failed:', err);
@@ -1858,7 +1932,7 @@ export default function ChatsScreen() {
     if (item.chatId.startsWith(NO_CHAT_PREFIX)) {
       const otherId = item.chatId.slice(NO_CHAT_PREFIX.length);
       const contact = contacts.find((c) => c.userId === otherId);
-      const otherUser = firestoreUsersMap.get(otherId);
+      const otherUser = memberInfoMap.get(otherId);
       const displayName = contact?.displayName ?? otherUser?.phone ?? otherUser?.displayName ?? '';
       const contactPhotoUri = contact?.photoUri ?? otherUser?.contactPhotoUri;
       const rawPhoto = contact?.firebasePhotoURL ?? otherUser?.photoURL;
@@ -1902,10 +1976,10 @@ export default function ChatsScreen() {
       );
     }
 
-    const displayName     = userId ? resolveDisplayName(item, userId, contactsMap, firestoreUsersMap) : '';
+    const displayName     = userId ? resolveDisplayName(item, userId, contactsMap, memberInfoMap) : '';
     const isGroup         = classifyChat(item) === 'group';
     const otherMemberId   = isGroup ? null : item.members.find((id) => id !== userId);
-    const otherUser       = otherMemberId ? firestoreUsersMap.get(otherMemberId) : null;
+    const otherUser       = otherMemberId ? memberInfoMap.get(otherMemberId) : null;
     const contactPhotoUri = otherUser?.contactPhotoUri;
     const rawPhoto        = otherUser?.photoURL;
     const photoSetting    = otherMemberId ? (privacyPhotoMap.get(otherMemberId) ?? 'Contacts') : 'Contacts';
@@ -1986,12 +2060,12 @@ export default function ChatsScreen() {
             isMuted,
             isFavourite: favourites.includes(item.chatId),
           })}
-          senderInfo={item.lastSenderId && isGroup ? firestoreUsersMap.get(item.lastSenderId) : undefined}
+          senderInfo={item.lastSenderId && isGroup ? memberInfoMap.get(item.lastSenderId) : undefined}
         />
       </SwipeableRow>
     );
   }, [
-    userId, contacts, contactsMap, firestoreUsersMap, privacyPhotoMap, userStatusMap,
+    userId, contacts, contactsMap, memberInfoMap, privacyPhotoMap, userStatusMap,
     bevel, textColor, fontFamily, FG.secondary, navigation, openOrCreateDirectChat,
     pinned, mutedChats, favourites, handleTogglePin, toggleMute, openChatActions,
   ]);

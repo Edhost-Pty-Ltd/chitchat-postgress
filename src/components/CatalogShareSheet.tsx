@@ -73,9 +73,27 @@ export function CatalogShareSheet({ visible, item, onClose }: Props) {
   const [search,   setSearch]   = useState('');
   const [sending,  setSending]  = useState<string | null>(null); // chatId currently being sent
   const { contacts } = useContacts();
+  // Preview URL for the item image. item.imageUri is stored as an object key;
+  // resolve it to a short-lived download URL for the preview. A local URI / full
+  // URL passes through unchanged. Sending still uses the raw item (object key).
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   // Reset search on open
   useEffect(() => { if (visible) setSearch(''); }, [visible]);
+
+  useEffect(() => {
+    let active = true;
+    const uri = item.imageUri;
+    if (!uri) { setPreviewUrl(null); return; }
+    if (/^(file:|content:|https?:|assets-library:|ph:|data:)/i.test(uri)) {
+      setPreviewUrl(uri);
+      return;
+    }
+    import('../services/mediaService').then(({ mediaService }) =>
+      mediaService.getDownloadUrl(uri).then((u) => { if (active) setPreviewUrl(u); }),
+    );
+    return () => { active = false; };
+  }, [item.imageUri]);
 
   // Filter chats by display name matching the search query
   const filtered = useMemo(() => {
@@ -178,8 +196,8 @@ export function CatalogShareSheet({ visible, item, onClose }: Props) {
 
           {/* Item preview pill */}
           <View style={styles.itemPreview}>
-            {item.imageUri ? (
-              <Image source={{ uri: item.imageUri }} style={styles.previewImg} />
+            {previewUrl ? (
+              <Image source={{ uri: previewUrl }} style={styles.previewImg} />
             ) : (
               <View style={styles.previewImgPlaceholder}>
                 <Ionicons name="cube-outline" size={18} color={COLORS.blue} />

@@ -10,8 +10,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Modal, Pressable, StyleSheet, ScrollView, ActivityIndicator, Text, Animated, Easing, TouchableOpacity, Dimensions,
 } from 'react-native';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 import { COLORS, SHADOW } from '../types/theme';
 
@@ -103,25 +102,23 @@ export function ChatPreviewModal({
     setMessages([]);
     (async () => {
       try {
-        const fsDb = db as ReturnType<typeof firestore>;
-        const snap = await fsDb
-          .collection('chats').doc(chatId).collection('messages')
-          .orderBy('timestamp', 'desc')
-          .limit(40)
-          .get();
+        // Read-only page fetch — the REST read endpoint never records receipts,
+        // so previewing cannot mark anything delivered/read.
+        const res = await endpoints.listMessages(chatId, { limit: 40 });
         if (cancelled) return;
-        const msgs: PreviewMessage[] = snap.docs.map((d) => {
-          const data = d.data();
-          const ts = data.timestamp;
-          return {
-            id: d.id,
-            senderId: data.senderId ?? '',
-            text: data.text ?? '',
-            type: data.type ?? 'text',
-            timestamp: ts?.toDate ? ts.toDate() : null,
-          };
-        }).reverse();
-        setMessages(msgs);
+        if (res.ok) {
+          // listMessages returns newest-first; reverse to show oldest→newest.
+          const msgs: PreviewMessage[] = res.data.messages
+            .map((m) => ({
+              id: m.id,
+              senderId: m.senderId ?? '',
+              text: m.text ?? '',
+              type: m.type ?? 'text',
+              timestamp: m.createdAt ? new Date(m.createdAt) : null,
+            }))
+            .reverse();
+          setMessages(msgs);
+        }
       } catch (err) {
         console.warn('[ChatPreviewModal] fetch failed:', err);
       } finally {
@@ -252,7 +249,7 @@ export function ChatPreviewModal({
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
+  backdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.45)' },
   centerWrap: { flex: 1, justifyContent: 'center', paddingHorizontal: 16, paddingVertical: 24 },
   card: {
     width: '100%',
@@ -274,7 +271,7 @@ const styles = StyleSheet.create({
   },
   // Scrim over AppBg so the action rows are clearly readable (color set inline per theme)
   actionsScrim: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   actionRow: {
     flexDirection: 'row',

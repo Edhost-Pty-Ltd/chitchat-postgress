@@ -25,12 +25,13 @@ import { useAuth } from '../hooks/useAuth';
 import { useFloatingCall } from '../context/FloatingCallContext';
 import { useContacts } from '../hooks/useContacts';
 import { useMeetingRoom } from '../hooks/useMeetingRoom';
-import { endpoints } from '../api/endpoints';
+import { endpoints, type MeetingStateDTO } from '../api/endpoints';
 import { SignalingService } from '../services/signalingService';
 import { socketClient } from '../realtime/socket';
+import { mediaService, fileSize } from '../services/mediaService';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
 import { useAudioRecorder, AudioModule, RecordingPresets, setAudioModeAsync } from 'expo-audio';
-import { documentDirectory, copyAsync, readAsStringAsync, EncodingType } from 'expo-file-system/legacy';
+import { documentDirectory, copyAsync, getInfoAsync } from 'expo-file-system/legacy';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 
@@ -59,7 +60,9 @@ import { ParticipantPickerSheet } from '../components/ParticipantPickerSheet';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList, Contact } from '../types';
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// Server-side minutes generation can take a few minutes; stop showing the
+// "Generating minutes…" overlay if no result arrives within this window.
+const MINUTES_WAIT_TIMEOUT_MS = 6 * 60 * 1000;
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'VideoCall'>;
 type RouteP  = RouteProp<RootStackParamList, 'VideoCall'>;
@@ -193,7 +196,7 @@ export default function VideoCallScreen() {
   const {
     room, loading: roomLoading,
     join, leave, muteUser, unmuteUser, muteAll, unmuteAll,
-    removeUser, addParticipants, saveMinutes, addRecording, endMeeting,
+    removeUser, addParticipants, addRecording, endMeeting, setRecordingState,
   } = useMeetingRoom(meetingId);
 
   const isOrganizer = !!user?.uid && room.organizerId === user.uid;
@@ -240,16 +243,45 @@ export default function VideoCallScreen() {
   const [recordingMs, setRecordingMs] = useState(0);
   const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Minutes generation state
+  // Minutes generation state. Minutes are generated server-side after a
+  // recording is registered; isSummarizing shows the overlay while we wait for
+  // the meeting:updated 'minutes' event.
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [minutesText, setMinutesText]     = useState<string | null>(room.minutes);
   const [minutesPdfUri, setMinutesPdfUri] = useState<string | null>(null);
-  // Tracks the last uploaded recording URL so it can be shown in the report
+  // Tracks the last uploaded recording's playback URL so it can be shown in the report
   const lastRecordingUrlRef = useRef<string | null>(null);
   const [reportRecordingUrl, setReportRecordingUrl] = useState<string | null>(null);
+  const minutesWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (minutesWaitTimerRef.current) clearTimeout(minutesWaitTimerRef.current);
+    };
+  }, []);
 
-  // Sync minutes from Firestore
+  // Sync minutes from the server (room state)
   useEffect(() => { setMinutesText(room.minutes); }, [room.minutes]);
+
+  const startAwaitingMinutes = useCallback(() => {
+    if (!mountedRef.current) return;
+    setIsSummarizing(true);
+    if (minutesWaitTimerRef.current) clearTimeout(minutesWaitTimerRef.current);
+    minutesWaitTimerRef.current = setTimeout(() => {
+      minutesWaitTimerRef.current = null;
+      if (mountedRef.current) setIsSummarizing(false);
+    }, MINUTES_WAIT_TIMEOUT_MS);
+  }, []);
+
+  const stopAwaitingMinutes = useCallback(() => {
+    if (minutesWaitTimerRef.current) {
+      clearTimeout(minutesWaitTimerRef.current);
+      minutesWaitTimerRef.current = null;
+    }
+    if (mountedRef.current) setIsSummarizing(false);
+  }, []);
 
   // Attendance log (userId -> join/leave timestamps)
   const attendanceRef = useRef<Map<string, { name: string; joinedAt: Date; leftAt: Date | null }>>(new Map());
@@ -306,35 +338,16 @@ export default function VideoCallScreen() {
   const remoteStreamRef = useRef<any>(null);
   useEffect(() => { remoteStreamRef.current = remoteStream; }, [remoteStream]);
 
-  // ── Fetch meeting schedule (end time for countdown) ─────────────
+  // ── Meeting schedule (start/end for the countdown) ──────────────
+  // Comes from the live room state (startsAt / endsAt). Ending the meeting is
+  // handled by the meeting:ended subscription further down.
+  const scheduleStartMs = room.startsAt?.getTime() ?? null;
+  const scheduleEndMs   = room.endsAt?.getTime() ?? null;
   useEffect(() => {
-    if (!isMeeting || !meetingId) return;
-    // Poll via REST on mount, then refresh on socket meeting:updated events.
-    const fetchMeeting = async () => {
-      try {
-        const res = await endpoints.getMeeting(meetingId);
-        if (!res.ok) return;
-        const data = res.data.state as any;
-        if (data?.endDate) setMeetingEndTime(new Date(data.endDate));
-        if (data?.date)    setMeetingStartTime(new Date(data.date));
-        if (data?.endedAt && data?.isActive === false) {
-          if (isOrganizer) {
-            if (!reportOpen) buildAndShowReport(data).catch(() => {});
-          } else {
-            Alert.alert(
-              'Meeting ended',
-              'The organizer has ended this meeting.',
-              [{ text: 'OK', onPress: () => navigation.goBack() }],
-              { cancelable: false }
-            );
-          }
-        }
-      } catch {}
-    };
-    void fetchMeeting();
-    const unsub = socketClient.subscribe('meeting:updated', fetchMeeting);
-    return () => unsub();
-  }, [isMeeting, meetingId, isOrganizer]); // eslint-disable-line
+    if (!isMeeting) return;
+    if (scheduleEndMs != null)   setMeetingEndTime(new Date(scheduleEndMs));
+    if (scheduleStartMs != null) setMeetingStartTime(new Date(scheduleStartMs));
+  }, [isMeeting, scheduleStartMs, scheduleEndMs]);
 
   // ── Join meeting presence on mount ──────────────────────────────
   useEffect(() => {
@@ -362,22 +375,25 @@ export default function VideoCallScreen() {
   // ── Auto-post summary in chat when new participants join ────────
   const prevJoinedRef = useRef<string[]>([]);
   useEffect(() => {
-    if (!isMeeting || !meetingId) return;
+    // Wait for the server's room state: before it arrives joinedMembers only
+    // holds our own optimistic join, which would make everyone look "new".
+    if (!isMeeting || !meetingId || roomLoading) return;
     const current = room.joinedMembers.slice();
     const prev = prevJoinedRef.current;
     if (prev.length > 0) {
       const newlyJoined = current.filter(id => !prev.includes(id) && id !== user?.uid);
       if (newlyJoined.length > 0 && minutesText) {
-        // Broadcast a recap via socket meeting:message so newcomers see prior context
+        // Broadcast a recap to room chat so newcomers see prior context
         socketClient.emit('meeting:message', {
           meetingId,
           text: `📋 Recap of what was discussed before you joined:\n\n${minutesText}`,
           isSystem: true,
+          senderName: 'Meeting Recap',
         });
       }
     }
     prevJoinedRef.current = current;
-  }, [room.joinedMembers, minutesText, isMeeting, meetingId, user?.uid]);
+  }, [room.joinedMembers, minutesText, isMeeting, meetingId, user?.uid, roomLoading]);
 
   // ── Initial call setup ──────────────────────────────────────────
   useEffect(() => {
@@ -386,30 +402,12 @@ export default function VideoCallScreen() {
         if (Platform.OS !== 'web' && !permission?.granted) await requestPermission();
         await initializePeerConnection(true);
 
-        // Meeting joins don't use a calls/{callId} document — skip all calls
-        // Firestore ops to avoid the permission-denied error.
+        // Meeting joins don't use a 1:1 call — skip the call signaling.
+        // (The organizer's recording auto-starts in a separate effect once the
+        // room has loaded and we know who the organizer is.)
         if (isMeeting) {
           setCallStatus('connected');
           timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
-
-          // Auto-start recording for the organizer so minutes are always generated
-          if (isOrganizer) {
-            try {
-              const { granted } = await AudioModule.requestRecordingPermissionsAsync();
-              if (granted) {
-                await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-                await audioRecorder.prepareToRecordAsync();
-                audioRecorder.record();
-                setIsRecording(true);
-                setRecordingMs(0);
-                recordingTimerRef.current = setInterval(
-                  () => setRecordingMs(ms => ms + 1000), 1000
-                );
-              }
-            } catch (recErr) {
-              console.warn('[VideoCall] auto-start recording failed:', recErr);
-            }
-          }
           return;
         }
 
@@ -421,11 +419,6 @@ export default function VideoCallScreen() {
             if (data?.answer && !remoteStreamRef.current) {
               setRemoteAnswer(data.answer).catch(console.error);
             }
-            if (data?.iceCandidates) {
-              data.iceCandidates.forEach((candidate: any) => {
-                addIceCandidate(candidate).catch(console.error);
-              });
-            }
             if (data?.status === 'ended') navigation.goBack();
           });
         } else {
@@ -433,11 +426,6 @@ export default function VideoCallScreen() {
             if (data?.offer && !remoteStreamRef.current) {
               const answer = await createAnswer(data.offer);
               await SignalingService.saveAnswer(callId, answer);
-            }
-            if (data?.iceCandidates) {
-              data.iceCandidates.forEach((candidate: any) => {
-                addIceCandidate(candidate).catch(console.error);
-              });
             }
             if (data?.status === 'ended') navigation.goBack();
           });
@@ -665,25 +653,65 @@ export default function VideoCallScreen() {
   }, [screenSharing, localStream, getPeerConnection]);
 
   // ── Recording ───────────────────────────────────────────────────
+  /** Start the recorder and flag the meeting as recorded for everyone. */
+  const beginRecording = useCallback(async () => {
+    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+    await audioRecorder.prepareToRecordAsync();
+    if (!mountedRef.current) return;
+    audioRecorder.record();
+    setIsRecording(true);
+    setRecordingMs(0);
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+    recordingTimerRef.current = setInterval(() => setRecordingMs(ms => ms + 1000), 1000);
+    // Notify all participants ("This meeting is being recorded")
+    setRecordingState(true).catch(() => {});
+  }, [audioRecorder, setRecordingState]);
+
+  /**
+   * Upload a finished recording to the meeting's media prefix and register it.
+   * The server then generates the minutes in the background, saves them on the
+   * meeting, posts them to the meeting chat and emits meeting:updated
+   * (reason 'minutes').
+   */
+  const uploadRecording = useCallback(async (localPath: string, durationMs: number) => {
+    if (!meetingId) throw new Error('Not in a meeting');
+    // The backend rejects sizeBytes 0, so fall back to the legacy stat.
+    let sizeBytes = await fileSize(localPath);
+    if (!sizeBytes) {
+      const info = await getInfoAsync(localPath);
+      sizeBytes = info.exists ? info.size : 0;
+    }
+    if (!sizeBytes) throw new Error('Recording file is empty');
+    const objectKey = await mediaService.upload(localPath, 'meeting', {
+      meetingId,
+      sizeBytes,
+      contentType: 'audio/mp4',
+      ext: 'm4a',
+    });
+    const result = await addRecording({ objectKey, durationMs });
+    if (result.recording.url) lastRecordingUrlRef.current = result.recording.url;
+    return result;
+  }, [meetingId, addRecording]);
+
   const toggleRecording = useCallback(async () => {
     if (isRecording) {
       try {
         setIsRecording(false);
         if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+        setRecordingState(false).catch(() => {});
         await audioRecorder.stop();
         const uri = audioRecorder.uri;
         if (uri) {
           const newPath = `${documentDirectory}Meeting_${meetingId ?? callId}_${Date.now()}.m4a`;
           await copyAsync({ from: uri, to: newPath });
           try {
-            // Recording upload via S3 presigned URLs (media service follow-up task).
-            const url = newPath; // local URI until media upload is wired
-            await addRecording({ url, durationMs: recordingMs });
-            lastRecordingUrlRef.current = url;
+            const { summarizing } = await uploadRecording(newPath, recordingMs);
+            // Minutes are generated server-side; wait for meeting:updated 'minutes'.
+            if (summarizing) startAwaitingMinutes();
           } catch (upErr) {
-            console.warn('[VideoCall] Recording registration failed:', upErr);
+            console.warn('[VideoCall] Upload failed, saving local only:', upErr);
+            Alert.alert('Saved Locally', `Recording saved locally but not uploaded.`);
           }
-          transcribeRecording(newPath).catch(() => {});
         }
       } catch (err) {
         console.error('[VideoCall] stop recording failed:', err);
@@ -695,58 +723,30 @@ export default function VideoCallScreen() {
     try {
       const { granted } = await AudioModule.requestRecordingPermissionsAsync();
       if (!granted) { Alert.alert('Permission denied', 'Microphone access is required to record.'); return; }
-      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-      await audioRecorder.prepareToRecordAsync();
-      audioRecorder.record();
-      setIsRecording(true);
-      setRecordingMs(0);
-      recordingTimerRef.current = setInterval(() => setRecordingMs(ms => ms + 1000), 1000);
+      await beginRecording();
     } catch (err) {
       console.error('[VideoCall] start recording failed:', err);
     }
-  }, [isRecording, audioRecorder, meetingId, callId, recordingMs, addRecording]);
+  }, [isRecording, audioRecorder, meetingId, callId, recordingMs, setRecordingState,
+      uploadRecording, startAwaitingMinutes, beginRecording]);
 
-  // ── Transcribe + Gemini minutes ─────────────────────────────────
-  const transcribeRecording = useCallback(async (fileUri: string) => {
-    if (!GEMINI_API_KEY) {
-      console.warn('[VideoCall] No Gemini API key set');
-      return;
-    }
-    setIsSummarizing(true);
-    try {
-      const base64Audio = await readAsStringAsync(fileUri, { encoding: EncodingType.Base64 });
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [
-              { text: 'Act as an executive meeting recorder. Produce clear minutes with: 1. Executive Summary 2. Key Decisions 3. Attendees & Action Items. Format as structured plain text.' },
-              { inlineData: { mimeType: 'audio/mp4', data: base64Audio } },
-            ]}],
-          }),
-        }
-      );
-      const data = await res.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || 'No content returned.';
-      setMinutesText(text);
-      if (isMeeting) {
-        await saveMinutes(text);
-        // Auto-post summary to the in-meeting chat via the backend.
-        if (meetingId) {
-          endpoints
-            .sendMeetingMessage(meetingId, { text: `📋 Meeting minutes generated:\n\n${text}` })
-            .catch(() => {});
-        }
+  // ── Auto-start recording for the organizer so minutes are always generated ──
+  // Runs once per call, after setup, as soon as the room has loaded and shows
+  // that we are the organizer.
+  const autoRecordAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (!isMeeting || !isOrganizer || callStatus !== 'connected') return;
+    if (autoRecordAttemptedRef.current) return;
+    autoRecordAttemptedRef.current = true;
+    (async () => {
+      try {
+        const { granted } = await AudioModule.requestRecordingPermissionsAsync();
+        if (granted) await beginRecording();
+      } catch (recErr) {
+        console.warn('[VideoCall] auto-start recording failed:', recErr);
       }
-    } catch (e) {
-      console.error('[VideoCall] Gemini failed:', e);
-      Alert.alert('Minutes Error', 'Could not generate minutes from the recording.');
-    } finally {
-      setIsSummarizing(false);
-    }
-  }, [isMeeting, saveMinutes, meetingId]);
+    })();
+  }, [isMeeting, isOrganizer, callStatus, beginRecording]);
 
   // Cleanup recording timer on unmount
   useEffect(() => () => {
@@ -796,8 +796,15 @@ export default function VideoCallScreen() {
   const handleAddParticipants = useCallback(async (ids: string[]) => {
     if (!ids.length || !user?.uid || !meetingId) return;
 
-    // 1. Add to the Firestore meeting document so they can see it in Calendar
-    await addParticipants(ids);
+    // 1. Add them to the meeting so they can see it in Calendar (the server
+    //    also invites them with a chat message + push)
+    try {
+      await addParticipants(ids, user.displayName || null);
+    } catch (err: any) {
+      console.warn('[VideoCall] add participants failed:', err);
+      Alert.alert('Could not add participants', err?.message || 'Please try again.');
+      return;
+    }
 
     // 2. Ring each newly added participant so they get an incoming call
     //    that drops them straight into the meeting.
@@ -833,7 +840,7 @@ export default function VideoCallScreen() {
   );
 
   // ── Build & show post-meeting report ────────────────────────────
-  const buildAndShowReport = useCallback(async (meetingDoc?: any) => {
+  const buildAndShowReport = useCallback(async (meetingDoc?: MeetingStateDTO) => {
     try {
       const attendees: { id: string; name: string; joinedAt: Date | null; leftAt: Date | null; seconds: number }[] = [];
       const now = new Date();
@@ -864,8 +871,8 @@ export default function VideoCallScreen() {
         if (res.ok) doc = res.data.state;
       }
       if (doc) {
-        startedAt = toDate((doc as any).date) ?? startedAt;
-        endedAt = toDate((doc as any).endedAt);
+        startedAt = toDate(doc.startsAt) ?? startedAt;
+        endedAt = toDate(doc.endedAt);
       }
 
       const totalSeconds = startedAt
@@ -878,12 +885,15 @@ export default function VideoCallScreen() {
         attendees,
         totalSeconds,
       });
-      setReportRecordingUrl(lastRecordingUrlRef.current);
+      // Playback URL of the recording registered in this call, else the
+      // latest one the server listed for the meeting.
+      const latestRecording = room.recordings[room.recordings.length - 1];
+      setReportRecordingUrl(lastRecordingUrlRef.current ?? latestRecording?.url ?? null);
       setReportOpen(true);
     } catch (e) {
       console.warn('[VideoCall] buildReport failed:', e);
     }
-  }, [duration, meetingId]);
+  }, [duration, meetingId, room.recordings]);
 
   // ── PDF export for minutes ──────────────────────────────────────
   const exportMinutesPdf = useCallback(async () => {
@@ -938,7 +948,11 @@ export default function VideoCallScreen() {
   }, [minutesText, reportData, routeMeetingTitle]);
 
   // ── Actions ─────────────────────────────────────────────────────
+  // Set while we are leaving so our own meeting:ended doesn't pop the report.
+  const hangingUpRef = useRef(false);
+
   const doHangUp = useCallback(async (endForAll: boolean) => {
+    hangingUpRef.current = true;
     if (!isMeeting) {
       try {
         await endpoints.endCall(callId);
@@ -960,32 +974,28 @@ export default function VideoCallScreen() {
       }
     }
 
-    // ── Stop recording, upload, and auto-generate minutes ───────
+    // ── Stop recording, upload, and let the server generate minutes ──
     if (isRecording && isMeeting) {
       try {
         if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
         setIsRecording(false);
+        // Ending for all already cleared the "being recorded" flag server-side.
+        if (!(endForAll && isOrganizer)) setRecordingState(false).catch(() => {});
         await audioRecorder.stop();
         const uri = audioRecorder.uri;
         if (uri) {
           const newPath = `${documentDirectory}Meeting_${meetingId ?? callId}_${Date.now()}.m4a`;
           await copyAsync({ from: uri, to: newPath });
-          let uploadedUrl: string | null = null;
-          try {
-            // Recording upload uses the S3 media service (presigned URL path).
-            // The `mediaService` will be wired here in the media follow-up task.
-            // For now, local URI is passed to addRecording and transcribeRecording.
-            uploadedUrl = newPath;
-            const elapsed = recordingMs;
-            await addRecording({ url: uploadedUrl, durationMs: elapsed });
-            lastRecordingUrlRef.current = uploadedUrl;
-          } catch (upErr) {
-            console.warn('[VideoCall] recording registration failed:', upErr);
-          }
-          // Auto-generate minutes from the recording — don't await so we don't
-          // block navigation; transcribeRecording sets isSummarizing and saves
-          // the result to Firestore and local state on its own.
-          transcribeRecording(newPath).catch(() => {});
+          const elapsed = recordingMs;
+          // Upload + register in the background so leaving isn't blocked. The
+          // server generates the minutes from the stored recording and posts
+          // them to the meeting chat; the overlay only shows if still mounted.
+          uploadRecording(newPath, elapsed)
+            .then(({ summarizing }) => { if (summarizing) startAwaitingMinutes(); })
+            .catch((upErr) => {
+              console.warn('[VideoCall] upload on hangup failed:', upErr);
+              Alert.alert('Saved Locally', `Recording saved locally but not uploaded.`);
+            });
         }
       } catch (stopErr) {
         console.warn('[VideoCall] stop recording on hangup failed:', stopErr);
@@ -1001,7 +1011,8 @@ export default function VideoCallScreen() {
     cleanupWebRTC();
     navigation.goBack();
   }, [callId, isMeeting, meetingId, isOrganizer, endMeeting, user?.uid, isRecording,
-      audioRecorder, recordingMs, addRecording, transcribeRecording, cleanupWebRTC, navigation]);
+      audioRecorder, recordingMs, setRecordingState, uploadRecording, startAwaitingMinutes,
+      cleanupWebRTC, navigation]);
 
   const hangUp = useCallback(() => {
     if (isMeeting && isOrganizer) {
@@ -1030,6 +1041,91 @@ export default function VideoCallScreen() {
     setMuted(newMuted);
     toggleMuteWebRTC(newMuted);
   };
+
+  // ── Server-driven meeting events ────────────────────────────────
+  // meeting:ended arrives on both the user room and the meeting room, so each
+  // outcome is handled once. Handlers read this render's values via a ref so
+  // the socket subscriptions are made once per meeting.
+  const meetingEndedHandledRef = useRef(false);
+  const removedHandledRef = useRef(false);
+  const meetingEventsRef = useRef<{
+    ended: () => void;
+    kicked: () => void;
+    muted: (mutedByOrganizer: boolean) => void;
+    updated: (reason: string | undefined) => void;
+  } | null>(null);
+  meetingEventsRef.current = {
+    // Meeting ended for all — navigate everyone (including non-organizers) away
+    ended: () => {
+      if (meetingEndedHandledRef.current || hangingUpRef.current) return;
+      meetingEndedHandledRef.current = true;
+      if (isOrganizer) {
+        // Organizer sees the report
+        if (!reportOpen) buildAndShowReport().catch(() => {});
+      } else {
+        // Participants get a brief alert then go back to Calendar
+        Alert.alert(
+          'Meeting ended',
+          'The organizer has ended this meeting.',
+          [{ text: 'OK', onPress: () => navigation.goBack() }],
+          { cancelable: false },
+        );
+      }
+    },
+    // The organizer removed us: leave the room right away, then go back.
+    kicked: () => {
+      if (removedHandledRef.current || hangingUpRef.current) return;
+      removedHandledRef.current = true;
+      if (user?.uid) void leave(user.uid);
+      Alert.alert(
+        'Removed from meeting',
+        'The organizer removed you from this meeting.',
+        [{ text: 'OK', onPress: () => navigation.goBack() }],
+        { cancelable: false },
+      );
+    },
+    // The organizer muted us: apply it to the local mic. (Unmuting is left to
+    // the participant, as before.)
+    muted: (mutedByOrganizer) => {
+      if (mutedByOrganizer && !muted) {
+        setMuted(true);
+        toggleMuteWebRTC(true);
+      }
+    },
+    // Server-side minutes for the recording we just registered.
+    updated: (reason) => {
+      if (!isSummarizing) return;
+      if (reason === 'minutes') {
+        stopAwaitingMinutes();
+      } else if (reason === 'recording-failed') {
+        stopAwaitingMinutes();
+        Alert.alert('Minutes Error', 'Could not generate minutes from the recording.');
+      }
+    },
+  };
+
+  useEffect(() => {
+    if (!isMeeting || !meetingId) return;
+    const forThisMeeting = (payload: unknown) =>
+      (payload as { meetingId?: string } | null)?.meetingId === meetingId;
+    const unsubs = [
+      socketClient.subscribe('meeting:ended', (payload) => {
+        if (forThisMeeting(payload)) meetingEventsRef.current?.ended();
+      }),
+      socketClient.subscribe('meeting:kicked', (payload) => {
+        if (forThisMeeting(payload)) meetingEventsRef.current?.kicked();
+      }),
+      socketClient.subscribe('meeting:muted', (payload) => {
+        if (!forThisMeeting(payload)) return;
+        meetingEventsRef.current?.muted(!!(payload as { muted?: boolean }).muted);
+      }),
+      socketClient.subscribe('meeting:updated', (payload) => {
+        if (!forThisMeeting(payload)) return;
+        meetingEventsRef.current?.updated((payload as { reason?: string }).reason);
+      }),
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, [isMeeting, meetingId]);
 
   const switchToAudio = async () => {
     if (timerRef.current) clearInterval(timerRef.current);
@@ -1187,6 +1283,16 @@ export default function VideoCallScreen() {
           <AppIcon name="people-outline" size={16} color="#fff" fixedColor />
           <AppText fixedColor style={styles.aloneText}>
             You're the only one here. Share the meeting link to invite others.
+          </AppText>
+        </View>
+      )}
+
+      {/* ── Recording indicator for non-organizer participants ── */}
+      {isMeeting && !isOrganizer && room.isRecording && (
+        <View style={styles.recordingNoticeBanner}>
+          <View style={styles.recordingNoticeDot} />
+          <AppText fixedColor style={styles.recordingNoticeText}>
+            This meeting is being recorded
           </AppText>
         </View>
       )}
@@ -1688,6 +1794,33 @@ const styles = StyleSheet.create({
     ...SHADOW.card,
   },
   aloneText: { flex: 1, fontSize: 13, fontWeight: '600', color: '#fff' },
+
+  recordingNoticeBanner: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 140 : 120,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    paddingVertical: 7,
+    paddingHorizontal: 14,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: 'rgba(239,68,68,0.5)',
+  },
+  recordingNoticeDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#ef4444',
+  },
+  recordingNoticeText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#fff',
+    letterSpacing: 0.2,
+  },
 
   summarizingOverlay: {
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,

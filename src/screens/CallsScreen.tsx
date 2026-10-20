@@ -7,7 +7,7 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Avatar } from '../components';
+import { Avatar, BottomNav } from '../components';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import type { CallHistoryItem } from '../types/call';
 import type { RootStackParamList } from '../types';
@@ -636,6 +636,7 @@ export default function CallsScreen() {
         </View>
       )}
 
+               <BottomNav active='calls'/>
 
     </View>
   );

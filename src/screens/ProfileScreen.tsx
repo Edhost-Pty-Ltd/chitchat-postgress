@@ -17,18 +17,271 @@ import {
   KeyboardAvoidingView, Switch, ActivityIndicator,
 } from 'react-native';
 import DateTimePickerModal from 'react-native-modal-datetime-picker';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { useNavigation } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
-import { uploadFile, generateFileName } from '../config/storage';
+import {
+  endpoints,
+  type MeResponse,
+  type ProfilePatch,
+  type CatalogItemDTO,
+  type CatalogCollectionDTO,
+  type BusinessAddressDTO,
+  type WorkScheduleDTO,
+} from '../api/endpoints';
+import { mediaService, fileSize } from '../services/mediaService';
+import { getFileExtension } from '../utils/fileUtils';
 import { useAuth } from '../context/AuthContext';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { CatalogItem, CatalogCollection, INDUSTRY_CATEGORIES, BusinessAddress } from '../types';
 import { CatalogShareSheet } from '../components/CatalogShareSheet';
+
+// ── Business profile ↔ backend mapping ────────────────────────────────────────
+// GET/PATCH /me carry the business profile as first-class fields: `about` (the
+// business description), email, website, industry, address, workSchedule,
+// timezone, autoResponderEnabled, autoResponderMessage, catalogItems (imageUri
+// holds a media OBJECT KEY) and catalogCollections. PATCH /me only overwrites
+// the fields it is sent, so every save sends just what it changed. Schedule and
+// auto-responder saves also send the device time zone: the server evaluates
+// working hours in that zone when deciding whether to auto-reply.
+//
+// Legacy data: before those fields existed, items/collections/industry/address/
+// auto-responder were packed as JSON into the `catalog` text column and work
+// hours into `operationalHours`. On load, a new field that is still empty falls
+// back to its legacy value, and everything recovered is saved into the new
+// fields in one PATCH (see resolveBusinessProfile). Nothing writes the blob any
+// more; that PATCH only blanks it.
+
+const WEEK_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+/** IANA zone of this device (e.g. "Africa/Johannesburg"), if the runtime knows it. */
+function deviceTimeZone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Adds the device time zone to a schedule / auto-responder save. */
+function withTimeZone(patch: ProfilePatch): ProfilePatch {
+  const timezone = deviceTimeZone();
+  return timezone ? { ...patch, timezone } : patch;
+}
+
+/** PATCH /me; throws on failure so the callers' try/catch blocks log it. */
+async function saveProfile(patch: ProfilePatch): Promise<void> {
+  const res = await endpoints.updateMe(patch);
+  if (!res.ok) throw new Error(res.error.message);
+}
+
+// ── DTO ↔ UI model ────────────────────────────────────────────────────────────
+function fromItemDTO(i: CatalogItemDTO): CatalogItem {
+  return {
+    id:           String(i.id),
+    name:         i.name ?? '',
+    price:        i.price ?? '',
+    description:  i.description ?? undefined,
+    imageUri:     i.imageUri ?? null,
+    collectionId: i.collectionId ?? null,
+  };
+}
+
+function toItemDTO(i: CatalogItem): CatalogItemDTO {
+  return {
+    id:           i.id,
+    name:         i.name,
+    price:        i.price ?? '',
+    description:  i.description ?? null,
+    imageUri:     i.imageUri ?? null,
+    collectionId: i.collectionId ?? null,
+  };
+}
+
+function fromCollectionDTO(c: CatalogCollectionDTO): CatalogCollection {
+  return {
+    id:        String(c.id),
+    name:      c.name ?? '',
+    emoji:     c.emoji ?? null,
+    createdAt: typeof c.createdAt === 'number' ? c.createdAt : 0,
+  };
+}
+
+function toCollectionDTO(c: CatalogCollection): CatalogCollectionDTO {
+  return { id: c.id, name: c.name, emoji: c.emoji ?? null, createdAt: c.createdAt };
+}
+
+// ── Legacy (stopgap) values ───────────────────────────────────────────────────
+// Normalised to what PATCH /me accepts, so one odd legacy value can't make the
+// whole migration PATCH fail validation.
+
+/** The value as a string capped at `max` chars, or undefined if it isn't one. */
+function str(v: unknown, max: number): string | undefined {
+  return typeof v === 'string' ? v.slice(0, max) : undefined;
+}
+
+function parseJson(raw: string | null | undefined): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null; // free text (e.g. typed during registration) — not a blob
+  }
+}
+
+function legacyItems(raw: unknown): CatalogItemDTO[] {
+  if (!Array.isArray(raw)) return [];
+  const items: CatalogItemDTO[] = [];
+  raw.forEach((v, idx) => {
+    if (!v || typeof v !== 'object') return;
+    const o = v as Record<string, unknown>;
+    const id = o.id != null && String(o.id) ? String(o.id).slice(0, 128) : `legacy_${idx}`;
+    items.push({
+      id,
+      name:         str(o.name, 256) ?? '',
+      price:        typeof o.price === 'number' ? String(o.price) : (str(o.price, 64) ?? ''),
+      description:  str(o.description, 2000) ?? null,
+      imageUri:     str(o.imageUri, 1024) ?? null,
+      collectionId: str(o.collectionId, 128) ?? null,
+    });
+  });
+  return items.slice(0, 500);
+}
+
+function legacyCollections(raw: unknown): CatalogCollectionDTO[] {
+  if (!Array.isArray(raw)) return [];
+  const cols: CatalogCollectionDTO[] = [];
+  raw.forEach((v, idx) => {
+    if (!v || typeof v !== 'object') return;
+    const o = v as Record<string, unknown>;
+    const id = o.id != null && String(o.id) ? String(o.id).slice(0, 128) : `legacy_col_${idx}`;
+    cols.push({
+      id,
+      name:  str(o.name, 256) ?? '',
+      // Emoji are multi-unit; drop rather than cut one in half.
+      emoji: typeof o.emoji === 'string' && o.emoji.length <= 16 ? o.emoji : null,
+      ...(typeof o.createdAt === 'number' ? { createdAt: o.createdAt } : {}),
+    });
+  });
+  return cols.slice(0, 100);
+}
+
+function legacyAddress(raw: unknown): BusinessAddressDTO | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const address: BusinessAddressDTO = {
+    street:     str(o.street, 200) ?? '',
+    city:       str(o.city, 120) ?? '',
+    province:   str(o.province, 120) ?? '',
+    postalCode: str(o.postalCode, 32) ?? '',
+    country:    str(o.country, 120) ?? '',
+  };
+  return Object.values(address).some((s) => s.trim()) ? address : null;
+}
+
+function legacySchedule(raw: unknown): WorkScheduleDTO | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Record<string, { open?: unknown; close?: unknown } | null>;
+  const schedule: WorkScheduleDTO = {};
+  for (const day of WEEK_DAYS) {
+    const open = str(o[day]?.open, 16);
+    const close = str(o[day]?.close, 16);
+    if (open !== undefined && close !== undefined) schedule[day] = { open, close };
+  }
+  return Object.keys(schedule).length > 0 ? schedule : null;
+}
+
+interface BusinessProfileState {
+  industry:             string | null;
+  address:              BusinessAddressDTO | null;
+  workSchedule:         WorkScheduleDTO | null;
+  autoResponderEnabled: boolean;
+  autoResponderMessage: string | null;
+  catalogItems:         CatalogItemDTO[];
+  catalogCollections:   CatalogCollectionDTO[];
+}
+
+/**
+ * The business profile to show, plus the one-time migration PATCH (null when
+ * there is nothing to migrate). Each new field that is still empty falls back
+ * to its legacy value; the PATCH copies those values into the new fields and
+ * blanks the legacy `catalog` blob so it is never re-imported (otherwise
+ * deleting the last catalog item would bring the old items back on next load).
+ * Free text in `catalog` (not JSON) is left alone, and so is `operationalHours`:
+ * the schedule can't be emptied again from the UI, and the column may hold free
+ * text typed at registration.
+ */
+function resolveBusinessProfile(me: MeResponse): {
+  profile: BusinessProfileState;
+  migration: ProfilePatch | null;
+} {
+  const parsedBlob = parseJson(me.catalog);
+  const isBlob = !!parsedBlob && typeof parsedBlob === 'object';
+  // The stopgap wrote { items, collections, industry, address,
+  // autoResponderEnabled, auto_responder_message }; tolerate an items array or
+  // the `catalog` / `autoResponderMessage` spellings too.
+  const blob: Record<string, unknown> = Array.isArray(parsedBlob)
+    ? { items: parsedBlob }
+    : isBlob ? (parsedBlob as Record<string, unknown>) : {};
+
+  const patch: ProfilePatch = {};
+
+  let catalogItems = me.catalogItems ?? [];
+  const oldItems = legacyItems(blob.items ?? blob.catalog);
+  if (catalogItems.length === 0 && oldItems.length > 0) {
+    catalogItems = patch.catalogItems = oldItems;
+  }
+
+  let catalogCollections = me.catalogCollections ?? [];
+  const oldCollections = legacyCollections(blob.collections);
+  if (catalogCollections.length === 0 && oldCollections.length > 0) {
+    catalogCollections = patch.catalogCollections = oldCollections;
+  }
+
+  let industry = me.industry || null;
+  const oldIndustry = str(blob.industry, 64)?.trim();
+  if (!industry && oldIndustry) industry = patch.industry = oldIndustry;
+
+  let address = me.address ?? null;
+  const oldAddress = legacyAddress(blob.address);
+  if (!address && oldAddress) address = patch.address = oldAddress;
+
+  let workSchedule = me.workSchedule && Object.keys(me.workSchedule).length > 0 ? me.workSchedule : null;
+  const oldSchedule = legacySchedule(parseJson(me.operationalHours));
+  if (!workSchedule && oldSchedule) workSchedule = patch.workSchedule = oldSchedule;
+
+  // Flag + message are one setting: migrate only if neither is set yet.
+  let autoResponderEnabled = !!me.autoResponderEnabled;
+  let autoResponderMessage = me.autoResponderMessage || null;
+  const oldArEnabled = blob.autoResponderEnabled === true;
+  const oldArMessage = (str(blob.auto_responder_message, 1000) ?? str(blob.autoResponderMessage, 1000))?.trim();
+  if (!autoResponderEnabled && !autoResponderMessage && (oldArEnabled || oldArMessage)) {
+    autoResponderEnabled = patch.autoResponderEnabled = oldArEnabled;
+    if (oldArMessage) autoResponderMessage = patch.autoResponderMessage = oldArMessage;
+  }
+
+  let migration: ProfilePatch | null = null;
+  if (Object.keys(patch).length > 0 || isBlob) {
+    migration = patch.workSchedule || patch.autoResponderEnabled !== undefined
+      ? withTimeZone(patch)
+      : { ...patch };
+    // Retire the blob: its contents were recovered above or are superseded by
+    // the new fields.
+    if (isBlob) migration.catalog = '';
+  }
+
+  return {
+    profile: {
+      industry, address, workSchedule,
+      autoResponderEnabled, autoResponderMessage,
+      catalogItems, catalogCollections,
+    },
+    migration,
+  };
+}
 
 export default function ProfileScreen() {
   const navigation = useNavigation();
@@ -108,6 +361,9 @@ export default function ProfileScreen() {
   const [uploadingCatalogImage, setUploadingCatalogImage] = useState(false);
   const [newItemCollectionId, setNewItemCollectionId] = useState<string | null>(null);
   const [shareItem, setShareItem] = useState<CatalogItem | null>(null);
+  // Resolved download URLs for catalog image OBJECT KEYS (key -> url). Catalog
+  // images are stored as object keys; we resolve them for rendering here.
+  const [catalogImgUrls, setCatalogImgUrls] = useState<Record<string, string>>({});
 
   // Collections
   const [collections, setCollections] = useState<CatalogCollection[]>([]);
@@ -133,35 +389,82 @@ export default function ProfileScreen() {
     return true;
   };
 
-  // ── Load business fields from Firestore ─────────────────────────────────────
-  // Reads users/{ownerUid} — on primary this is the caller's own uid; on
-  // companion this is the owner's real uid, so the same doc loads.
+  // ── Load business fields from the backend (/me) ─────────────────────────────
+  // On primary this is the caller's own profile; on companion the auth.uid is
+  // the owner's uid, so /me returns the owner's profile on both devices.
   useEffect(() => {
     if (!ownerUid) return;
     const loadProfile = async () => {
       try {
-        const fsDb = db as ReturnType<typeof firestore>;
-        const userSnap = await fsDb.collection('users').doc(ownerUid).get();
-        if (userSnap.exists()) {
-          const data = userSnap.data()!;
-          setEmail(data.email || '');
-          setWebsite(data.website || '');
-          setauto_responder_message(data.auto_responder_message || '');
-          setAutoResponderEnabled(data.autoResponderEnabled || false);
-          if (data.workSchedule) setWorkSchedule(data.workSchedule);
-          setCatalog(data.catalog || []);
-          setCollections(data.collections || []);
-          // Enhanced profile fields
-          setIndustry(data.industry || '');
-          setDescription(data.description || '');
-          if (data.address) setAddress({ ...address, ...data.address });
+        const res = await endpoints.getMe();
+        if (!res.ok) return;
+        const data = res.data;
+        setEmail(data.email || '');
+        setWebsite(data.website || '');
+        setDescription(data.about || '');
+
+        // Business fields, with the legacy-blob fallback (see resolveBusinessProfile).
+        const { profile, migration } = resolveBusinessProfile(data);
+        if (profile.workSchedule) setWorkSchedule(profile.workSchedule);
+        setCatalog(profile.catalogItems.map(fromItemDTO));
+        setCollections(profile.catalogCollections.map(fromCollectionDTO));
+        setIndustry(profile.industry || '');
+        setauto_responder_message(profile.autoResponderMessage || '');
+        setAutoResponderEnabled(profile.autoResponderEnabled);
+        if (profile.address) setAddress((prev) => ({ ...prev, ...profile.address }));
+
+        // One-time migration of legacy values into the new fields. Only the
+        // primary can write the profile; a companion just shows the fallback.
+        if (migration && !isCompanion) {
+          const saved = await endpoints.updateMe(migration);
+          if (!saved.ok) {
+            console.warn('[ProfileScreen] Legacy business profile migration failed:', saved.error.message);
+          }
+        }
+
+        // Resolve avatar object key to a display URL.
+        if (data.avatarObjectKey) {
+          const url = await mediaService.getDownloadUrl(data.avatarObjectKey);
+          if (url) await setAvatarUri(url);
         }
       } catch (err) {
         console.warn('[ProfileScreen] Error loading profile:', err);
       }
     };
     loadProfile();
-  }, [ownerUid]);
+  }, [ownerUid, isCompanion]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Resolve catalog image object keys to display URLs whenever the catalog
+  // changes. Values that are already local URIs or full URLs are skipped (they
+  // render directly). Object keys resolve to short-lived download URLs.
+  useEffect(() => {
+    const keys = catalog
+      .map((i) => i.imageUri)
+      .filter((u): u is string => !!u && !/^(file:|content:|https?:|assets-library:|ph:|data:)/i.test(u));
+    const missing = keys.filter((k) => !catalogImgUrls[k]);
+    if (missing.length === 0) return;
+    let active = true;
+    mediaService.getDownloadUrls(missing).then((urls) => {
+      if (active && Object.keys(urls).length) {
+        setCatalogImgUrls((prev) => ({ ...prev, ...urls }));
+      }
+    });
+    return () => { active = false; };
+  }, [catalog]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Return a renderable image URI: resolves a stored object key to its download
+  // URL, or passes through an already-usable local URI / URL.
+  const resolveCatalogImg = (uri: string | null | undefined): string | null => {
+    if (!uri) return null;
+    if (/^(file:|content:|https?:|assets-library:|ph:|data:)/i.test(uri)) return uri;
+    return catalogImgUrls[uri] ?? null;
+  };
+
+  // A copy of an item with its imageUri resolved for display.
+  const displayItem = (item: CatalogItem): CatalogItem => ({
+    ...item,
+    imageUri: resolveCatalogImg(item.imageUri),
+  });
 
   // ── Save name ─────────────────────────────────────────────────────────────
   const saveName = async () => {
@@ -175,9 +478,7 @@ export default function ProfileScreen() {
 
     try {
       await setDisplayName(trimmed);
-
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('users').doc(ownerUid).update({ displayName: trimmed });
+      await endpoints.updateMe({ displayName: trimmed });
     } catch (error) {
       console.error('[ProfileScreen] Error saving displayName:', error);
     }
@@ -189,13 +490,20 @@ export default function ProfileScreen() {
     if (!guardEdit()) { setEditingField(null); return; }
     if (!ownerUid) return;
     try {
-      if (field === 'email')       setEmail(value);
-      else if (field === 'website')     setWebsite(value);
-      else if (field === 'description') setDescription(value);
-      else if (field === 'auto_responder_message') setauto_responder_message(value);
-
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('users').doc(ownerUid).update({ [field]: value });
+      if (field === 'email') {
+        setEmail(value);
+        await endpoints.updateMe({ email: value });
+      } else if (field === 'website') {
+        setWebsite(value);
+        await endpoints.updateMe({ website: value });
+      } else if (field === 'description') {
+        setDescription(value);
+        // Business description maps to the `about` column.
+        await endpoints.updateMe({ about: value });
+      } else if (field === 'auto_responder_message') {
+        setauto_responder_message(value);
+        await saveProfile(withTimeZone({ autoResponderMessage: value }));
+      }
     } catch (error) {
       console.warn('[ProfileScreen] Error saving field:', error);
     }
@@ -209,8 +517,7 @@ export default function ProfileScreen() {
     setIndustry(id);
     setIndustryModalOpen(false);
     try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('users').doc(ownerUid).update({ industry: id });
+      await saveProfile({ industry: id });
     } catch (err) {
       console.warn('[ProfileScreen] Error saving industry:', err);
     }
@@ -223,8 +530,7 @@ export default function ProfileScreen() {
     const updated = { ...address, [field]: value };
     setAddress(updated);
     try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('users').doc(ownerUid).update({ address: updated });
+      await saveProfile({ address: updated });
     } catch (err) {
       console.warn('[ProfileScreen] Error saving address:', err);
     }
@@ -253,8 +559,7 @@ export default function ProfileScreen() {
 
     setAutoResponderEnabled(false);
     try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('users').doc(ownerUid).update({ autoResponderEnabled: false });
+      await saveProfile(withTimeZone({ autoResponderEnabled: false }));
     } catch (error) {
       console.warn('[ProfileScreen] Error saving autoResponderEnabled:', error);
     }
@@ -278,11 +583,7 @@ export default function ProfileScreen() {
     setAutoResponderPending(false);
 
     try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('users').doc(ownerUid).update({
-        autoResponderEnabled: true,
-        auto_responder_message: msg,
-      });
+      await saveProfile(withTimeZone({ autoResponderEnabled: true, autoResponderMessage: msg }));
     } catch (error) {
       console.warn('[ProfileScreen] Error saving auto responder:', error);
     }
@@ -299,8 +600,7 @@ export default function ProfileScreen() {
     if (!guardEdit()) return;
     if (!ownerUid) return;
     try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('users').doc(ownerUid).update({ workSchedule: updated });
+      await saveProfile(withTimeZone({ workSchedule: updated }));
     } catch (err) {
       console.warn('[ProfileScreen] Error saving work schedule:', err);
     }
@@ -398,15 +698,16 @@ export default function ProfileScreen() {
     }
 
     try {
-      // ── Upload image to Firebase Storage if one was picked ──────────────
+      // ── Upload image to the object store if one was picked. We store the
+      // returned OBJECT KEY; the UI resolves it to a URL at render time. ──
       let finalImageUri: string | null = newItemImage;
       if (newItemImage) {
         setUploadingCatalogImage(true);
         try {
-          const fileName = generateFileName('jpg');
-          finalImageUri = await uploadFile(newItemImage, 'avatar', {
-            userId: ownerUid,
-            fileName: `catalog_${fileName}`,
+          const sizeBytes = await fileSize(newItemImage);
+          finalImageUri = await mediaService.upload(newItemImage, 'avatar', {
+            sizeBytes,
+            ext: getFileExtension(newItemImage) || 'jpg',
           });
         } catch (uploadErr) {
           console.warn('[ProfileScreen] Catalog image upload failed, saving local URI:', uploadErr);
@@ -434,8 +735,7 @@ export default function ProfileScreen() {
       setNewItemImage(null);
       setNewItemCollectionId(null);
 
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('users').doc(ownerUid).update({ catalog: updated });
+      await saveProfile({ catalogItems: updated.map(toItemDTO) });
     } catch (err) {
       console.warn('[ProfileScreen] Error saving catalog item:', err);
       setUploadingCatalogImage(false);
@@ -449,8 +749,7 @@ export default function ProfileScreen() {
     setCatalog(updated);
 
     try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('users').doc(ownerUid).update({ catalog: updated });
+      await saveProfile({ catalogItems: updated.map(toItemDTO) });
     } catch (err) {
       console.warn('[ProfileScreen] Error removing catalog item:', err);
     }
@@ -483,10 +782,9 @@ export default function ProfileScreen() {
 
       const updatedCollections = [...collections, strip(newCol)];
 
-      const fsDb = db as ReturnType<typeof firestore>;
-      await fsDb.collection('users').doc(ownerUid).update({
-        collections: updatedCollections,
-        catalog:     updatedCatalog,
+      await saveProfile({
+        catalogItems:       updatedCatalog.map(toItemDTO),
+        catalogCollections: updatedCollections.map(toCollectionDTO),
       });
 
       setCatalog(updatedCatalog);
@@ -521,10 +819,9 @@ export default function ProfileScreen() {
             setCatalog(updatedCatalog);
             const updatedCols = collections.filter(c => c.id !== colId);
             try {
-              const fsDb = db as ReturnType<typeof firestore>;
-              await fsDb.collection('users').doc(ownerUid).update({
-                catalog: updatedCatalog,
-                collections: updatedCols,
+              await saveProfile({
+                catalogItems:       updatedCatalog.map(toItemDTO),
+                catalogCollections: updatedCols.map(toCollectionDTO),
               });
             } catch (err) {
               console.warn('[ProfileScreen] Error removing collection:', err);
@@ -559,17 +856,20 @@ export default function ProfileScreen() {
       const uri = result.assets[0].uri;
 
       try {
-        const fsDb = db as ReturnType<typeof firestore>;
-        const fileName = generateFileName('jpg');
-        const downloadURL = await uploadFile(uri, 'avatar', {
-          userId: ownerUid,
-          fileName,
-        }, (progress) => {
-          console.log(`[ProfileScreen] Upload progress: ${progress}%`);
+        // Show the local image immediately for responsiveness.
+        await setAvatarUri(uri);
+
+        const sizeBytes = await fileSize(uri);
+        const avatarObjectKey = await mediaService.upload(uri, 'avatar', {
+          sizeBytes,
+          ext: getFileExtension(uri) || 'jpg',
         });
 
-        await setAvatarUri(uri);
-        await fsDb.collection('users').doc(ownerUid).update({ photoURL: downloadURL });
+        await endpoints.updateMe({ avatarObjectKey });
+
+        // Swap the local URI for a resolved download URL so it survives reloads.
+        const url = await mediaService.getDownloadUrl(avatarObjectKey);
+        if (url) await setAvatarUri(url);
       } catch (error: any) {
         console.error('[ProfileScreen] Error saving avatar:', error);
         await setAvatarUri(uri);
@@ -1096,7 +1396,7 @@ export default function ProfileScreen() {
                         colItems.map((item) => (
                           <CatalogItemRow
                             key={item.id}
-                            item={item}
+                            item={displayItem(item)}
                             textColor={textColor}
                             fgSecondary={FG.secondary}
                             fontFamily={fontFamily}
@@ -1148,7 +1448,7 @@ export default function ProfileScreen() {
                       uncategorised.map((item) => (
                         <CatalogItemRow
                           key={item.id}
-                          item={item}
+                          item={displayItem(item)}
                           textColor={textColor}
                           fgSecondary={FG.secondary}
                           fontFamily={fontFamily}
@@ -1355,8 +1655,8 @@ export default function ProfileScreen() {
                                 prev.includes(item.id) ? prev.filter(x => x !== item.id) : [...prev, item.id]
                               )}
                             >
-                              {item.imageUri ? (
-                                <Image source={{ uri: item.imageUri }} style={colModalStyles.productTileImg} resizeMode="cover" />
+                              {resolveCatalogImg(item.imageUri) ? (
+                                <Image source={{ uri: resolveCatalogImg(item.imageUri)! }} style={colModalStyles.productTileImg} resizeMode="cover" />
                               ) : (
                                 <View style={colModalStyles.productTileImgPlaceholder}>
                                   <AppIcon name="cube-outline" size={24} color={COLORS.blue} fixedColor />
@@ -1399,8 +1699,8 @@ export default function ProfileScreen() {
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={colModalStyles.previewStrip}>
                     {catalog.filter(i => newColItems.includes(i.id)).map(item => (
                       <View key={item.id} style={colModalStyles.previewChip}>
-                        {item.imageUri ? (
-                          <Image source={{ uri: item.imageUri }} style={colModalStyles.previewChipImg} />
+                        {resolveCatalogImg(item.imageUri) ? (
+                          <Image source={{ uri: resolveCatalogImg(item.imageUri)! }} style={colModalStyles.previewChipImg} />
                         ) : (
                           <View style={colModalStyles.previewChipPlaceholder}>
                             <AppIcon name="cube-outline" size={14} color={COLORS.blue} fixedColor />
@@ -1549,11 +1849,11 @@ export default function ProfileScreen() {
                 </View>
 
                 <View style={{ alignItems: 'center', marginVertical: 12 }}>
-                  <DatePicker
-                    date={pickerDate}
-                    onDateChange={setPickerDate}
+                  <DateTimePicker
+                    value={pickerDate}
+                    onChange={(_e, d) => { if (d) setPickerDate(d); }}
                     mode="time"
-                    locale="en_US"
+                    display="spinner"
                   />
                 </View>
 

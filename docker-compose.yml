@@ -37,6 +37,11 @@ services:
   minio:
     image: minio/minio:latest
     container_name: chitchat-minio
+    # MinIO (media storage) is optional. It only starts when you opt in:
+    #   docker compose --profile media up -d
+    # A plain `docker compose up -d` starts just Postgres + Redis and skips this,
+    # so a Docker Hub pull block on the minio/* images can't fail the stack.
+    profiles: ["media"]
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -56,6 +61,7 @@ services:
   # One-shot init: creates the media bucket so the backend works without app code changes.
   minio-init:
     image: minio/mc:latest
+    profiles: ["media"]
     depends_on:
       minio:
         condition: service_healthy

@@ -125,11 +125,6 @@ export default function AudioCallScreen() {
             if (data?.answer) {
               setRemoteAnswer(data.answer).catch(console.error);
             }
-            if (data?.iceCandidates) {
-              data.iceCandidates.forEach((candidate: any) => {
-                addIceCandidate(candidate).catch(console.error);
-              });
-            }
             if (data?.status === 'ended') navigation.goBack();
           });
         } else {
@@ -138,11 +133,6 @@ export default function AudioCallScreen() {
             if (data?.offer) {
               const answer = await createAnswer(data.offer);
               await SignalingService.saveAnswer(callId, answer);
-            }
-            if (data?.iceCandidates) {
-              data.iceCandidates.forEach((candidate: any) => {
-                addIceCandidate(candidate).catch(console.error);
-              });
             }
             if (data?.status === 'ended') navigation.goBack();
           });

@@ -1,4 +1,11 @@
 // ─── Screen: Blocked Contacts ─────────────────────────────────────────────────
+//
+// COMPANION NOTE
+//   The list is readable on a companion device (it's the owner's blocked
+//   list), but blocking/unblocking is owner-only — the backend rejects it with
+//   403 COMPANION_NOT_ALLOWED. So on a companion the list renders read-only
+//   and the Unblock button is shown disabled with an explanatory alert.
+//
 import React, { useState } from 'react';
 import {
   View,
@@ -14,6 +21,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Avatar } from '../components';
 import { useAuth } from '../hooks/useAuth';
+import { useAuth as useAuthContext } from '../context/AuthContext';
 import { useBlockedContacts, BlockedContact } from '../hooks/useBlockedContacts';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
@@ -24,6 +32,8 @@ type NavProp = NativeStackNavigationProp<RootStackParamList, 'BlockedContacts'>;
 export default function BlockedContactsScreen() {
   const navigation = useNavigation<NavProp>();
   const { user } = useAuth();
+  // isCompanion gates the destructive Unblock action.
+  const { isCompanion } = useAuthContext();
   const { FG } = useForeground();
   const { fontFamily, textColor } = useTypography();
   const { bevel } = useGlass();
@@ -32,6 +42,14 @@ export default function BlockedContactsScreen() {
 
   // ── Unblock handler ───────────────────────────────────────────────
   const handleUnblock = (contact: BlockedContact) => {
+    if (isCompanion) {
+      Alert.alert(
+        'Managed on your primary device',
+        'Blocking and unblocking contacts is not available on companion devices. Open ChitChat on the phone you signed in with to change this.',
+      );
+      return;
+    }
+
     Alert.alert(
       'Unblock Contact',
       `Unblock ${contact.displayName}? You'll be able to send and receive messages from this contact again.`,
@@ -76,8 +94,20 @@ export default function BlockedContactsScreen() {
 
     return (
       <View style={[styles.contactItem, bevel]}>
-        <Avatar size={50} name={item.displayName} uri={item.photoURL} />
-        
+        <Avatar
+          size={50}
+          initials={item.displayName.split(' ').map((w: string) => w[0]).join('').toUpperCase().slice(0, 2) || '?'}
+          color={(() => {
+            const palette = ['#f97316','#8b5cf6','#ec4899','#06b6d4','#10b981','#f59e0b','#6366f1','#e11d48'];
+            let h = 0;
+            for (let i = 0; i < item.displayName.length; i++) h = item.displayName.charCodeAt(i) + ((h << 5) - h);
+            return palette[Math.abs(h) % palette.length];
+          })()}
+          // photoURL holds a media object key on the backend path; only pass
+          // real URLs to the image (otherwise fall back to initials).
+          imageUrl={item.photoURL && /^https?:\/\//i.test(item.photoURL) ? item.photoURL : null}
+        />
+
         <View style={styles.contactInfo}>
           <AppText style={[styles.contactName, { color: textColor, fontFamily }]}>
             {item.displayName}
@@ -87,8 +117,13 @@ export default function BlockedContactsScreen() {
           </AppText>
         </View>
 
+        {/* Unblock is owner-only — shown disabled on companion devices */}
         <TouchableOpacity
-          style={[styles.unblockBtn, { borderColor: COLORS.blue }]}
+          style={[
+            styles.unblockBtn,
+            { borderColor: isCompanion ? COLORS.sub : COLORS.blue },
+            isCompanion && styles.unblockBtnDisabled,
+          ]}
           onPress={() => handleUnblock(item)}
           disabled={isUnblocking}
           activeOpacity={0.8}
@@ -96,7 +131,14 @@ export default function BlockedContactsScreen() {
           {isUnblocking ? (
             <ActivityIndicator size="small" color={COLORS.blue} />
           ) : (
-            <AppText style={[styles.unblockText, { color: COLORS.blue }]}>Unblock</AppText>
+            <AppText
+              style={[
+                styles.unblockText,
+                { color: isCompanion ? COLORS.sub : COLORS.blue },
+              ]}
+            >
+              Unblock
+            </AppText>
           )}
         </TouchableOpacity>
       </View>
@@ -138,6 +180,27 @@ export default function BlockedContactsScreen() {
 
           <View style={styles.headerRight} />
         </View>
+
+        {/* Companion notice — read-only list */}
+        {isCompanion && (
+          <View style={[styles.noticeCard, bevel]}>
+            <LinearGradient
+              colors={['#6366f1', '#8b5cf6']}
+              style={styles.noticeIconWrap}
+            >
+              <AppIcon name="link-outline" size={18} color="#fff" fixedColor />
+            </LinearGradient>
+            <View style={{ flex: 1 }}>
+              <AppText style={[styles.noticeTitle, { color: textColor, fontFamily }]}>
+                Read-only on this device
+              </AppText>
+              <AppText style={[styles.noticeBody, { color: FG.secondary }]}>
+                You can view the blocked list, but blocking or unblocking a
+                contact requires the primary device.
+              </AppText>
+            </View>
+          </View>
+        )}
 
         {/* ── Content ── */}
         {loading ? (
@@ -231,6 +294,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  unblockBtnDisabled: {
+    opacity: 0.6,
+  },
   unblockText: {
     fontSize: 14,
     fontWeight: '600',
@@ -268,4 +334,20 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     textAlign: 'center',
   },
+
+  // Companion notice
+  noticeCard: {
+    flexDirection: 'row', gap: 12,
+    borderRadius: RADIUS.lg,
+    paddingHorizontal: 14, paddingVertical: 14,
+    marginHorizontal: 16, marginTop: 12,
+  },
+  noticeIconWrap: {
+    width: 38, height: 38, borderRadius: 11,
+    alignItems: 'center', justifyContent: 'center',
+    flexShrink: 0,
+    ...SHADOW.button,
+  },
+  noticeTitle: { fontSize: 13, fontWeight: '800', marginBottom: 3 },
+  noticeBody:  { fontSize: 12, lineHeight: 17 },
 });

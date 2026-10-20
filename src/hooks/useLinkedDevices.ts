@@ -1,46 +1,38 @@
-// ─── useLinkedDevices Hook ────────────────────────────────────────────────────
 //
-// Companion linking via Firebase Custom Tokens.
+// Companion linking via the backend device-link API + Firebase Custom Tokens.
 //
 // Flow:
-//   1. New device (unsigned) → createLinkRequest() → anon sign-in, writes
-//      deviceLinkTokens/{requestId} with consumed:false, ownerUid:null.
+//   1. New device (unsigned) → createLinkRequest() → anon Firebase sign-in so
+//      it can authenticate to the backend, then POST /device-links with
+//      consumed:false, ownerUid:null.
 //   2. New device displays QR (encodes requestId) + displayCode.
-//   3. Signed-in device (primary) scans QR or types code.
+//   3. Signed-in device (primary) scans QR or types code (findRequestByDisplayCode
+//      → GET /device-links?code=).
 //   4. Primary calls claimLinkRequest(requestId, ownerUid, ownerName):
-//        a. Cloud Function mintCompanionToken() → returns a custom token
-//           tagged { companion: true } directly to the primary caller.
-//           The token is NEVER written to Firestore (Issue 5 fix).
-//        b. Firestore transaction sets consumed:true, ownerUid on the link
-//           doc, and creates a linkedDevices entry for the companion.
-//        c. The custom token is passed back through claimLinkRequest's
-//           return value so SignInScreen can hand it to pollForApproval
-//           via a separate out-of-band channel (e.g. deep link / local state).
+//        a. POST /device-links/claim marks the token consumed, records ownerUid,
+//           and registers the companion in linked_devices (atomic server-side).
+//   5. Companion polls GET /device-links/:requestId; once consumed the backend
+//      mints a Firebase custom token tagged { companion: true } for the owner
+//      and returns it so the companion can signInWithCustomToken.
 //
 // Removal:
-//   When the primary deletes users/{owner}/linkedDevices/{deviceId}:
-//     • removeDevice() immediately calls the revokeDeviceToken Cloud Function,
-//       which calls admin.auth().revokeRefreshTokens(ownerUid). Any companion
-//       session will be invalidated on its next ID-token refresh (~1 hour max).
-//     • The companion's watchCompanionLink() listener also fires cooperatively
-//       and signs it out immediately if it is still running.
+//   removeDevice()/removeAllOtherDevices() call the backend to delete the
+//   linked_devices rows. From then on EVERY request from the removed companion
+//   is rejected with 401 AUTH_TOKEN_REVOKED, and the backend emits
+//   `device:removed` { deviceId } to the owner's sockets. The companion's
+//   watchCompanionLink() reacts to the socket event instantly and keeps a poll
+//   as fallback; either path signs it out.
 //
-// NOTE: enforcement of removal is now two-layer:
-//   1. Server-side token revocation via revokeDeviceToken (non-cooperative
-//      companions are forced out within the ID-token TTL).
-//   2. Client-side cooperative sign-out via watchCompanionLink (immediate for
-//      honest clients).
-// There is NO Firestore-rule-level allowlist check — that would require a
-// server-side read on every request which is too expensive. Token revocation
-// is the correct mechanism for this use case.
+// Firebase is used ONLY for Auth here (anon sign-in + custom-token sign-in +
+// token claims); all device/link state lives in Postgres via the API.
 //
 import { useState, useEffect, useRef } from 'react';
 import { Platform, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import firestore from '@react-native-firebase/firestore';
 import { getAuth, signOut as fbSignOut } from '@react-native-firebase/auth';
-import { getFunctions, httpsCallable } from '@react-native-firebase/functions';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
+import type { ApiError, NetworkError } from '../api/errors';
+import { socketClient } from '../realtime/socket';
 
 export const DEVICE_OWNER_KEY   = 'linked_device_owner_uid';
 export const DEVICE_ID_KEY      = 'linked_device_id';
@@ -67,17 +59,20 @@ export interface LinkRequest {
   platform:    'ios' | 'android' | 'web';
 }
 
-const fsDb = () => db as ReturnType<typeof firestore>;
-
 function toDate(raw: any): Date {
   if (!raw) return new Date();
   if (typeof raw.toDate === 'function') return raw.toDate();
   return new Date(raw);
 }
 
-function isPermissionDenied(err: any): boolean {
-  const code = String(err?.code ?? '');
-  return code === 'firestore/permission-denied' || code === 'permission-denied';
+// In-process "device list changed" signal so a mounted useLinkedDevices list
+// refreshes right after this device links or removes a device, instead of
+// waiting for the next poll.
+const deviceListListeners = new Set<() => void>();
+function notifyDeviceListChanged(): void {
+  for (const listener of deviceListListeners) {
+    try { listener(); } catch {}
+  }
 }
 
 // ─── Random helpers ───────────────────────────────────────────────────────────
@@ -111,10 +106,6 @@ function randomDisplayCode(len: number): string {
 }
 
 // ─── Device helpers — react-native-device-info backed ─────────────────────────
-// NOTE: react-native-device-info's JS throws at import time if its native
-// module (RNDeviceInfo) isn't in the binary (e.g. not pod-installed). A static
-// import would crash app startup, so we load it defensively and fall back to
-// Platform-based values. Every call site already has try/catch fallbacks.
 let DeviceInfo: any = null;
 try {
   DeviceInfo = require('react-native-device-info').default ?? require('react-native-device-info');
@@ -182,20 +173,16 @@ export async function createLinkRequest(): Promise<LinkRequest | null> {
   const requestId   = randomHex(32);
   const displayCode = randomDisplayCode(10);
 
-  // The new device needs a temporary anonymous identity to write the token doc.
-  // IMPORTANT: only reuse an existing session if it's already anonymous.
-  // If the current user is signed in as a real account (the primary), we must
-  // still create a fresh anon UID — otherwise requesterUid === ownerUid, which
-  // triggers the "cannot link a device to itself" check in mintCompanionToken.
+  // The new device needs a temporary anonymous identity so it can authenticate
+  // to the backend. Only reuse an existing session if it's already anonymous;
+  // otherwise mint a fresh anon UID (a real account must not link to itself).
   let requesterUid: string | null = null;
   try {
     const auth = getAuth();
     const existing = auth.currentUser;
     if (existing && existing.isAnonymous) {
-      // Already an anonymous session — safe to reuse
       requesterUid = existing.uid;
     } else {
-      // Signed in as a real account, or not signed in at all — create a fresh anon UID
       const { signInAnonymously } = require('@react-native-firebase/auth');
       const cred = await signInAnonymously(auth);
       requesterUid = cred.user?.uid ?? null;
@@ -215,26 +202,18 @@ export async function createLinkRequest(): Promise<LinkRequest | null> {
   const platform: 'ios' | 'android' | 'web' =
     Platform.OS === 'web' ? 'web' : (Platform.OS as 'ios' | 'android');
 
-  const expiresAt = new Date(Date.now() + LINK_TOKEN_TTL_MS);
-
-  try {
-    await fsDb().collection('deviceLinkTokens').doc(requestId).set({
-      requestId,
-      displayCode,
-      requesterUid,
-      deviceId,
-      deviceName,
-      deviceType,
-      os,
-      platform,
-      createdAt:   firestore.FieldValue.serverTimestamp(),
-      expiresAt,
-      consumed:    false,
-      ownerUid:    null,
-      consumedAt:  null,
-    });
-  } catch (err) {
-    console.error('[useLinkedDevices] createLinkRequest write failed:', err);
+  const res = await endpoints.createDeviceLink({
+    requestId,
+    displayCode,
+    requesterUid,
+    deviceId,
+    deviceName,
+    deviceType,
+    os,
+    platform,
+  });
+  if (!res.ok) {
+    console.error('[useLinkedDevices] createLinkRequest failed:', res.error.message);
     return null;
   }
 
@@ -242,8 +221,8 @@ export async function createLinkRequest(): Promise<LinkRequest | null> {
 }
 
 // ─── pollForApproval (unsigned device) ────────────────────────────────────────
-// Waits until the primary has claimed the token and written the custom token,
-// then hands the custom token to the caller.
+// Polls the backend until the primary has claimed the token, then hands the
+// minted companion custom token to the caller.
 
 export function pollForApproval(
   requestId:  string,
@@ -251,29 +230,38 @@ export function pollForApproval(
   onExpired:  () => void,
 ): () => void {
   let stopped = false;
-  const expiryTimer = setTimeout(() => { if (!stopped) onExpired(); }, LINK_TOKEN_TTL_MS);
+  const expiryTimer = setTimeout(() => {
+    if (!stopped) { stopped = true; onExpired(); }
+  }, LINK_TOKEN_TTL_MS);
 
-  const unsub = fsDb().collection('deviceLinkTokens').doc(requestId).onSnapshot(
-    (snap) => {
-      if (stopped || !snap.exists()) return;
-      const data = snap.data()!;
-      if (!data.consumed || !data.ownerUid) return;
-      if (!data.companionCustomToken) return; // primary is still finishing up
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const res = await endpoints.getDeviceLink(requestId);
+      if (stopped) return;
+      if (res.ok) {
+        const d = res.data;
+        if (d.expired) {
+          stopped = true;
+          clearTimeout(expiryTimer);
+          onExpired();
+          return;
+        }
+        if (d.consumed && d.ownerUid && d.customToken) {
+          stopped = true;
+          clearTimeout(expiryTimer);
+          onApproved({ ownerUid: d.ownerUid, customToken: d.customToken });
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn('[useLinkedDevices] poll error:', err);
+    }
+    if (!stopped) setTimeout(tick, 2000);
+  };
+  void tick();
 
-      const expiresAt = toDate(data.expiresAt);
-      if (new Date() > expiresAt) { onExpired(); return; }
-
-      stopped = true;
-      clearTimeout(expiryTimer);
-      onApproved({
-        ownerUid:    data.ownerUid,
-        customToken: data.companionCustomToken,
-      });
-    },
-    (err) => console.warn('[useLinkedDevices] poll error:', err),
-  );
-
-  return () => { stopped = true; clearTimeout(expiryTimer); unsub(); };
+  return () => { stopped = true; clearTimeout(expiryTimer); };
 }
 
 // ─── claimLinkRequest (primary device) ────────────────────────────────────────
@@ -284,60 +272,13 @@ export async function claimLinkRequest(
   ownerName: string | null,
 ): Promise<{ success: boolean; error?: string }> {
   if (!ownerUid) return { success: false, error: 'You must be signed in.' };
-
-  // 1. Ask the Cloud Function to mint a companion custom token.
-  let customToken: string;
   try {
-    const fn = httpsCallable(getFunctions(), 'mintCompanionToken');
-    const res: any = await fn({ requestId });
-    customToken = res?.data?.customToken;
-    if (!customToken || typeof customToken !== 'string') {
-      throw new Error('Cloud Function returned no token.');
-    }
-  } catch (err: any) {
-    console.error('[useLinkedDevices] mintCompanionToken failed:', err);
-    return { success: false, error: err?.message ?? 'Could not mint companion token.' };
-  }
-
-  // 2. Transactionally claim the token and register the device.
-  const tokenRef = fsDb().collection('deviceLinkTokens').doc(requestId);
-  try {
-    await fsDb().runTransaction(async (tx) => {
-      const snap = await tx.get(tokenRef);
-      if (!snap.exists()) throw new Error('Request not found. It may have expired.');
-
-      const data = snap.data()!;
-      if (data.consumed) throw new Error('This request has already been used.');
-      if (data.ownerUid) throw new Error('This request has already been claimed.');
-
-      const expiresAt = toDate(data.expiresAt);
-      if (new Date() > expiresAt) throw new Error('This request has expired.');
-
-      tx.update(tokenRef, {
-        consumed:             true,
-        ownerUid,
-        companionCustomToken: customToken,
-        consumedAt:           firestore.FieldValue.serverTimestamp(),
-        consumedByName:       ownerName ?? null,
-      });
-
-      const deviceRef = fsDb()
-        .collection('users').doc(ownerUid)
-        .collection('linkedDevices').doc(data.deviceId);
-
-      tx.set(deviceRef, {
-        name:         data.deviceName ?? 'Companion Device',
-        type:         data.deviceType ?? 'phone',
-        os:           data.os         ?? '',
-        platform:     data.platform   ?? 'android',
-        linkedAt:     firestore.FieldValue.serverTimestamp(),
-        lastActiveAt: firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-    });
-
+    const res = await endpoints.claimDeviceLink(requestId, ownerName);
+    if (!res.ok) return { success: false, error: res.error.message };
+    notifyDeviceListChanged();
     return { success: true };
   } catch (err: any) {
-    console.error('[useLinkedDevices] claimLinkRequest transaction failed:', err);
+    console.error('[useLinkedDevices] claimLinkRequest failed:', err);
     return { success: false, error: err?.message ?? 'Failed to claim link request.' };
   }
 }
@@ -349,19 +290,9 @@ export async function findRequestByDisplayCode(
 ): Promise<{ requestId: string } | null> {
   const code = displayCode.trim().toUpperCase();
   if (code.length !== 10) return null;
-
-  const snap = await fsDb()
-    .collection('deviceLinkTokens')
-    .where('displayCode', '==', code)
-    .where('consumed',    '==', false)
-    .limit(1)
-    .get();
-
-  if (snap.empty) return null;
-  const doc = snap.docs[0];
-  const expiresAt = toDate(doc.data().expiresAt);
-  if (new Date() > expiresAt) return null;
-  return { requestId: doc.id };
+  const res = await endpoints.findDeviceLinkByCode(code);
+  if (!res.ok || !res.data.requestId) return null;
+  return { requestId: res.data.requestId };
 }
 
 // ─── useLinkedDevices (primary device) ────────────────────────────────────────
@@ -377,34 +308,46 @@ export function useLinkedDevices(ownerUid: string | null) {
 
   useEffect(() => {
     if (!ownerUid) { setDevices([]); setLoading(false); return; }
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
 
-    const unsub = fsDb()
-      .collection('users').doc(ownerUid)
-      .collection('linkedDevices')
-      .orderBy('linkedAt', 'asc')
-      .onSnapshot(
-        (snap) => {
-          const result: LinkedDevice[] = snap.docs.map((doc) => {
-            const d = doc.data();
-            return {
-              id:           doc.id,
-              name:         d.name         ?? 'Unknown Device',
-              type:         d.type         ?? 'phone',
-              os:           d.os           ?? '',
-              platform:     d.platform     ?? 'android',
-              linkedAt:     toDate(d.linkedAt),
-              lastActiveAt: toDate(d.lastActiveAt),
-              isCurrent:    doc.id === myDeviceId,
-            };
-          });
+    const load = async () => {
+      try {
+        const res = await endpoints.listDevices();
+        if (cancelled) return;
+        if (res.ok) {
+          const result: LinkedDevice[] = res.data.devices.map((d) => ({
+            id:           d.id,
+            name:         d.name ?? 'Unknown Device',
+            type:         d.type ?? 'phone',
+            os:           d.os ?? '',
+            platform:     d.platform ?? 'android',
+            linkedAt:     toDate(d.linkedAt),
+            lastActiveAt: toDate(d.lastActiveAt),
+            isCurrent:    d.id === myDeviceId,
+          }));
           result.sort((a, b) => (a.isCurrent ? -1 : b.isCurrent ? 1 : 0));
           setDevices(result);
-          setLoading(false);
-        },
-        () => setLoading(false),
-      );
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
 
-    return () => unsub();
+    void load();
+    // Light polling keeps the list fresh; local link/remove actions and the
+    // backend's device:removed event (sent to all of the owner's devices)
+    // refresh it immediately.
+    timer = setInterval(load, 15000);
+    const reload = () => { if (!cancelled) void load(); };
+    deviceListListeners.add(reload);
+    const unsubscribeRemoved = socketClient.subscribe('device:removed', reload);
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+      deviceListListeners.delete(reload);
+      unsubscribeRemoved();
+    };
   }, [ownerUid, myDeviceId]);
 
   return { devices, loading, myDeviceId };
@@ -420,42 +363,33 @@ export async function registerCurrentDevice(
   await AsyncStorage.setItem(DEVICE_ID_KEY, deviceId);
 
   const name = deviceName ?? (await detectDeviceNameAsync());
+  const platform: 'ios' | 'android' | 'web' =
+    Platform.OS === 'web' ? 'web' : (Platform.OS as 'ios' | 'android');
 
-  await fsDb()
-    .collection('users').doc(ownerUid)
-    .collection('linkedDevices').doc(deviceId)
-    .set({
-      name,
-      type:         detectDeviceType(),
-      os:           detectOS(),
-      platform:     Platform.OS === 'web' ? 'web' : Platform.OS,
-      linkedAt:     firestore.FieldValue.serverTimestamp(),
-      lastActiveAt: firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
+  await endpoints.registerDevice({
+    deviceId,
+    name,
+    type: detectDeviceType(),
+    os: detectOS(),
+    platform,
+  });
 
   return deviceId;
 }
 
 // ─── updateDeviceLastActive ───────────────────────────────────────────────────
-export async function updateDeviceLastActive(ownerUid: string): Promise<void> {
-  const deviceId = await getStableDeviceId();
+export async function updateDeviceLastActive(_ownerUid: string): Promise<void> {
   try {
-    await fsDb()
-      .collection('users').doc(ownerUid)
-      .collection('linkedDevices').doc(deviceId)
-      .update({ lastActiveAt: firestore.FieldValue.serverTimestamp() });
+    const deviceId = await getStableDeviceId();
+    await endpoints.touchDevice(deviceId);
   } catch {}
 }
 
 // ─── requireOwnerSession (shared by removeDevice / removeAllOtherDevices) ─────
-// Waits for Firebase Auth to restore the session, force-refreshes the ID token,
-// and fails with a clear message if the session can't satisfy the Firestore rule
-//     allow delete: if isOwner(userId) && !isCompanion();
-// instead of surfacing a generic [firestore/permission-denied].
+// Ensures a real (non-companion) owner session before a destructive device op.
+// The backend also authorizes by token, so this is a fast client-side guard
+// that gives a clear message rather than a generic 403.
 async function requireOwnerSession(ownerUid: string, action: string) {
-  // Wait up to 5 seconds for Firebase Auth to restore the session.
-  // getAuth().currentUser can be null right after app launch even for
-  // signed-in users because auth state is restored asynchronously.
   const auth = getAuth();
   let currentUser = auth.currentUser;
 
@@ -466,19 +400,13 @@ async function requireOwnerSession(ownerUid: string, action: string) {
         currentUser = u;
         resolve();
       });
-      // Resolve after 5s even if auth never fires (offline / slow restore)
       setTimeout(resolve, 5000);
     });
   }
 
-  if (!currentUser) {
-    throw new Error(`You must be signed in to ${action}.`);
-  }
+  if (!currentUser) throw new Error(`You must be signed in to ${action}.`);
 
-  // Force-refresh the ID token so Firestore gets a fresh JWT, and read its
-  // claims so we can see exactly what the rules will see.
   const tok = await currentUser.getIdTokenResult(true);
-
   if (currentUser.uid !== ownerUid) {
     throw new Error('Only the account owner can remove devices.');
   }
@@ -488,125 +416,133 @@ async function requireOwnerSession(ownerUid: string, action: string) {
       'Sign out completely and sign back in on the primary phone.',
     );
   }
-
   return currentUser;
 }
 
 export async function removeDevice(ownerUid: string, deviceId: string): Promise<void> {
   await requireOwnerSession(ownerUid, 'remove a device');
-
-  await fsDb()
-    .collection('users').doc(ownerUid)
-    .collection('linkedDevices').doc(deviceId)
-    .delete();
-
-  // Revoke all refresh tokens for this owner so any companion sessions are
-  // invalidated server-side within the ID-token TTL (~1 hour).
-  // This is non-cooperative revocation — it works even if the companion
-  // ignores the watchCompanionLink listener.
-  try {
-    const fn = httpsCallable(getFunctions(), 'revokeDeviceToken');
-    await fn({});
-  } catch (err) {
-    console.warn('[useLinkedDevices] revokeDeviceToken failed (non-fatal):', err);
-  }
+  const res = await endpoints.removeDevice(deviceId);
+  if (!res.ok) throw new Error(res.error.message);
+  notifyDeviceListChanged();
 }
 
 export async function removeAllOtherDevices(ownerUid: string, currentDeviceId: string): Promise<void> {
   await requireOwnerSession(ownerUid, 'remove devices');
+  const res = await endpoints.removeOtherDevices(currentDeviceId);
+  if (!res.ok) throw new Error(res.error.message);
+  notifyDeviceListChanged();
+}
 
-  const snap = await fsDb()
-    .collection('users').doc(ownerUid)
-    .collection('linkedDevices')
-    .get();
-  const batch = fsDb().batch();
-  snap.docs.forEach((doc) => {
-    if (doc.id !== currentDeviceId) batch.delete(doc.ref);
-  });
-  await batch.commit();
+// ─── Companion link status (companion device) ─────────────────────────────────
+// Once the primary removes a companion, the backend rejects EVERY request from
+// it with 401 AUTH_TOKEN_REVOKED, so that response is the authoritative
+// "removed" signal. A successful device list that no longer contains this
+// device means the same thing. Anything else (offline, timeout, 5xx, a token
+// that hasn't been restored yet) is transient and must NOT force a sign-out.
+type CompanionLinkState = 'linked' | 'removed' | 'unknown';
 
-  // Revoke all refresh tokens — companions on the removed devices will be
-  // forced out on their next ID-token refresh.
+function isCompanionRevoked(error: ApiError | NetworkError): boolean {
+  return error.kind === 'api' && error.status === 401 && error.code === 'AUTH_TOKEN_REVOKED';
+}
+
+async function checkCompanionLink(deviceId: string): Promise<CompanionLinkState> {
   try {
-    const fn = httpsCallable(getFunctions(), 'revokeDeviceToken');
-    await fn({});
-  } catch (err) {
-    console.warn('[useLinkedDevices] revokeDeviceToken failed (non-fatal):', err);
+    const res = await endpoints.listDevices();
+    if (res.ok) return res.data.devices.some((d) => d.id === deviceId) ? 'linked' : 'removed';
+    return isCompanionRevoked(res.error) ? 'removed' : 'unknown';
+  } catch {
+    return 'unknown';
   }
 }
 
 // ─── verifyCompanionStillLinked ───────────────────────────────────────────────
-// Called on the companion device at launch. If the primary has removed this
-// device from linkedDevices, the companion signs itself out.
-export async function verifyCompanionStillLinked(ownerUid: string): Promise<boolean> {
+// Called on the companion at launch. Returns false only when the backend says
+// this device was removed; transient failures keep the session.
+export async function verifyCompanionStillLinked(_ownerUid: string): Promise<boolean> {
   try {
     const deviceId = await getStableDeviceId();
-    const snap = await fsDb()
-      .collection('users').doc(ownerUid)
-      .collection('linkedDevices').doc(deviceId)
-      .get();
-    return snap.exists();
-  } catch (err) {
-    // The rules deny a removed companion — treat that as "no longer linked".
-    if (isPermissionDenied(err)) return false;
-    return true; // network error — don't force a sign-out on transient failure
+    return (await checkCompanionLink(deviceId)) !== 'removed';
+  } catch {
+    return true; // couldn't read the device id — don't force a sign-out
   }
 }
 
 // ─── watchCompanionLink (companion device) ────────────────────────────────────
-// Live listener on this device's own linkedDevices doc. Calls onRemoved() the
-// moment the primary deletes it (or the rules start denying this session).
+// Calls onRemoved() as soon as this device is removed from the owner's account:
+//   • instantly, via the backend's `device:removed` socket event, and
+//   • as a fallback, via a 10s poll (401 AUTH_TOKEN_REVOKED or a device list
+//     without this device). Network errors are ignored until the next tick.
 // Fires at most once. Returns an unsubscribe function.
 export function watchCompanionLink(
   ownerUid:  string,
   onRemoved: () => void,
 ): () => void {
   let stopped = false;
-  let unsub: (() => void) | null = null;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let unsubscribeSocket: (() => void) | null = null;
+
+  const teardown = () => {
+    if (timer) { clearInterval(timer); timer = null; }
+    if (unsubscribeSocket) {
+      try { unsubscribeSocket(); } catch {}
+      unsubscribeSocket = null;
+    }
+  };
 
   const fireOnce = () => {
     if (stopped) return;
     stopped = true;
-    if (unsub) { try { unsub(); } catch {} }
+    teardown();
     onRemoved();
   };
 
-  getStableDeviceId().then((deviceId) => {
+  (async () => {
+    let deviceId: string;
+    try {
+      deviceId = await getStableDeviceId();
+    } catch (err) {
+      console.warn('[useLinkedDevices] companion watch could not read device id:', err);
+      return;
+    }
     if (stopped) return;
-    unsub = fsDb()
-      .collection('users').doc(ownerUid)
-      .collection('linkedDevices').doc(deviceId)
-      .onSnapshot(
-        (snap) => {
-          if (stopped) return;
-          // Ignore the offline cache — only a server-confirmed "missing" counts.
-          if (snap.metadata?.fromCache) return;
-          if (!snap.exists()) fireOnce();
-        },
-        (err) => {
-          if (isPermissionDenied(err)) fireOnce();
-          else console.warn('[useLinkedDevices] companion watch error:', err);
-        },
-      );
-  });
+
+    // Instant path. The handler is kept by the shared socket client and bound
+    // whenever the socket is (or later becomes) connected by the app.
+    try {
+      unsubscribeSocket = socketClient.subscribe('device:removed', (payload) => {
+        const removedId = (payload as { deviceId?: unknown } | null | undefined)?.deviceId;
+        if (removedId === deviceId) fireOnce();
+      });
+    } catch (err) {
+      console.warn('[useLinkedDevices] device:removed subscription failed, polling only:', err);
+    }
+
+    // Fallback path: poll the backend.
+    const check = async () => {
+      if (stopped) return;
+      if ((await checkCompanionLink(deviceId)) === 'removed') fireOnce();
+    };
+    void check();
+    timer = setInterval(check, 10000);
+  })();
 
   return () => {
     stopped = true;
-    if (unsub) { try { unsub(); } catch {} }
+    teardown();
   };
 }
 
 // ─── signOutRemovedCompanion ──────────────────────────────────────────────────
-// Wipes the stored link info and signs Firebase Auth out. The app's auth state
-// listener then drops back to the sign-in screen.
+// Wipes the stored link info, signs Firebase Auth out and drops the realtime
+// connection, which was authenticated as the owner and must not outlive the
+// removed session. The auth state listener then drops back to sign-in.
 export async function signOutRemovedCompanion(): Promise<void> {
   try { await clearDeviceLink(); } catch {}
   try { await fbSignOut(getAuth()); } catch {}
+  try { socketClient.disconnect(); } catch {}
 }
 
 // ─── useCompanionLinkGuard (mount once, app-wide, inside the auth provider) ───
-// On a companion device, watches for removal and signs out immediately.
-//   useCompanionLinkGuard(isCompanion, ownerUid);
 export function useCompanionLinkGuard(
   isCompanion: boolean,
   ownerUid:    string | null,

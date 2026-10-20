@@ -11,9 +11,9 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import firestore from '@react-native-firebase/firestore';
 import { COLORS, GRADIENTS, RADIUS, SHADOW } from '../types/theme';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
+import { mediaService } from '../services/mediaService';
 import { usePhoneBook } from '../hooks/usePhoneBook';
 import { normalizePhone } from '../utils/phoneUtils';
 
@@ -190,16 +190,19 @@ export const PollBubble = React.memo(function PollBubble({ poll, isOutgoing, cur
     if (missing.length === 0) return;
     setLoadingVoters(true);
     try {
-      const fsDb = db as ReturnType<typeof firestore>;
       const results = await Promise.all(
         missing.map(async (uid) => {
           try {
-            const snap = await fsDb.collection('users').doc(uid).get();
-            const d: any = snap.exists() ? snap.data() : null;
-            const phone = d?.phone ?? d?.phoneNumber ?? null;
+            const res = await endpoints.getUser(uid);
+            const d = res.ok ? res.data : null;
+            const phone = d?.phoneNumber ?? null;
             const fallback = d?.displayName ?? 'Unknown';
             const name = phone ? resolveName(normalizePhone(phone), fallback) : fallback;
-            return { uid, name, photoURL: d?.photoURL ?? null } as VoterInfo;
+            // Avatars are stored as object keys; resolve to a display URL.
+            const photoURL = d?.avatarObjectKey
+              ? await mediaService.getDownloadUrl(d.avatarObjectKey)
+              : null;
+            return { uid, name, photoURL } as VoterInfo;
           } catch {
             return { uid, name: 'Unknown', photoURL: null } as VoterInfo;
           }

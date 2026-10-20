@@ -20,6 +20,9 @@ export class ApiError extends Error {
 /** The request never completed (no connectivity, DNS, timeout, etc.). */
 export class NetworkError extends Error {
   readonly kind = 'network' as const;
+  // A stable code mirrors ApiError.code so callers can read `error.code` on the
+  // ApiResult error union without first narrowing by `kind`.
+  readonly code = 'NETWORK' as const;
   constructor(message: string, readonly cause?: unknown) {
     super(message);
     this.name = 'NetworkError';

@@ -1,14 +1,11 @@
 // ─── useChatPrefs ─────────────────────────────────────────────────────────────
-// Local, device-side chat preferences: pinned chats (max 3), favourites, and
-// muted chats. Stored in AsyncStorage keyed per owner so they survive restarts.
-//
-// These are intentionally local (not synced to Firestore) — they mirror how
-// mute is already stored on-device via the `chat_mute_` keys.
+// Device-side chat preferences: pinned chats (max 3) and favourites are local
+// (AsyncStorage, per owner). Muted chats are backend-backed (listMutedChats /
+// setChatMuted) with a local cache mirror for offline display.
 
 import { useState, useEffect, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
 
 export const MAX_PINNED = 3;
 
@@ -69,8 +66,24 @@ export function useChatPrefs(ownerUid: string | null) {
     setFavourites(next);
   }, [ownerUid]);
 
-  // Load the muted state for a set of chats (so the list can show mute badges)
+  // Load the muted state for a set of chats (so the list can show mute badges).
+  // Mute is backend-backed now: hydrate from the server's muted-chats list and
+  // mirror it into the local cache (used as an offline fallback).
   const loadMutedFor = useCallback(async (chatIds: string[]) => {
+    try {
+      const res = await endpoints.listMutedChats();
+      if (res.ok) {
+        const set = new Set(res.data.chatIds);
+        setMutedChats(set);
+        // Keep the local cache in sync for offline display.
+        await AsyncStorage.multiSet(
+          chatIds.map((id) => [MUTE_KEY(id), String(set.has(id))]),
+        );
+        return;
+      }
+    } catch { /* fall through to local cache */ }
+
+    // Offline fallback: read the local cache.
     try {
       const entries = await AsyncStorage.multiGet(chatIds.map(MUTE_KEY));
       const set = new Set<string>();
@@ -91,18 +104,14 @@ export function useChatPrefs(ownerUid: string | null) {
       if (nextMuted) copy.add(chatId); else copy.delete(chatId);
       return copy;
     });
-    // Persist to Firestore so the push Cloud Function can skip muted recipients
-    if (ownerUid) {
-      try {
-        await (db as ReturnType<typeof firestore>)
-          .collection('chats').doc(chatId)
-          .set({ mutedBy: { [ownerUid]: nextMuted } }, { merge: true });
-      } catch (err) {
-        console.warn('[useChatPrefs] Failed to sync mute to Firestore:', err);
-      }
+    // Persist to the backend so push notifications skip muted chats.
+    try {
+      await endpoints.setChatMuted(chatId, nextMuted);
+    } catch (err) {
+      console.warn('[useChatPrefs] Failed to sync mute to backend:', err);
     }
     return nextMuted;
-  }, [ownerUid]);
+  }, []);
 
   return {
     pinned, favourites, mutedChats,

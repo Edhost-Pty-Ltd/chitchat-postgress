@@ -3,10 +3,11 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { View, FlatList, TouchableOpacity, StyleSheet, Platform, ActivityIndicator, Image } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect } from '@react-navigation/native';
-import { UserAvatar, StatusViewer, CreateStatusModal } from '../components';
+import { UserAvatar, StatusViewer, CreateStatusModal, BottomNav } from '../components';
 import { endpoints } from '../api/endpoints';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { useAuth } from '../hooks/useAuth';
+import { useAuth as useAuthContext } from '../context/AuthContext';
 import { useStatus, type StatusGroup } from '../hooks/useStatus';
 import { usePhoneBook } from '../hooks/usePhoneBook';
 import { isVisibleTo } from '../hooks/usePrivacySettings';
@@ -46,6 +47,9 @@ function stringToColor(str: string): string {
 export default function StatusScreen() {
   const { user } = useAuth();
   const userId = user?.uid ?? null;
+  // On a companion, auth.uid is the owner's uid, so statuses are the owner's.
+  // isCompanion gates the owner-only actions (mark viewed, delete).
+  const { isCompanion } = useAuthContext();
   const displayName = user?.displayName || user?.email || 'Unknown';
   const photoURL = user?.photoURL || null;
 
@@ -64,7 +68,7 @@ export default function StatusScreen() {
     markAsViewed,
     deleteStatus,
     reload: reloadStatuses,
-  } = useStatus(userId);
+  } = useStatus(userId, isCompanion);
 
   // Reload whenever this tab comes into focus so the status list is always fresh.
   useFocusEffect(
@@ -393,10 +397,15 @@ export default function StatusScreen() {
           initialIndex={0}
           currentUserId={userId || ''}
           onStatusViewed={markAsViewed}
-          onDeleteStatus={viewerIsOwner ? handleDeleteStatus : undefined}
+          // Companions can post and view but not delete — deleting a status
+          // is owner-only on the backend.
+          onDeleteStatus={viewerIsOwner && !isCompanion ? handleDeleteStatus : undefined}
         />
       )}
+
+               <BottomNav active='status'/>
     </View>
+    
   );
 }
 

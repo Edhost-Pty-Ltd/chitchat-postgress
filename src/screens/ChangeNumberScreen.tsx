@@ -3,6 +3,12 @@
 //   Step 1 — enter new SA phone number (country picker + dial pad)
 //   Step 2 — verify OTP sent to the new number
 //   On success — updates the phone number in AuthContext
+//
+// COMPANION NOTE
+//   Changing the phone number is owner-only (PUT /me/phone returns 403
+//   COMPANION_NOT_ALLOWED for companions), so the entire flow is blocked on a
+//   companion device and replaced with a notice pointing at the primary phone.
+//
 import React, { useState, useRef, useMemo } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView,
@@ -79,7 +85,7 @@ function CountryPicker({ visible, selected, onSelect, onClose }: {
 
 export default function ChangeNumberScreen() {
   const navigation = useNavigation<NavProp>();
-  const { phone: currentPhone, displayName, signIn } = useAuth();
+  const { phone: currentPhone, displayName, signIn, isCompanion } = useAuth();
   const { sendOTP, verifyOTP } = useFirebaseAuth();
   const { FG } = useForeground();
   const { fontFamily, textColor } = useTypography();
@@ -190,8 +196,33 @@ export default function ChangeNumberScreen() {
           <View style={{ width: 36 }} />
         </View>
 
-        {/* ── Web-only notice ── */}
-        {Platform.OS === 'web' ? (
+        {/* ── Companion: not available here ── */}
+        {isCompanion ? (
+          <ScrollView contentContainerStyle={styles.scroll}>
+            <View style={[styles.card, bevel, { alignItems: 'center', gap: 16 }]}>
+              <View style={styles.webNoticeIcon}>
+                <Ionicons name="link-outline" size={40} color={COLORS.blue} />
+              </View>
+              <AppText style={[styles.cardTitle, { color: COLORS.text, textAlign: 'center' }]}>
+                Managed on your primary device
+              </AppText>
+              <AppText style={[styles.cardSub, { color: COLORS.sub, textAlign: 'center', marginBottom: 0 }]}>
+                This is a companion device. Your phone number belongs to the
+                account owner and can only be changed from the phone you signed
+                in with.
+                {'\n\n'}Open{' '}
+                <AppText fixedColor style={{ fontWeight: '700', color: COLORS.text }}>ChitChat</AppText>{' '}
+                on your primary phone to update it.
+              </AppText>
+              <TouchableOpacity onPress={() => navigation.goBack()} activeOpacity={0.85}>
+                <LinearGradient colors={GRADIENTS.primary} style={[styles.primaryBtn, { paddingHorizontal: 32 }]}>
+                  <AppText fixedColor style={styles.primaryBtnText}>Go Back</AppText>
+                </LinearGradient>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+        ) : Platform.OS === 'web' ? (
+          /* ── Web-only notice ── */
           <ScrollView contentContainerStyle={styles.scroll}>
             <View style={[styles.card, bevel, { alignItems: 'center', gap: 16 }]}>
               <View style={styles.webNoticeIcon}>
@@ -213,6 +244,7 @@ export default function ChangeNumberScreen() {
             </View>
           </ScrollView>
         ) : (
+          /* ── Primary device: normal flow ── */
           <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           <View style={[styles.card, bevel]}>
 
@@ -329,10 +361,12 @@ export default function ChangeNumberScreen() {
             )}
           </View>
         </ScrollView>
-        )} {/* end Platform.OS === 'web' ? ... : ( */}
+        )}
       </KeyboardAvoidingView>
 
-      <CountryPicker visible={pickerOpen} selected={country} onSelect={setCountry} onClose={() => setPickerOpen(false)} />
+      {!isCompanion && (
+        <CountryPicker visible={pickerOpen} selected={country} onSelect={setCountry} onClose={() => setPickerOpen(false)} />
+      )}
     </>
   );
 }

@@ -9,8 +9,7 @@ import { AppBg } from '../context/ThemeContext';
 import { useWritePresence } from '../hooks/usePresence';
 
 import { getAuth, signOut as firebaseSignOut } from '@react-native-firebase/auth';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
 
 // ── Eager imports for screens that are in the critical render path ────────────
 import SplashScreen from '../screens/SplashScreen';
@@ -117,11 +116,20 @@ export default function AppNavigator() {
 
     try {
       setProfileCheckError(false);
-      const fsDb = db as ReturnType<typeof firestore>;
-      const snap = await fsDb.collection('users').doc(currentUser.uid).get();
-      setProfileExists(snap.exists);
+      const res = await endpoints.getMe();
+      if (res.ok) {
+        setProfileExists(true);
+      } else if (res.error.kind === 'api') {
+        // Reached the backend: a 404 means the profile hasn't been created yet.
+        // Any other HTTP error is treated as a connection issue (retry screen).
+        if (res.error.status === 404) setProfileExists(false);
+        else setProfileCheckError(true);
+      } else {
+        // Never reached the backend (offline/timeout) — fail open like before.
+        setProfileExists(true);
+      }
     } catch (err: any) {
-      if (err?.code === 'unavailable' || err?.message?.includes('offline') || err?.message === 'Timeout') {
+      if (err?.message?.includes('offline') || err?.message === 'Timeout') {
         setProfileExists(true);
       } else {
         setProfileCheckError(true);

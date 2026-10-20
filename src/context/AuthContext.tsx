@@ -18,8 +18,9 @@ import {
   getAuth, onAuthStateChanged, signOut as fbSignOut,
   signInWithCustomToken,
 } from '@react-native-firebase/auth';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
+import { mediaService } from '../services/mediaService';
+import { socketClient } from '../realtime/socket';
 import { startStatusCleanupService, stopStatusCleanupService } from '../services/statusCleanupService';
 import { writePresence } from '../hooks/usePresence';
 import { FirebaseAuthTypes } from '@react-native-firebase/auth';
@@ -90,8 +91,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const webTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ─── COMPANION AUTO-LOGOUT GUARD ─────────────────────────────────────────
-  // Watches Firestore in the background and instantly signs out the
-  // companion device if the primary phone removes it from linked devices.
+  // Listens for the backend's device:removed socket event (with a polling
+  // fallback that treats 401 AUTH_TOKEN_REVOKED as "removed") and signs out
+  // the companion device as soon as the primary phone removes it.
   useCompanionLinkGuard(isCompanion, companionOwnerUid);
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -139,6 +141,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await fbSignOut(getAuth());
     } catch {}
 
+    // Drop the realtime connection: it was authenticated as this session's
+    // user, and the shared client would otherwise hand the same socket to the
+    // next sign-in (e.g. this device linking as a companion of another account).
+    try { socketClient.disconnect(); } catch {}
+
     isSigningOutRef.current = false;
   };
 
@@ -172,15 +179,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           } else {
             let resolvedPhone = storedPhone || '';
             try {
-              const fsDb = db as ReturnType<typeof firestore>;
-              const snap = await fsDb.collection('users').doc(companionOwnerUid).get();
-              if (snap.exists()) {
-                const data = snap.data()!;
+              // Companion is authenticated AS the owner (auth.uid === ownerUid),
+              // so /me returns the owner's profile.
+              const res = await endpoints.getMe();
+              if (res.ok) {
+                const data = res.data;
                 const name  = data.displayName || '';
-                const photo = data.photoURL    || null;
-                const realP = data.phone       || '';
+                const realP = data.phoneNumber || '';
                 if (name)  setDisplayNameState(name);
-                if (photo) setAvatarUriState(photo);
+                if (data.avatarObjectKey) {
+                  const url = await mediaService.getDownloadUrl(data.avatarObjectKey);
+                  if (url) setAvatarUriState(url);
+                }
                 if (realP) resolvedPhone = realP;
               }
             } catch {}
@@ -271,14 +281,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const currentUser = getAuth().currentUser;
     if (currentUser) {
-      const fsDb = db as ReturnType<typeof firestore>;
-      fsDb.collection('users').doc(currentUser.uid).get().then((snap) => {
-        if (!snap.exists) return;
-        const data = snap.data()!;
-        const name  = data.displayName || '';
-        const photo = data.photoURL    || null;
-        if (name)  { setDisplayNameState(name);  AsyncStorage.setItem(KEYS.displayName, name); }
-        if (photo) { setAvatarUriState(photo);   AsyncStorage.setItem(KEYS.avatarUri, photo); }
+      endpoints.getMe().then(async (res) => {
+        if (!res.ok) return;
+        const data = res.data;
+        const name = data.displayName || '';
+        if (name) { setDisplayNameState(name); AsyncStorage.setItem(KEYS.displayName, name); }
+        if (data.avatarObjectKey) {
+          const url = await mediaService.getDownloadUrl(data.avatarObjectKey);
+          if (url) { setAvatarUriState(url); AsyncStorage.setItem(KEYS.avatarUri, url); }
+        }
       }).catch(() => {});
 
       writePresence(currentUser.uid, true).catch(() => {});
@@ -312,18 +323,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw err;
     }
 
-    // 2. Fetch the owner's profile for display
+    // 2. Fetch the owner's profile for display. After signInWithCustomToken the
+    // auth.uid is the owner's uid, so /me returns the owner's profile.
     let resolvedPhone = '';
     try {
-      const fsDb = db as ReturnType<typeof firestore>;
-      const snap = await fsDb.collection('users').doc(ownerUid).get();
-      if (snap.exists()) {
-        const data = snap.data()!;
+      const res = await endpoints.getMe();
+      if (res.ok) {
+        const data = res.data;
         const name  = data.displayName || '';
-        const photo = data.photoURL    || null;
-        const realP = data.phone       || '';
+        const realP = data.phoneNumber || '';
         if (name)  { setDisplayNameState(name);  await AsyncStorage.setItem(KEYS.displayName, name); }
-        if (photo) { setAvatarUriState(photo);   await AsyncStorage.setItem(KEYS.avatarUri, photo); }
+        if (data.avatarObjectKey) {
+          const url = await mediaService.getDownloadUrl(data.avatarObjectKey);
+          if (url) { setAvatarUriState(url); await AsyncStorage.setItem(KEYS.avatarUri, url); }
+        }
         if (realP) resolvedPhone = realP;
       }
     } catch {}

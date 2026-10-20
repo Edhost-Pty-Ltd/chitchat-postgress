@@ -1,7 +1,9 @@
 // ─── MeetingChatSheet ────────────────────────────────────────────────────────
 // Small chat sheet used inside a meeting. Messages are stored on the Postgres
 // backend via POST /meetings/:id/messages and delivered in real-time through
-// the meeting:message Socket.IO event.
+// the meeting:message Socket.IO event. System messages (latecomer recaps,
+// auto-generated minutes) flow through the same channel with isSystem + a
+// senderName label ('Meeting Recap' / 'Meeting Minutes').
 
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
@@ -72,6 +74,7 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
     const unsub = socketClient.subscribe('meeting:message', (payload) => {
       const p = payload as {
         id?: string; meetingId?: string; senderId?: string;
+        senderName?: string | null; isSystem?: boolean;
         text?: string | null; mediaObjectKey?: string | null; createdAt?: string;
       };
       if (!active || p?.meetingId !== meetingId) return;
@@ -79,13 +82,24 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
         id:             p.id ?? '',
         meetingId:      p.meetingId ?? meetingId,
         senderId:       p.senderId ?? '',
+        senderName:     p.senderName ?? null,
+        isSystem:       !!p.isSystem,
         text:           p.text ?? null,
         mediaObjectKey: p.mediaObjectKey ?? null,
         createdAt:      p.createdAt ?? new Date().toISOString(),
       };
       setMessages((prev) => {
-        // Deduplicate — the sender already sees their own optimistic message
         if (prev.some((m) => m.id === msg.id)) return prev;
+        // The server echo of our own message can arrive before the POST
+        // response: swap it in for the matching optimistic entry.
+        if (!msg.isSystem && msg.senderId === userId) {
+          const idx = prev.findIndex((m) => m.id.startsWith('temp-') && m.text === msg.text);
+          if (idx >= 0) {
+            const next = prev.slice();
+            next[idx] = msg;
+            return next;
+          }
+        }
         return [...prev, msg];
       });
       requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
@@ -95,7 +109,7 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
       active = false;
       unsub();
     };
-  }, [visible, meetingId]);
+  }, [visible, meetingId, userId]);
 
   // ── Send ─────────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
@@ -110,6 +124,8 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
       id: tempId,
       meetingId,
       senderId: userId,
+      senderName: userDisplayName,
+      isSystem: false,
       text,
       mediaObjectKey: null,
       createdAt: new Date().toISOString(),
@@ -118,17 +134,20 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
     requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
 
     try {
-      const res = await endpoints.sendMeetingMessage(meetingId, { text });
-      if (res.ok) {
-        // Replace the optimistic entry with the confirmed one from the server
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === tempId
-              ? { ...m, id: res.data.message.id, createdAt: res.data.message.createdAt }
-              : m,
-          ),
-        );
-      }
+      // senderName is stored with the message so the room sees who wrote it.
+      const res = await endpoints.sendMeetingMessage(meetingId, {
+        text,
+        senderName: userDisplayName.slice(0, 200),
+      });
+      if (!res.ok) throw new Error(res.error.message);
+      const { id, createdAt } = res.data.message;
+      // Replace the optimistic entry with the confirmed one from the server
+      // (or drop it if the socket echo already delivered the real message).
+      setMessages((prev) =>
+        prev.some((m) => m.id === id)
+          ? prev.filter((m) => m.id !== tempId)
+          : prev.map((m) => (m.id === tempId ? { ...m, id, createdAt } : m)),
+      );
     } catch (e) {
       console.error('[MeetingChatSheet] send failed:', e);
       // Remove optimistic message on failure so the user knows it didn't send
@@ -136,7 +155,7 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
     } finally {
       setSending(false);
     }
-  }, [input, userId, meetingId]);
+  }, [input, userId, userDisplayName, meetingId]);
 
   if (!visible) return null;
 
@@ -194,7 +213,7 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
                   onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
                   renderItem={({ item }) => {
                     const mine = item.senderId === userId;
-                    const isSystem = item.senderId === 'system';
+                    const isSystem = !!item.isSystem || item.senderId === 'system';
 
                     if (isSystem) {
                       return (
@@ -202,7 +221,7 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
                           <View style={styles.systemCard}>
                             <View style={styles.systemHeader}>
                               <AppIcon name="sparkles-outline" size={13} color={COLORS.blue} />
-                              <AppText style={styles.systemName}>Meeting Recap</AppText>
+                              <AppText style={styles.systemName}>{item.senderName || 'Meeting'}</AppText>
                               <AppText style={styles.systemTime}>{fmtTime(item.createdAt)}</AppText>
                             </View>
                             <AppText style={styles.systemText}>{item.text}</AppText>
@@ -215,7 +234,7 @@ export function MeetingChatSheet({ visible, meetingId, userId, userDisplayName, 
                       <View style={[styles.row, mine ? styles.rowMine : styles.rowOther]}>
                         {!mine && (
                           <AppText style={[styles.senderName, { color: COLORS.blue }]} numberOfLines={1}>
-                            {item.senderId}
+                            {item.senderName || 'Unknown'}
                           </AppText>
                         )}
                         <View style={[

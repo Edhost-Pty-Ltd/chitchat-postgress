@@ -11,7 +11,46 @@ export interface HealthResponse {
   dependencies: { postgres: boolean; redis: boolean };
 }
 
-export interface MeResponse {
+export interface BusinessAddressDTO {
+  street: string;
+  city: string;
+  province: string;
+  postalCode: string;
+  country: string;
+}
+
+export type WorkScheduleDTO = Record<string, { open: string; close: string }>;
+
+/** Catalog item as stored on the backend; `imageUri` holds a media OBJECT KEY. */
+export interface CatalogItemDTO {
+  id: string;
+  name: string;
+  price: string;
+  description?: string | null;
+  imageUri?: string | null;
+  collectionId?: string | null;
+  [extra: string]: unknown;
+}
+
+export interface CatalogCollectionDTO {
+  id: string;
+  name: string;
+  emoji?: string | null;
+  createdAt?: number;
+  [extra: string]: unknown;
+}
+
+/** Business-profile fields (old Firestore user doc fields). */
+export interface BusinessProfileDTO {
+  industry: string | null;
+  address: BusinessAddressDTO | null;
+  workSchedule: WorkScheduleDTO | null;
+  timezone: string | null;
+  catalogItems: CatalogItemDTO[];
+  catalogCollections: CatalogCollectionDTO[];
+}
+
+export interface MeResponse extends BusinessProfileDTO {
   id: string;
   phoneNumber: string | null;
   displayName: string | null;
@@ -22,14 +61,27 @@ export interface MeResponse {
   catalog: string | null;
   operationalHours: string | null;
   accountType: string;
+  autoResponderEnabled: boolean;
+  autoResponderMessage: string | null;
 }
 
-export interface PublicUserProfile {
+export interface PublicUserProfile extends BusinessProfileDTO {
   id: string;
   phoneNumber: string | null;
   displayName: string | null;
+  about: string | null;
+  /** Null when the user hides their photo or has blocked the viewer. */
   avatarObjectKey: string | null;
   accountType: string;
+  email: string | null;
+  website: string | null;
+  operationalHours: string | null;
+  /** The target's privacy choices the app needs (group adds, photo, last seen). */
+  privacy: { groups: Visibility; profilePhoto: Visibility; lastSeen: Visibility };
+  /** The viewer has blocked this user. */
+  iBlocked: boolean;
+  /** This user has blocked the viewer. */
+  blockedMe: boolean;
 }
 
 export interface ProfilePatch {
@@ -40,6 +92,15 @@ export interface ProfilePatch {
   website?: string | null;
   catalog?: string | null;
   operationalHours?: string | null;
+  industry?: string | null;
+  address?: BusinessAddressDTO | null;
+  workSchedule?: WorkScheduleDTO | null;
+  /** IANA zone used to evaluate working hours for the auto-responder. */
+  timezone?: string | null;
+  autoResponderEnabled?: boolean;
+  autoResponderMessage?: string | null;
+  catalogItems?: CatalogItemDTO[];
+  catalogCollections?: CatalogCollectionDTO[];
 }
 
 export type Visibility = 'Everyone' | 'Contacts' | 'Nobody';
@@ -101,8 +162,12 @@ export function createEndpoints(client: ApiClient = apiClient) {
       client.post('/contacts/match', { phones }),
 
     // ── Push tokens (Req 4.7, 4.8) ──
-    registerPushToken: (token: string, platform?: string | null): Promise<ApiResult<{ ok: true }>> =>
-      client.post('/push-tokens', { token, platform }),
+    registerPushToken: (
+      token: string,
+      platform?: string | null,
+      deviceId?: string | null,
+    ): Promise<ApiResult<{ ok: true }>> =>
+      client.post('/push-tokens', { token, platform, deviceId: deviceId ?? null }),
     removePushToken: (token: string): Promise<ApiResult<{ ok: true }>> =>
       client.delete(`/push-tokens/${encodeURIComponent(token)}`),
 
@@ -140,6 +205,13 @@ export function createEndpoints(client: ApiClient = apiClient) {
       targetChatIds: string[],
     ): Promise<ApiResult<{ forwarded: number; messageIds: string[] }>> =>
       client.post('/messages/forward', { messageId, targetChatIds }),
+    /** Clear a chat for the caller only (others keep their messages). */
+    clearChat: (chatId: string): Promise<ApiResult<{ chatId: string; clearedAt: string }>> =>
+      client.post(`/chats/${chatId}/clear`),
+    /** Leave a group (any member). */
+    leaveChat: (chatId: string): Promise<ApiResult<{ ok: true }>> => client.post(`/chats/${chatId}/leave`),
+    listPastMembers: (chatId: string): Promise<ApiResult<{ pastMembers: PastMemberDTO[] }>> =>
+      client.get(`/chats/${chatId}/past-members`),
 
     // ── Presence / last seen (Req 7.4, 7.5) ──
     getPresence: (userId: string): Promise<ApiResult<PresenceResponse>> =>
@@ -161,22 +233,56 @@ export function createEndpoints(client: ApiClient = apiClient) {
     ): Promise<ApiResult<{ items: CallHistoryDTO[]; nextCursor: string | null }>> =>
       client.get('/calls/history', { query: opts }),
     clearCallHistory: (): Promise<ApiResult<{ ok: true }>> => client.delete('/calls/history'),
-    createMeeting: (
-      title?: string,
-      participants?: string[],
-    ): Promise<ApiResult<{ meetingId: string; state: unknown }>> =>
-      client.post('/meetings', { title, participants }),
-    getMeeting: (meetingId: string): Promise<ApiResult<{ state: unknown }>> =>
+    /** Schedule a meeting; invitees get a chat invitation + push. */
+    createMeeting: (input: CreateMeetingInput): Promise<ApiResult<{ meetingId: string; state: MeetingStateDTO }>> =>
+      client.post('/meetings', input),
+    getMeeting: (meetingId: string): Promise<ApiResult<{ state: MeetingStateDTO }>> =>
       client.get(`/meetings/${meetingId}`),
     listMeetings: (): Promise<ApiResult<{ meetings: MeetingListItem[] }>> =>
       client.get('/meetings'),
+    addMeetingParticipants: (
+      meetingId: string,
+      userIds: string[],
+      organizerName?: string | null,
+    ): Promise<ApiResult<{ added: string[] }>> =>
+      client.post(`/meetings/${encodeURIComponent(meetingId)}/participants`, { userIds, organizerName }),
     getMeetingMessages: (meetingId: string): Promise<ApiResult<{ messages: MeetingMessage[] }>> =>
       client.get(`/meetings/${encodeURIComponent(meetingId)}/messages`),
     sendMeetingMessage: (
       meetingId: string,
-      body: { text?: string; mediaObjectKey?: string | null },
+      body: { text?: string; mediaObjectKey?: string | null; isSystem?: boolean; senderName?: string | null },
     ): Promise<ApiResult<{ message: { id: string; createdAt: string } }>> =>
       client.post(`/meetings/${encodeURIComponent(meetingId)}/messages`, body),
+    saveMeetingMinutes: (meetingId: string, minutes: string): Promise<ApiResult<{ ok: true }>> =>
+      client.put(`/meetings/${encodeURIComponent(meetingId)}/minutes`, { minutes }),
+    setMeetingRecordingState: (
+      meetingId: string,
+      isRecording: boolean,
+    ): Promise<ApiResult<{ isRecording: boolean }>> =>
+      client.put(`/meetings/${encodeURIComponent(meetingId)}/recording-state`, { isRecording }),
+    /** Register an uploaded recording (object key); minutes are generated in the background. */
+    addMeetingRecording: (
+      meetingId: string,
+      body: { objectKey: string; durationMs: number; autoSummarize?: boolean },
+    ): Promise<ApiResult<{ recording: MeetingRecordingDTO; summarizing: boolean }>> =>
+      client.post(`/meetings/${encodeURIComponent(meetingId)}/recordings`, body),
+    listMeetingRecordings: (meetingId: string): Promise<ApiResult<{ recordings: MeetingRecordingDTO[] }>> =>
+      client.get(`/meetings/${encodeURIComponent(meetingId)}/recordings`),
+    /** (Re)generate AI minutes for a recording. Can take a few minutes. */
+    summarizeMeetingRecording: (
+      meetingId: string,
+      recordingId: string,
+    ): Promise<ApiResult<{ minutes: string }>> => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 6 * 60 * 1000);
+      return client
+        .post<{ minutes: string }>(
+          `/meetings/${encodeURIComponent(meetingId)}/recordings/${encodeURIComponent(recordingId)}/summarize`,
+          undefined,
+          { signal: controller.signal },
+        )
+        .finally(() => clearTimeout(timer));
+    },
     endMeeting: (meetingId: string): Promise<ApiResult<{ ok: true }>> =>
       client.post(`/meetings/${encodeURIComponent(meetingId)}/end`),
 
@@ -203,7 +309,180 @@ export function createEndpoints(client: ApiClient = apiClient) {
       body: { type?: string; text?: string | null; mediaObjectKey?: string | null },
     ): Promise<ApiResult<{ sent: number; skipped: string[] }>> =>
       client.post(`/broadcasts/${id}/send`, body),
+
+    // ── Polls ──
+    votePoll: (
+      chatId: string,
+      messageId: string,
+      optionId: string,
+    ): Promise<ApiResult<{ message: BackendMessage }>> =>
+      client.post(`/chats/${chatId}/messages/${messageId}/vote`, { optionId }),
+
+    // ── Chat mute ──
+    listMutedChats: (): Promise<ApiResult<{ chatIds: string[] }>> => client.get('/me/muted-chats'),
+    setChatMuted: (chatId: string, muted: boolean): Promise<ApiResult<{ chatId: string; muted: boolean }>> =>
+      client.put(`/chats/${chatId}/mute`, { muted }),
+
+    // ── Profile views ──
+    recordProfileView: (viewedUid: string): Promise<ApiResult<{ ok: true }>> =>
+      client.post('/profile-views', { viewedUid }),
+    getProfileViews: (): Promise<ApiResult<ProfileViewCountersDTO>> => client.get('/me/profile-views'),
+
+    // ── Message analytics ──
+    getMessageStats: (): Promise<ApiResult<MessageStatsDTO>> => client.get('/me/message-stats'),
+
+    // ── Linked / companion devices ──
+    createDeviceLink: (input: {
+      requestId: string;
+      displayCode: string;
+      requesterUid?: string | null;
+      deviceId: string;
+      deviceName?: string | null;
+      deviceType?: 'phone' | 'tablet' | 'desktop' | 'web';
+      os?: string | null;
+      platform?: 'ios' | 'android' | 'web';
+    }): Promise<ApiResult<{ requestId: string; displayCode: string }>> =>
+      client.post('/device-links', input),
+    getDeviceLink: (
+      requestId: string,
+    ): Promise<ApiResult<{ consumed: boolean; expired: boolean; ownerUid: string | null; customToken: string | null }>> =>
+      client.get(`/device-links/${encodeURIComponent(requestId)}`),
+    findDeviceLinkByCode: (code: string): Promise<ApiResult<{ requestId: string | null }>> =>
+      client.get('/device-links', { query: { code } }),
+    claimDeviceLink: (requestId: string, ownerName?: string | null): Promise<ApiResult<{ success: boolean }>> =>
+      client.post('/device-links/claim', { requestId, ownerName }),
+    listDevices: (): Promise<ApiResult<{ devices: LinkedDeviceDTO[] }>> => client.get('/me/devices'),
+    registerDevice: (device: {
+      deviceId: string; name: string;
+      type?: 'phone' | 'tablet' | 'desktop' | 'web';
+      os?: string; platform?: 'ios' | 'android' | 'web';
+    }): Promise<ApiResult<{ ok: true }>> => client.post('/me/devices', device),
+    touchDevice: (deviceId: string): Promise<ApiResult<{ ok: true }>> =>
+      client.post(`/me/devices/${encodeURIComponent(deviceId)}/touch`),
+    removeDevice: (deviceId: string): Promise<ApiResult<{ ok: true }>> =>
+      client.delete(`/me/devices/${encodeURIComponent(deviceId)}`),
+    removeOtherDevices: (keep: string): Promise<ApiResult<{ ok: true }>> =>
+      client.delete('/me/devices', { query: { keep } }),
+
+    // ── Multi-agent / business ──
+    listBusinesses: (): Promise<ApiResult<{ businesses: BusinessDTO[] }>> => client.get('/businesses'),
+    createBusiness: (input: {
+      name: string;
+      plan?: 'free' | 'pro' | 'enterprise';
+      agents?: string[];
+      autoAssign?: boolean;
+      routingStrategy?: 'round-robin' | 'least-active' | 'manual';
+    }): Promise<ApiResult<{ business: BusinessDTO }>> => client.post('/businesses', input),
+    getBusiness: (id: string): Promise<ApiResult<{ business: BusinessDTO }>> =>
+      client.get(`/businesses/${encodeURIComponent(id)}`),
+    updateBusiness: (
+      id: string,
+      patch: Partial<{ name: string; plan: 'free' | 'pro' | 'enterprise'; agents: string[]; autoAssign: boolean; routingStrategy: 'round-robin' | 'least-active' | 'manual' }>,
+    ): Promise<ApiResult<{ business: BusinessDTO | null }>> =>
+      client.patch(`/businesses/${encodeURIComponent(id)}`, patch),
+    getAgentInfo: (): Promise<ApiResult<{ role: 'customer' | 'agent' | 'admin'; agentStatus: 'available' | 'busy' | 'away' | null }>> =>
+      client.get('/me/agent'),
+    setRole: (role: 'customer' | 'agent' | 'admin'): Promise<ApiResult<{ role: string }>> =>
+      client.put('/me/role', { role }),
+    setAgentStatus: (status: 'available' | 'busy' | 'away' | null): Promise<ApiResult<{ status: string | null }>> =>
+      client.put('/me/agent-status', { status }),
+    listInternalNotes: (chatId: string): Promise<ApiResult<{ notes: InternalNoteDTO[] }>> =>
+      client.get(`/chats/${encodeURIComponent(chatId)}/notes`),
+    addInternalNote: (chatId: string, text: string): Promise<ApiResult<{ note: InternalNoteDTO }>> =>
+      client.post(`/chats/${encodeURIComponent(chatId)}/notes`, { text }),
+
+    // ── Synced contacts (companion devices show the owner's phone book) ──
+    listSyncedContacts: (): Promise<ApiResult<{ contacts: SyncedContactDTO[] }>> =>
+      client.get('/me/synced-contacts'),
+    replaceSyncedContacts: (contacts: SyncedContactDTO[]): Promise<ApiResult<{ saved: number }>> =>
+      client.put('/me/synced-contacts', { contacts }),
+
+    // ── Chat labels ──
+    listChatLabels: (): Promise<ApiResult<{ labels: ChatLabelDTO[] }>> => client.get('/me/chat-labels'),
+    createChatLabel: (input: {
+      title: string;
+      memberIds: string[];
+      groupIds: string[];
+    }): Promise<ApiResult<{ label: ChatLabelDTO }>> => client.post('/me/chat-labels', input),
+    updateChatLabel: (
+      labelId: string,
+      patch: { title?: string; memberIds?: string[]; groupIds?: string[] },
+    ): Promise<ApiResult<{ label: ChatLabelDTO }>> =>
+      client.patch(`/me/chat-labels/${encodeURIComponent(labelId)}`, patch),
+    deleteChatLabel: (labelId: string): Promise<ApiResult<{ ok: true }>> =>
+      client.delete(`/me/chat-labels/${encodeURIComponent(labelId)}`),
   };
+}
+
+export interface PastMemberDTO {
+  userId: string;
+  displayName: string | null;
+  leftAt: string;
+}
+
+export interface SyncedContactDTO {
+  phone: string;
+  displayName: string;
+  userId: string | null;
+  isSaved: boolean;
+  avatarObjectKey: string | null;
+}
+
+export interface ChatLabelDTO {
+  id: string;
+  title: string;
+  memberIds: string[];
+  groupIds: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CreateMeetingInput {
+  title: string;
+  participants: string[];
+  /** ISO-8601 start/end. */
+  startsAt: string;
+  endsAt: string;
+  type?: 'online' | 'in-person';
+  reminders?: number[];
+  /** Shown in the invitation ("You're invited … by {organizerName}"). */
+  organizerName?: string | null;
+}
+
+export interface MeetingStateDTO {
+  id: string;
+  title: string;
+  organizerId: string;
+  isActive: boolean;
+  isRecording: boolean;
+  endedAt: string | null;
+  createdAt: string;
+  startsAt: string;
+  endsAt: string;
+  type: 'online' | 'in-person';
+  reminders: number[];
+  minutes: string | null;
+  minutesGeneratedAt: string | null;
+  participants: string[];
+  joinedMembers: string[];
+  attendees: string[];
+  mutedUsers: string[];
+  kickedUsers: string[];
+  recordingCount: number;
+}
+
+export interface MeetingRecordingDTO {
+  id: string;
+  meetingId: string;
+  objectKey: string;
+  /** Short-lived playback URL. */
+  url: string;
+  durationMs: number;
+  createdBy: string | null;
+  status: 'uploaded' | 'processing' | 'done' | 'failed';
+  minutes: string | null;
+  error: string | null;
+  createdAt: string;
 }
 
 export interface BackendStatus {
@@ -290,6 +569,8 @@ export interface ChatSummary {
   lastMessageAt: string | null;
   unreadCount: number;
   role: 'admin' | 'member';
+  /** The caller's "clear chat" cutoff; older messages are hidden for them. */
+  clearedAt: string | null;
 }
 
 export type BackendMessageType =
@@ -300,7 +581,35 @@ export type BackendMessageType =
   | 'file'
   | 'location'
   | 'system'
-  | 'catalog';
+  | 'catalog'
+  | 'poll'
+  | 'order'
+  | 'contact';
+
+export interface PollPayload {
+  question: string;
+  options: { id: string; text: string }[];
+  multiple: boolean;
+  votes?: Record<string, string[]>;
+}
+
+export interface OrderPayload {
+  items: { id: string; name: string; price: string; imageObjectKey: string | null; quantity: number }[];
+  total: string | null;
+  currency: string;
+}
+
+export interface ContactPayload {
+  name: string;
+  phone: string;
+  userId: string | null;
+  registered?: boolean;
+  photoObjectKey?: string | null;
+  contacts?: {
+    name: string; phone: string; userId: string | null;
+    registered?: boolean; photoObjectKey?: string | null;
+  }[];
+}
 
 export interface BackendMessage {
   id: string;
@@ -319,6 +628,9 @@ export interface BackendMessage {
   catalogItem: unknown;
   replyTo: unknown;
   subtype: string | null;
+  poll: PollPayload | null;
+  order: OrderPayload | null;
+  contact: ContactPayload | null;
   createdAt: string;
   expiresAt: string;
   deletedForEveryone: boolean;
@@ -342,22 +654,63 @@ export interface SendMessageInput {
   catalogItem?: unknown;
   replyTo?: unknown;
   subtype?: string | null;
+  poll?: PollPayload;
+  order?: OrderPayload;
+  contact?: ContactPayload;
 }
 
-export interface MeetingListItem {
+export interface LinkedDeviceDTO {
   id: string;
-  title: string;
-  organizerId: string;
-  isActive: boolean;
-  endedAt: string | null;
+  name: string;
+  type: 'phone' | 'tablet' | 'desktop' | 'web';
+  os: string;
+  platform: 'ios' | 'android' | 'web';
+  linkedAt: string;
+  lastActiveAt: string;
+}
+
+export interface BusinessDTO {
+  businessId: string;
+  name: string;
+  ownerId: string;
+  agents: string[];
+  plan: 'free' | 'pro' | 'enterprise';
   createdAt: string;
+  settings: { autoAssign: boolean; routingStrategy: 'round-robin' | 'least-active' | 'manual' };
+}
+
+export interface InternalNoteDTO {
+  noteId: string;
+  chatId: string;
+  authorId: string;
+  authorName: string | null;
+  text: string;
+  createdAt: string;
+}
+
+export interface MessageStatsDTO {
+  sent: number;
+  delivered: number;
+  read: number;
+}
+
+export interface ProfileViewCountersDTO {
+  profileViews: number;
+  profileViewsToday: number;
+  updatedAt: string | null;
+}
+
+export interface MeetingListItem extends MeetingStateDTO {
   participantCount: number;
+  hasRecordings: boolean;
 }
 
 export interface MeetingMessage {
   id: string;
   meetingId: string;
   senderId: string;
+  senderName: string | null;
+  isSystem: boolean;
   text: string | null;
   mediaObjectKey: string | null;
   createdAt: string;

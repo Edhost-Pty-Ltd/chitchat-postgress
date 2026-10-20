@@ -11,15 +11,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import DateTimePickerModal from 'react-native-modal-datetime-picker';
 import * as Notifications from 'expo-notifications';
-import { endpoints } from '../api/endpoints';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { endpoints, type MeetingListItem, type MeetingRecordingDTO } from '../api/endpoints';
 import { socketClient } from '../realtime/socket';
 import * as Contacts from 'expo-contacts';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { readAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 
-
+import { BottomNav } from '../components';
 import { ParticipantPickerSheet } from '../components/ParticipantPickerSheet';
 import { useAuth } from '../context/AuthContext';
 import { useContacts, AppContact } from '../hooks/useContacts';
@@ -27,7 +27,6 @@ import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
 const HOUR_HEIGHT = 70; // Height per hour in the timeline
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'Calendar'>;
@@ -48,16 +47,58 @@ interface Meeting {
   minutes: string | null;
   hasRecordings: boolean;
   recordings: { url: string; durationMs: number }[];
-  attendance: string[]; // joinedMembers — who actually attended
+  attendance: string[]; // attendees — who actually attended (ever joined)
   isActive: boolean;
+}
+
+/** A recording as shown in the detail sheet (from GET /meetings/:id/recordings). */
+interface DetailRecording {
+  id: string;
+  url: string;
+  durationMs: number;
+  status: MeetingRecordingDTO['status'];
+  minutes: string | null;
 }
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: false,
-    shouldShowBanner: true, shouldShowList: true,
+    shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false,
   }),
 });
+
+// ─── Local meeting reminders ─────────────────────────────────────────────────
+// The organizer's device schedules the reminders locally; their ids are kept
+// per meeting so they can be cancelled if the meeting is ended early.
+const notifIdsKey = (meetingId: string) => `meeting_notif_ids_${meetingId}`;
+
+// Ended meetings already handled this session (the list reloads on every
+// socket event, so avoid re-reading storage for the same meetings).
+const remindersHandled = new Set<string>();
+
+async function cancelMeetingReminders(meetingIds: string[]): Promise<void> {
+  const pending = meetingIds.filter(id => !remindersHandled.has(id));
+  if (pending.length === 0) return;
+  pending.forEach(id => remindersHandled.add(id));
+  try {
+    const entries = await AsyncStorage.multiGet(pending.map(notifIdsKey));
+    const stored = entries.filter(([, raw]) => !!raw);
+    if (stored.length === 0) return;
+    for (const [, raw] of stored) {
+      let ids: unknown = [];
+      try { ids = JSON.parse(raw as string); } catch { /* corrupt entry — just clear it */ }
+      if (Array.isArray(ids)) {
+        await Promise.all(ids.map((id) => (typeof id === 'string'
+          ? Notifications.cancelScheduledNotificationAsync(id).catch(() => { })
+          : Promise.resolve())));
+      }
+    }
+    // Clear the stored IDs so we don't try to cancel again
+    await AsyncStorage.multiRemove(stored.map(([key]) => key));
+  } catch (err) {
+    pending.forEach(id => remindersHandled.delete(id)); // retry on the next load
+    console.warn('[Calendar] Failed to cancel meeting reminders:', err);
+  }
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const stringToColor = (str: string) => {
@@ -90,6 +131,34 @@ const deriveEnd = (start: Date, duration: string): Date => {
   return new Date(start.getTime() + (mins || 60) * 60000);
 };
 const getEndTime = (m: Meeting): Date => m.endDate ?? deriveEnd(m.date, m.duration);
+
+/** Recordings carried on the list item (used when the recordings request fails). */
+const fallbackRecordingsOf = (m: Meeting): DetailRecording[] =>
+  m.recordings.map((r, i) => ({
+    id: String(i), url: r.url, durationMs: r.durationMs, status: 'done', minutes: null,
+  }));
+
+/** Backend list item → the screen's Meeting shape. */
+const toMeeting = (m: MeetingListItem): Meeting => {
+  const start = new Date(m.startsAt);
+  const end = new Date(m.endsAt);
+  return {
+    id: m.id,
+    title: m.title || 'Untitled',
+    date: start,
+    endDate: end,
+    duration: calcDuration(start, end),
+    participants: m.participants ?? [],
+    organizerId: m.organizerId ?? '',
+    type: m.type ?? 'online',
+    reminders: m.reminders ?? [],
+    minutes: m.minutes ?? null,
+    hasRecordings: !!m.hasRecordings,
+    recordings: [],
+    attendance: m.attendees ?? [],
+    isActive: m.isActive !== false,
+  };
+};
 const isMeetingActive = (m: Meeting, now: Date) => m.isActive && now >= m.date && now <= getEndTime(m);
 const isMeetingPast   = (m: Meeting, now: Date) => !m.isActive || getEndTime(m) < now;
 
@@ -269,7 +338,9 @@ const MeetingRow = React.memo(function MeetingRow({
         <AppIcon name="chevron-forward" size={18} color={COLORS.sub} />
       )}
     </TouchableOpacity>
+
   );
+ 
 });
 
 // ─── New Meeting Sheet ────────────────────────────────────────────────────────
@@ -279,6 +350,7 @@ function NewMeetingSheet({
 }: any) {
   const [creating, setCreating] = useState(false);
   const { contacts } = useContacts();
+  const { displayName } = useAuth();
   const { bevel } = useGlass();
   const { textColor } = useTypography();
   const duration = useMemo(() => calcDuration(startTime, endTime), [startTime, endTime]);
@@ -306,63 +378,86 @@ function NewMeetingSheet({
     setCreating(true);
     const allParticipants = Array.from(new Set([userId, ...participantIds]));
     try {
-      // Create meeting on the backend
-      const res = await endpoints.createMeeting(title, allParticipants);
+      // Create the meeting on the backend. The server invites every participant
+      // (system message in their direct chat — "You're invited to the meeting
+      // … by {organizerName}." — plus a push) and refreshes their calendars.
+      const res = await endpoints.createMeeting({
+        title,
+        participants: allParticipants,
+        startsAt: startTime.toISOString(),
+        endsAt: endTime.toISOString(),
+        type: 'online',
+        reminders: REMINDER_MILESTONES,
+        organizerName: (displayName || '').trim().slice(0, 200) || null,
+      });
       if (!res.ok) throw new Error(res.error.message);
+      const { meetingId } = res.data;
 
-      // Schedule local notifications for the organizer's device
-      const now = new Date();
-      const scheduledIds: string[] = [];
+      // The meeting exists from here on, so a local-notification failure must
+      // not be reported as a failed create.
+      try {
+        const now = new Date();
+        const scheduledIds: string[] = [];
 
-      for (const mins of REMINDER_MILESTONES) {
-        const t = new Date(startTime.getTime() - mins * 60000);
-        if (t > now) {
+        for (const mins of REMINDER_MILESTONES) {
+          const t = new Date(startTime.getTime() - mins * 60000);
+          if (t > now) {
+            const id = await Notifications.scheduleNotificationAsync({
+              content: {
+                title: 'Meeting Reminder',
+                body: `"${title}" starts in ${mins === 60 ? '1 hour' : `${mins} minutes`}.`,
+                sound: true,
+              },
+              trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: t },
+            });
+            scheduledIds.push(id);
+          }
+        }
+
+        const startNudge = new Date(startTime.getTime() + 60 * 1000);
+        if (startNudge > now) {
           const id = await Notifications.scheduleNotificationAsync({
-            content: {
-              title: 'Meeting Reminder',
-              body: `"${title}" starts in ${mins === 60 ? '1 hour' : `${mins} minutes`}.`,
-              sound: true,
-            },
-            trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: t },
+            content: { title: 'Meeting starting now', body: `"${title}" — tap to join.`, sound: true },
+            trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: startNudge },
           });
           scheduledIds.push(id);
         }
-      }
 
-      const startNudge = new Date(startTime.getTime() + 60 * 1000);
-      if (startNudge > now) {
-        const id = await Notifications.scheduleNotificationAsync({
-          content: { title: 'Meeting starting now', body: `"${title}" — tap to join.`, sound: true },
-          trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: startNudge },
-        });
-        scheduledIds.push(id);
-      }
+        // Post-start "still waiting" nudges — only schedule if the meeting hasn't started yet
+        if (startTime > now) {
+          for (let i = 5; i <= 30; i += 5) {
+            const t = new Date(startTime.getTime() + i * 60000);
+            const id = await Notifications.scheduleNotificationAsync({
+              content: {
+                title: `Waiting for "${title}"`,
+                body: `Meeting started ${i} min ago. Tap to join.`,
+                sound: false,
+              },
+              trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: t },
+            });
+            scheduledIds.push(id);
+          }
+        }
 
-      for (let i = 5; i <= 30; i += 5) {
-        const t = new Date(startTime.getTime() + i * 60000);
-        if (t > now) {
-          const id = await Notifications.scheduleNotificationAsync({
+        // Persist IDs so CalendarScreen can cancel them if the meeting is ended early
+        if (scheduledIds.length > 0) {
+          await AsyncStorage.setItem(notifIdsKey(meetingId), JSON.stringify(scheduledIds));
+        }
+
+        // Local confirmation on the organizer's device (the server sent the invites)
+        const invitees = allParticipants.filter(uid => uid !== userId);
+        if (invitees.length > 0) {
+          await Notifications.scheduleNotificationAsync({
             content: {
-              title: `Waiting for "${title}"`,
-              body: `Meeting started ${i} min ago. Tap to join.`,
+              title: 'Meeting invitations sent',
+              body: `${invitees.length} participant${invitees.length > 1 ? 's' : ''} invited to "${title}".`,
               sound: false,
             },
-            trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: t },
+            trigger: null, // immediate
           });
-          scheduledIds.push(id);
         }
-      }
-
-      const invitees = allParticipants.filter(uid => uid !== userId);
-      if (invitees.length > 0) {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: 'Meeting invitations sent',
-            body: `${invitees.length} participant${invitees.length > 1 ? 's' : ''} invited to "${title}".`,
-            sound: false,
-          },
-          trigger: null,
-        });
+      } catch (notifErr) {
+        console.warn('[handleCreate] Failed to schedule meeting reminders:', notifErr);
       }
 
       onDone();
@@ -482,9 +577,10 @@ function NewMeetingSheet({
 
 // ─── RecordingPlayer ─────────────────────────────────────────────────────────
 function RecordingPlayer({
-  rec, index, total, meetingTitle, existingMinutes, onMinutesGenerated,
+  meetingId, rec, index, total, meetingTitle, existingMinutes, onMinutesGenerated,
 }: {
-  rec: { id: string; url: string; durationMs: number };
+  meetingId: string;
+  rec: DetailRecording;
   index: number;
   total: number;
   meetingTitle: string;
@@ -500,10 +596,16 @@ function RecordingPlayer({
   const isPlaying = status.playing ?? false;
 
   const [summarizing, setSummarizing] = useState(false);
+  const [summarizeStep, setSummarizeStep] = useState<'transcribing' | 'summarizing' | null>(null);
   const [minutes, setMinutes] = useState<string | null>(existingMinutes);
   const [exportingPdf, setExportingPdf] = useState(false);
 
-  useEffect(() => { if (existingMinutes && !minutes) setMinutes(existingMinutes); }, [existingMinutes]);
+  // Minutes can also arrive from the server (auto-generated after the call, or
+  // re-summarized elsewhere) — follow the latest known value.
+  useEffect(() => { if (existingMinutes) setMinutes(existingMinutes); }, [existingMinutes]);
+
+  // The server is generating minutes for this recording right now.
+  const serverProcessing = rec.status === 'processing';
 
   const fmtDuration = (ms: number) => {
     const totalSec = Math.floor(ms / 1000);
@@ -535,41 +637,26 @@ function RecordingPlayer({
       Alert.alert('No recording', 'Recording URL is not available.');
       return;
     }
-    if (!GEMINI_API_KEY) {
-      Alert.alert('Not configured', 'Gemini API key is not set. Add GEMINI_API_KEY to your .env file.');
-      return;
-    }
-    setSummarizing(true);
-    try {
-      const { downloadAsync, documentDirectory } = await import('expo-file-system/legacy');
-      const dest = `${documentDirectory}rec_${rec.id}_tmp.m4a`;
-      await downloadAsync(rec.url, dest);
-      const base64Audio = await readAsStringAsync(dest, { encoding: EncodingType.Base64 });
 
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
-                { text: 'Act as an executive meeting recorder. Produce clear minutes with: 1. Executive Summary 2. Key Decisions 3. Attendees & Action Items. Format as structured plain text.' },
-                { inlineData: { mimeType: 'audio/mp4', data: base64Audio } },
-              ],
-            }],
-          }),
-        }
-      );
-      const data = await res.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? 'No content returned.';
+    setSummarizing(true);
+    setSummarizeStep('transcribing');
+
+    try {
+      // Minutes are generated server-side (the AI key never ships in the app).
+      // The server transcribes + summarizes the stored recording and persists
+      // the minutes on the recording and the meeting. This can take minutes.
+      const res = await endpoints.summarizeMeetingRecording(meetingId, rec.id);
+      if (!res.ok) throw res.error;
+      const { minutes: text } = res.data;
+
       setMinutes(text);
       onMinutesGenerated(text);
     } catch (e: any) {
       console.error('[RecordingPlayer] summarize failed:', e);
-      Alert.alert('Summarize failed', e?.message ?? 'Could not generate minutes. Please try again.');
+      Alert.alert('Summarize failed', e?.message || 'Could not generate minutes.');
     } finally {
       setSummarizing(false);
+      setSummarizeStep(null);
     }
   };
 
@@ -660,15 +747,23 @@ function RecordingPlayer({
           style={[styles.recActionBtn, { flex: 1 }]}
           onPress={handleSummarize}
           activeOpacity={0.8}
-          disabled={summarizing || !rec.url}
+          disabled={summarizing || serverProcessing || !rec.url}
         >
-          {summarizing ? (
+          {summarizing || serverProcessing ? (
             <ActivityIndicator size="small" color={COLORS.blue} />
           ) : (
             <AppIcon name="sparkles-outline" size={15} color={COLORS.blue} />
           )}
           <AppText style={[styles.recActionText, { color: COLORS.blue }]}>
-            {summarizing ? 'Generating…' : minutes ? 'Re-summarize' : 'Summarize'}
+            {summarizeStep === 'transcribing'
+              ? 'Transcribing…'
+              : summarizeStep === 'summarizing'
+                ? 'Summarizing…'
+                : serverProcessing
+                  ? 'Generating minutes…'
+                  : minutes
+                    ? 'Re-summarize'
+                    : 'Summarize'}
           </AppText>
         </TouchableOpacity>
 
@@ -690,6 +785,12 @@ function RecordingPlayer({
           </TouchableOpacity>
         )}
       </View>
+
+      {serverProcessing && !minutes && (
+        <AppText style={[styles.minutesMetaText, { color: FG.secondary, marginTop: 10 }]}>
+          Recording is still being processed.
+        </AppText>
+      )}
 
       {minutes && (
         <View style={{ marginTop: 12 }}>
@@ -720,50 +821,92 @@ function MeetingDetailSheet({
   const { bevel } = useGlass();
   const { contacts } = useContacts();
 
-  const [subRecordings, setSubRecordings] = useState<{ id: string; url: string; durationMs: number }[]>([]);
+  // Fresh meeting state from GET /meetings/:id (participants, attendance, minutes).
+  const [details, setDetails] = useState<{
+    participants: string[];
+    attendance: string[];
+    minutes: string | null;
+    isActive: boolean;
+    hasRecordings: boolean;
+  } | null>(null);
+  const [subRecordings, setSubRecordings] = useState<DetailRecording[]>([]);
   const [recLoading, setRecLoading] = useState(false);
   const [generatedMinutes, setGeneratedMinutes] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!visible || !meeting) { setSubRecordings([]); setGeneratedMinutes(null); return; }
-    setRecLoading(true);
-    endpoints.getMeeting(meeting.id)
-      .then((res) => {
-        if (res.ok) {
-          const state = res.data.state as any;
-          if (state?.minutes) setGeneratedMinutes(state.minutes);
-        }
-        // Recordings are stored locally (S3 upload not yet wired); fall back to
-        // the meeting object's own recordings array.
-        setSubRecordings(
-          meeting.recordings.map((r, i) => ({ id: String(i), url: r.url, durationMs: r.durationMs }))
-        );
-      })
-      .catch(() => {
-        setSubRecordings(
-          meeting.recordings.map((r, i) => ({ id: String(i), url: r.url, durationMs: r.durationMs }))
-        );
-      })
-      .finally(() => setRecLoading(false));
+    if (!visible || !meeting) {
+      setDetails(null); setSubRecordings([]); setGeneratedMinutes(null); setRecLoading(false);
+      return;
+    }
+    let active = true;
+    const meetingId = meeting.id;
+    const fallbackRecordings = fallbackRecordingsOf(meeting);
+
+    const load = async (initial: boolean) => {
+      if (initial) setRecLoading(true);
+      const [stateRes, recRes] = await Promise.all([
+        endpoints.getMeeting(meetingId).catch(() => null),
+        endpoints.listMeetingRecordings(meetingId).catch(() => null),
+      ]);
+      if (!active) return;
+
+      if (stateRes?.ok) {
+        const s = stateRes.data.state;
+        setDetails({
+          participants: s.participants ?? [],
+          attendance: s.attendees ?? [],
+          minutes: s.minutes ?? null,
+          isActive: s.isActive !== false,
+          hasRecordings: (s.recordingCount ?? 0) > 0,
+        });
+        if (s.minutes) setGeneratedMinutes(s.minutes);
+      }
+
+      if (recRes?.ok) {
+        setSubRecordings(prev => recRes.data.recordings.map(r => ({
+          id: r.id,
+          // Playback URLs are presigned per request; keep the one we already
+          // have so a refresh doesn't restart a recording that is playing.
+          url: prev.find(p => p.id === r.id)?.url || r.url || '',
+          durationMs: r.durationMs ?? 0,
+          status: r.status,
+          minutes: r.minutes ?? null,
+        })));
+      } else if (initial) {
+        setSubRecordings(fallbackRecordings);
+      }
+      if (initial) setRecLoading(false);
+    };
+
+    void load(true);
+    // Refresh while open: recording processed, minutes generated, attendance…
+    const unsub = socketClient.subscribe('meeting:updated', (payload) => {
+      if ((payload as { meetingId?: string } | null)?.meetingId === meetingId) void load(false);
+    });
+    return () => { active = false; unsub(); };
   }, [visible, meeting?.id]);
 
   if (!meeting) return null;
 
+  const participants = details?.participants ?? meeting.participants;
+  const attendance = details?.attendance ?? meeting.attendance;
+  const currentMinutes = generatedMinutes ?? details?.minutes ?? meeting.minutes;
+  const statusMeeting = details ? { ...meeting, isActive: details.isActive } : meeting;
+
   const nowDate = new Date();
-  const isPast     = isMeetingPast(meeting, nowDate);
-  const isActive   = isMeetingActive(meeting, nowDate);
+  const isPast     = isMeetingPast(statusMeeting, nowDate);
+  const isActive   = isMeetingActive(statusMeeting, nowDate);
   const isUpcoming = !isPast && !isActive;
   const isOrganizer = meeting.organizerId === currentUserId;
-  const didAttend = meeting.attendance.includes(currentUserId);
+  const didAttend = attendance.includes(currentUserId);
   const accentColor = stringToColor(meeting.title);
 
-  const participantContacts = meeting.participants
+  const participantContacts = participants
     .map(uid => contacts.find(c => c.userId === uid))
     .filter(Boolean) as AppContact[];
 
-  const allRecordings = subRecordings.length > 0
-    ? subRecordings
-    : meeting.recordings.map((r, i) => ({ id: String(i), url: r.url, durationMs: r.durationMs }));
+  const allRecordings = subRecordings.length > 0 ? subRecordings : fallbackRecordingsOf(meeting);
+  const hasRecordings = meeting.hasRecordings || !!details?.hasRecordings;
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -837,9 +980,9 @@ function MeetingDetailSheet({
             <View style={styles.minutesMetaRow}>
               <AppIcon name="people-outline" size={14} color={COLORS.sub} />
               <AppText style={[styles.minutesMetaText, { color: FG.secondary }]}>
-                {meeting.participants.length} invited
-                {isPast && meeting.attendance.length > 0
-                  ? `  ·  ${meeting.attendance.length} attended`
+                {participants.length} invited
+                {isPast && attendance.length > 0
+                  ? `  ·  ${attendance.length} attended`
                   : ''}
               </AppText>
             </View>
@@ -850,7 +993,7 @@ function MeetingDetailSheet({
           </AppText>
           <View style={[styles.minutesMetaCard, bevel, { gap: 12 }]}>
             {participantContacts.map(c => {
-              const attended = meeting.attendance.includes(c.userId);
+              const attended = attendance.includes(c.userId);
               return (
                 <View key={c.userId} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                   <ContactAvatar contact={c} size={34} />
@@ -878,10 +1021,10 @@ function MeetingDetailSheet({
                 </View>
               );
             })}
-            {meeting.participants
+            {participants
               .filter(uid => !participantContacts.find(c => c.userId === uid))
               .map(uid => {
-                const attended = meeting.attendance.includes(uid);
+                const attended = attendance.includes(uid);
                 return (
                   <View key={uid} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                     <View style={{
@@ -908,7 +1051,7 @@ function MeetingDetailSheet({
               })}
           </View>
 
-          {(meeting.hasRecordings || allRecordings.length > 0 || recLoading) && (
+          {(hasRecordings || allRecordings.length > 0 || recLoading) && (
             <>
               <AppText style={[styles.minutesSectionLabel, { color: FG.secondary, marginTop: 16 }]}>
                 RECORDING{allRecordings.length > 1 ? 'S' : ''}
@@ -922,12 +1065,19 @@ function MeetingDetailSheet({
                 allRecordings.map((rec, i) => (
                   <RecordingPlayer
                     key={rec.id}
+                    meetingId={meeting.id}
                     rec={rec}
                     index={i}
                     total={allRecordings.length}
                     meetingTitle={meeting.title}
-                    existingMinutes={generatedMinutes ?? meeting.minutes}
-                    onMinutesGenerated={text => setGeneratedMinutes(text)}
+                    existingMinutes={rec.minutes ?? currentMinutes}
+                    onMinutesGenerated={text => {
+                      // The server already persisted them; mirror locally.
+                      setGeneratedMinutes(text);
+                      setSubRecordings(prev => prev.map(r => (
+                        r.id === rec.id ? { ...r, minutes: text, status: 'done' } : r
+                      )));
+                    }}
                   />
                 ))
               ) : (
@@ -945,9 +1095,9 @@ function MeetingDetailSheet({
               <AppText style={[styles.minutesSectionLabel, { color: FG.secondary, marginTop: 16 }]}>
                 MEETING MINUTES
               </AppText>
-              {(generatedMinutes ?? meeting.minutes) ? (
+              {currentMinutes ? (
                 <AppText style={[styles.minutesBody, { color: textColor }]}>
-                  {generatedMinutes ?? meeting.minutes}
+                  {currentMinutes}
                 </AppText>
               ) : (
                 <View style={styles.minutesEmpty}>
@@ -1076,47 +1226,53 @@ export default function CalendarScreen() {
   };
   const handleParticipantClose = () => setParticipantPickerOpen(false);
 
-  // ── Load meetings from backend + refresh on socket events ─────────────────
+  // ── Load meetings from the backend + refresh on socket events ─────────────
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
+  const loadSeqRef = useRef(0);
+
+  const loadMeetings = useCallback(async () => {
+    if (!user?.uid) return;
+    // Only the latest request may update state (socket events can burst).
+    const seq = ++loadSeqRef.current;
+    try {
+      const res = await endpoints.listMeetings();
+      if (!mountedRef.current || seq !== loadSeqRef.current) return;
+      if (!res.ok) {
+        console.error('[Calendar] Failed to load meetings:', res.error.message);
+        return;
+      }
+      const list = res.data.meetings.map(toMeeting);
+      // Cancel scheduled reminders for any meeting that has been ended
+      void cancelMeetingReminders(list.filter(m => !m.isActive).map(m => m.id));
+      setMeetings(list);
+    } catch (err) {
+      console.error('[Calendar] Failed to load meetings:', err);
+    } finally {
+      if (mountedRef.current && seq === loadSeqRef.current) setLoading(false);
+    }
+  }, [user?.uid]);
+
   useEffect(() => {
     if (!user?.uid) return;
-    let active = true;
-
-    const load = async () => {
-      const res = await endpoints.listMeetings();
-      if (!active || !res.ok) { if (active) setLoading(false); return; }
-
-      setMeetings(res.data.meetings.map((m) => ({
-        id: m.id,
-        title: m.title,
-        date: new Date(m.createdAt),   // use createdAt as proxy until start/end are in the API
-        endDate: null,
-        duration: '1h',
-        participants: Array(m.participantCount).fill(''),
-        organizerId: m.organizerId,
-        type: 'online' as const,
-        reminders: [],
-        minutes: null,
-        hasRecordings: false,
-        recordings: [],
-        attendance: m.isActive ? [] : Array(m.participantCount).fill(''),
-        isActive: m.isActive,
-      })));
-      setLoading(false);
-    };
-
-    void socketClient.connect().then(load).catch(() => { if (active) setLoading(false); });
+    // Load right away; the socket connects in parallel for live refreshes.
+    void loadMeetings();
+    socketClient.connect().catch(err => console.warn('[Calendar] socket connect failed:', err));
 
     // Refresh when a meeting is created, updated, or ended
     const unsubs = [
-      socketClient.subscribe('meeting:updated', () => void load()),
-      socketClient.subscribe('meeting:ended',   () => void load()),
+      socketClient.subscribe('meeting:updated', () => { void loadMeetings(); }),
+      socketClient.subscribe('meeting:ended', (payload) => {
+        const endedId = (payload as { meetingId?: string } | null)?.meetingId;
+        if (endedId) void cancelMeetingReminders([endedId]);
+        void loadMeetings();
+      }),
     ];
 
     return () => {
-      active = false;
       unsubs.forEach((u) => u());
     };
-  }, [user?.uid]);
+  }, [user?.uid, loadMeetings]);
 
   const nowDate = useMemo(() => new Date(now), [now]);
   const hasActiveMeeting = useMemo(
@@ -1234,7 +1390,7 @@ export default function CalendarScreen() {
             onOpenParticipantPicker={handleOpenParticipantPicker}
             onOpenDatePicker={handleOpenDatePicker}
             onBack={closeSheet}
-            onDone={closeSheet}
+            onDone={() => { closeSheet(); void loadMeetings(); }}
           />
         </View>
 
@@ -1541,7 +1697,7 @@ export default function CalendarScreen() {
 
       {/* ── FAB ──────────────────────────────────────────────────────────── */}
       <TouchableOpacity
-        style={[styles.fab, bevel, { bottom: 20 },
+        style={[styles.fab, bevel, { bottom: insets.bottom + 150 },
           Platform.OS === 'web' && styles.fabWeb]}
         activeOpacity={0.85}
         onPress={openMeetingSheet}
@@ -1549,7 +1705,7 @@ export default function CalendarScreen() {
         <AppIcon name="add" size={28} color={COLORS.blue} fixedColor />
       </TouchableOpacity>
 
-
+      <BottomNav active="calendar" />
     </View>
   );
 }

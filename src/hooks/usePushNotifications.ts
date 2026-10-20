@@ -1,7 +1,9 @@
 // ─── usePushNotifications Hook ────────────────────────────────────────────────
 import { useState, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { registerChatReplyCategory, handleNotificationReply } from './useNotificationReply';
+import { DEVICE_ID_KEY } from './useLinkedDevices';
 import { endpoints } from '../api/endpoints';
 
 let Notifications: any = null;
@@ -96,9 +98,22 @@ async function registerForPushNotificationsAsync(): Promise<string | null> {
   }
 }
 
+// The stable id this device is registered under in Linked Devices (written by
+// registerCurrentDevice / createLinkRequest). Null when not known yet.
+async function getLinkedDeviceId(): Promise<string | null> {
+  try {
+    return (await AsyncStorage.getItem(DEVICE_ID_KEY)) || null;
+  } catch {
+    return null;
+  }
+}
+
 async function savePushToken(userId: string, token: string) {
   try {
-    const res = await endpoints.registerPushToken(token, Platform.OS);
+    // Tie the token to this device so removing it from Linked Devices also
+    // drops its push token on the backend.
+    const deviceId = await getLinkedDeviceId();
+    const res = await endpoints.registerPushToken(token, Platform.OS, deviceId);
     if (!res.ok) console.error('[usePushNotifications] Backend token register failed:', res.error);
   } catch (error) {
     console.error('[usePushNotifications] Error saving push token:', error);

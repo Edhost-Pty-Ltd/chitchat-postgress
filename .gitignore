@@ -102,3 +102,6 @@ ChitChatBusiness_vs_Whats*.html
 
 
 
+
+# Firebase Admin service account key (contains a private key) — never commit
+server/firebase-service-account.json

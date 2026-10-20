@@ -1,85 +1,62 @@
 // ─── useChatActions Hook ──────────────────────────────────────────────────────
-// Creates new chats (1-on-1 and group) and handles sending messages.
+// Creates new chats (1-on-1 and group) and handles sending messages via the
+// backend REST API (endpoints) and object-store media uploads (mediaService).
+// Media is stored as OBJECT KEYS, never URLs — the UI resolves keys to download
+// URLs at render time through mediaService.getDownloadUrl.
 
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
-import { uploadFile, generateFileName, getFileExtension } from '../config/storage';
+import { endpoints } from '../api/endpoints';
+import type { OrderPayload, ContactPayload } from '../api/endpoints';
+import { mediaService, fileSize } from '../services/mediaService';
+import { getFileExtension } from '../utils/fileUtils';
 import { fetchUserPrivacySettings } from './usePrivacySettings';
 
-const fsDb = () => db as ReturnType<typeof firestore>;
-
 // ── Create or get existing 1-on-1 chat ───────────────────────────────────────
+// The backend createChat is idempotent for direct chats: it returns the
+// existing chat between the two members if one already exists, otherwise
+// creates it.
 export async function getOrCreateDirectChat(
   currentUserId: string,
   otherUserId: string,
 ): Promise<string> {
-  const sortedIds = [currentUserId, otherUserId].sort();
-  console.log('[getOrCreateDirectChat] Looking for chat between:', sortedIds);
-
-  const snap = await fsDb()
-    .collection('chats')
-    .where('type', '==', 'direct')
-    .where('members', '==', sortedIds)
-    .get();
-
-  if (snap.docs.length > 0) {
-    console.log('[getOrCreateDirectChat] Found existing chat:', snap.docs[0].id);
-    return snap.docs[0].id;
+  console.log('[getOrCreateDirectChat] createChat direct with:', otherUserId);
+  const res = await endpoints.createChat({ type: 'direct', members: [otherUserId] });
+  if (!res.ok) {
+    throw new Error(`getOrCreateDirectChat failed: ${res.error.message}`);
   }
-
-  console.log('[getOrCreateDirectChat] Creating new chat');
-  const newChat = await fsDb().collection('chats').add({
-    type:        'direct',
-    members:     sortedIds,
-    groupName:   null,
-    groupPhoto:  null,
-    createdBy:   currentUserId,
-    createdAt:   firestore.FieldValue.serverTimestamp(),
-    lastMessage: null,
-    unreadCounts: {
-      [currentUserId]: 0,
-      [otherUserId]:   0,
-    },
-  });
-
-  console.log('[getOrCreateDirectChat] Created new chat:', newChat.id);
-  return newChat.id;
+  console.log('[getOrCreateDirectChat] chatId:', res.data.chatId);
+  return res.data.chatId;
 }
 
 // ── Create a new group chat ───────────────────────────────────────────────────
+// Privacy filtering (groups === 'Nobody') is preserved client-side so the UI
+// can still report which members were blocked by their own privacy settings.
 export async function createGroupChat(
   currentUserId: string,
   memberIds: string[],
   groupName: string,
 ): Promise<{ chatId: string; blockedByPrivacy: string[] }> {
-  const requested = Array.from(new Set([currentUserId, ...memberIds]));
+  const requested = Array.from(new Set(memberIds.filter((id) => id !== currentUserId)));
   const blockedByPrivacy: string[] = [];
-  const allowed: string[] = [currentUserId];
+  const allowed: string[] = [];
 
   await Promise.all(
-    requested
-      .filter((id) => id !== currentUserId)
-      .map(async (id) => {
-        const privacy = await fetchUserPrivacySettings(id);
-        if (privacy.groups === 'Nobody') blockedByPrivacy.push(id);
-        else allowed.push(id);
-      }),
+    requested.map(async (id) => {
+      const privacy = await fetchUserPrivacySettings(id);
+      if (privacy.groups === 'Nobody') blockedByPrivacy.push(id);
+      else allowed.push(id);
+    }),
   );
 
-  const unreadCounts = Object.fromEntries(allowed.map((id) => [id, 0]));
-
-  const newChat = await fsDb().collection('chats').add({
-    type:         'group',
-    members:      allowed,
+  const res = await endpoints.createChat({
+    type: 'group',
+    members: allowed,
     groupName,
-    groupPhoto:   null,
-    createdBy:    currentUserId,
-    createdAt:    firestore.FieldValue.serverTimestamp(),
-    lastMessage:  null,
-    unreadCounts,
   });
+  if (!res.ok) {
+    throw new Error(`createGroupChat failed: ${res.error.message}`);
+  }
 
-  return { chatId: newChat.id, blockedByPrivacy };
+  return { chatId: res.data.chatId, blockedByPrivacy };
 }
 
 // ── Send a text message ───────────────────────────────────────────────────────
@@ -92,41 +69,8 @@ export async function sendMessage(
     const trimmed = text.trim();
     if (!trimmed) return false;
 
-    const chatRef  = fsDb().collection('chats').doc(chatId);
-    const chatSnap = await chatRef.get();
-    if (!chatSnap.exists) return false;
-
-    const members: string[]    = chatSnap.data()!.members ?? [];
-    const otherMembers         = members.filter((id) => id !== senderId);
-    const expiresAt            = new Date(Date.now() + 72 * 60 * 60 * 1000);
-    const batch                = fsDb().batch();
-
-    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
-    batch.set(msgRef, {
-      messageId:   msgRef.id,
-      senderId,
-      text:        trimmed,
-      imageUrl:    null,
-      voiceUrl:    null,
-      type:        'text',
-      timestamp:   firestore.FieldValue.serverTimestamp(),
-      expiresAt,
-      readBy:      [senderId],
-      deliveredTo: [],
-    });
-
-    const unreadUpdates = Object.fromEntries(
-      otherMembers.map((id) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
-    );
-    batch.update(chatRef, {
-      'lastMessage.text':      trimmed,
-      'lastMessage.senderId':  senderId,
-      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-      ...unreadUpdates,
-    });
-
-    await batch.commit();
-    return true;
+    const res = await endpoints.sendMessage(chatId, { type: 'text', text: trimmed });
+    return res.ok;
   } catch (err) {
     console.error('sendMessage error:', err);
     return false;
@@ -134,58 +78,43 @@ export async function sendMessage(
 }
 
 // ── Mark chat as read ─────────────────────────────────────────────────────────
-export async function markChatAsRead(chatId: string, userId: string): Promise<void> {
-  try {
-    await fsDb().collection('chats').doc(chatId).update({
-      [`unreadCounts.${userId}`]: 0,
-    });
-  } catch (_) {}
+// Unread counters are maintained server-side; the read path runs through the
+// socket 'message:read' channel (see useMessages.markAsRead). This no-op
+// remains for callers that imported it; reads are now driven by the realtime
+// layer rather than a direct unread-counter write.
+export async function markChatAsRead(_chatId: string, _userId: string): Promise<void> {
+  /* unread counters are server-maintained; see useMessages read path */
 }
 
 // ── Send a voice message ──────────────────────────────────────────────────────
+// `voiceObjectKey` is the already-uploaded object key (callers upload the
+// recording via mediaService before invoking this). For backwards compatibility
+// with callers that still pass a local URI, we upload it here when it looks
+// like a file URI.
 export async function sendVoiceMessage(
   chatId: string,
   senderId: string,
-  voiceUrl: string,
+  voiceUriOrKey: string,
   durationMs: number,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
-    const chatRef  = fsDb().collection('chats').doc(chatId);
-    const chatSnap = await chatRef.get();
-    if (!chatSnap.exists) return { success: false, messageId: '' };
+    let mediaObjectKey = voiceUriOrKey;
+    if (/^(file:|content:|https?:|assets-library:|ph:)/i.test(voiceUriOrKey)) {
+      const sizeBytes = await fileSize(voiceUriOrKey);
+      mediaObjectKey = await mediaService.upload(voiceUriOrKey, 'chat-voice', {
+        chatId,
+        sizeBytes,
+        ext: getFileExtension(voiceUriOrKey),
+      });
+    }
 
-    const members      = chatSnap.data()!.members ?? [];
-    const otherMembers = members.filter((id: string) => id !== senderId);
-    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
-    const batch        = fsDb().batch();
-
-    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
-    batch.set(msgRef, {
-      messageId:   msgRef.id,
-      senderId,
-      text:        null,
-      imageUrl:    null,
-      voiceUrl,
-      type:        'voice',
-      duration:    durationMs,
-      timestamp:   firestore.FieldValue.serverTimestamp(),
-      expiresAt,
-      readBy:      [senderId],
-      deliveredTo: [],
+    const res = await endpoints.sendMessage(chatId, {
+      type: 'voice',
+      mediaObjectKey,
+      durationMs,
     });
-
-    const unreadUpdates = Object.fromEntries(
-      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
-    );
-    batch.update(chatRef, {
-      'lastMessage.text':      '[Voice Note]',
-      'lastMessage.senderId':  senderId,
-      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-      ...unreadUpdates,
-    });
-
-    await batch.commit();
-    return { success: true, messageId: msgRef.id };
+    if (!res.ok) return { success: false, messageId: '' };
+    return { success: true, messageId: res.data.message.id };
   } catch (err) {
     console.error('sendVoiceMessage error:', err);
     return { success: false, messageId: '' };
@@ -201,40 +130,24 @@ export async function sendImageMessage(
   caption?: string | null,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
-    const fileName = generateFileName(getFileExtension(imageUri));
-    const imageUrl = await uploadFile(imageUri, 'chatMedia', { chatId, fileName }, onProgress);
-
-    const chatRef  = fsDb().collection('chats').doc(chatId);
-    const chatSnap = await chatRef.get();
-    if (!chatSnap.exists) return { success: false, messageId: '' };
-
-    const members      = chatSnap.data()!.members ?? [];
-    const otherMembers = members.filter((id: string) => id !== senderId);
-    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
-    const batch        = fsDb().batch();
+    onProgress?.(0);
+    const sizeBytes = await fileSize(imageUri);
+    const mediaObjectKey = await mediaService.upload(imageUri, 'chat-media', {
+      chatId,
+      sizeBytes,
+      ext: getFileExtension(imageUri),
+    });
+    onProgress?.(100);
 
     const trimmedCaption = caption?.trim() || null;
 
-    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
-    batch.set(msgRef, {
-      messageId: msgRef.id, senderId,
-      text: trimmedCaption, type: 'image', imageUrl,
-      timestamp: firestore.FieldValue.serverTimestamp(),
-      expiresAt, readBy: [senderId], deliveredTo: [],
+    const res = await endpoints.sendMessage(chatId, {
+      type: 'image',
+      text: trimmedCaption,
+      mediaObjectKey,
     });
-
-    const unreadUpdates = Object.fromEntries(
-      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
-    );
-    batch.update(chatRef, {
-      'lastMessage.text':      trimmedCaption ? `📷 ${trimmedCaption}` : '📷 Photo',
-      'lastMessage.senderId':  senderId,
-      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-      ...unreadUpdates,
-    });
-
-    await batch.commit();
-    return { success: true, messageId: msgRef.id };
+    if (!res.ok) return { success: false, messageId: '' };
+    return { success: true, messageId: res.data.message.id };
   } catch (err) {
     console.error('sendImageMessage error:', err);
     return { success: false, messageId: '' };
@@ -251,48 +164,35 @@ export async function sendVideoMessage(
   caption?: string | null,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
-    const videoUrl = await uploadFile(videoUri, 'chatMedia', {
-      chatId, fileName: generateFileName(getFileExtension(videoUri)),
-    }, onProgress);
+    onProgress?.(0);
+    const videoSize = await fileSize(videoUri);
+    const mediaObjectKey = await mediaService.upload(videoUri, 'chat-media', {
+      chatId,
+      sizeBytes: videoSize,
+      ext: getFileExtension(videoUri),
+    });
 
-    let thumbnailUrl: string | null = null;
+    let thumbnailObjectKey: string | null = null;
     if (thumbnailUri) {
-      thumbnailUrl = await uploadFile(thumbnailUri, 'chatMedia', {
-        chatId, fileName: generateFileName('jpg'),
+      const thumbSize = await fileSize(thumbnailUri);
+      thumbnailObjectKey = await mediaService.upload(thumbnailUri, 'chat-media', {
+        chatId,
+        sizeBytes: thumbSize,
+        ext: 'jpg',
       });
     }
-
-    const chatRef  = fsDb().collection('chats').doc(chatId);
-    const chatSnap = await chatRef.get();
-    if (!chatSnap.exists) return { success: false, messageId: '' };
-
-    const members      = chatSnap.data()!.members ?? [];
-    const otherMembers = members.filter((id: string) => id !== senderId);
-    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
-    const batch        = fsDb().batch();
+    onProgress?.(100);
 
     const trimmedCaption = caption?.trim() || null;
 
-    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
-    batch.set(msgRef, {
-      messageId: msgRef.id, senderId,
-      text: trimmedCaption, type: 'video', videoUrl, thumbnailUrl,
-      timestamp: firestore.FieldValue.serverTimestamp(),
-      expiresAt, readBy: [senderId], deliveredTo: [],
+    const res = await endpoints.sendMessage(chatId, {
+      type: 'video',
+      text: trimmedCaption,
+      mediaObjectKey,
+      thumbnailObjectKey,
     });
-
-    const unreadUpdates = Object.fromEntries(
-      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
-    );
-    batch.update(chatRef, {
-      'lastMessage.text':      trimmedCaption ? `🎥 ${trimmedCaption}` : '🎥 Video',
-      'lastMessage.senderId':  senderId,
-      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-      ...unreadUpdates,
-    });
-
-    await batch.commit();
-    return { success: true, messageId: msgRef.id };
+    if (!res.ok) return { success: false, messageId: '' };
+    return { success: true, messageId: res.data.message.id };
   } catch (err) {
     console.error('sendVideoMessage error:', err);
     return { success: false, messageId: '' };
@@ -305,42 +205,29 @@ export async function sendFileMessage(
   senderId: string,
   fileUri: string,
   fileName: string,
-  fileSize: number,
+  fileSizeBytes: number,
   mimeType: string,
   onProgress?: (progress: number) => void,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
-    const fileUrl = await uploadFile(fileUri, 'chatMedia', { chatId, fileName }, onProgress);
-
-    const chatRef  = fsDb().collection('chats').doc(chatId);
-    const chatSnap = await chatRef.get();
-    if (!chatSnap.exists) return { success: false, messageId: '' };
-
-    const members      = chatSnap.data()!.members ?? [];
-    const otherMembers = members.filter((id: string) => id !== senderId);
-    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
-    const batch        = fsDb().batch();
-
-    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
-    batch.set(msgRef, {
-      messageId: msgRef.id, senderId,
-      text: null, type: 'file', fileUrl, fileName, fileSize, mimeType,
-      timestamp: firestore.FieldValue.serverTimestamp(),
-      expiresAt, readBy: [senderId], deliveredTo: [],
+    onProgress?.(0);
+    const mediaObjectKey = await mediaService.upload(fileUri, 'chat-media', {
+      chatId,
+      sizeBytes: fileSizeBytes || (await fileSize(fileUri)),
+      contentType: mimeType,
+      ext: getFileExtension(fileName || fileUri),
     });
+    onProgress?.(100);
 
-    const unreadUpdates = Object.fromEntries(
-      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
-    );
-    batch.update(chatRef, {
-      'lastMessage.text':      `📎 ${fileName}`,
-      'lastMessage.senderId':  senderId,
-      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-      ...unreadUpdates,
+    const res = await endpoints.sendMessage(chatId, {
+      type: 'file',
+      mediaObjectKey,
+      fileName,
+      fileSize: fileSizeBytes,
+      mimeType,
     });
-
-    await batch.commit();
-    return { success: true, messageId: msgRef.id };
+    if (!res.ok) return { success: false, messageId: '' };
+    return { success: true, messageId: res.data.message.id };
   } catch (err) {
     console.error('sendFileMessage error:', err);
     return { success: false, messageId: '' };
@@ -348,6 +235,7 @@ export async function sendFileMessage(
 }
 
 // ── Send number change notification to all chats ──────────────────────────────
+// Walks the user's chats (listChats) and posts a system message into each.
 export async function sendNumberChangeNotification(
   currentUserId: string,
   oldNumber: string,
@@ -355,44 +243,24 @@ export async function sendNumberChangeNotification(
   displayName: string,
 ): Promise<{ success: boolean; count: number }> {
   try {
-    const chatsSnap = await fsDb()
-      .collection('chats')
-      .where('members', 'array-contains', currentUserId)
-      .get();
+    const chatsRes = await endpoints.listChats();
+    if (!chatsRes.ok) return { success: false, count: 0 };
 
-    console.log(`[sendNumberChangeNotification] Found ${chatsSnap.docs.length} chats`);
+    const chats = chatsRes.data.chats;
+    console.log(`[sendNumberChangeNotification] Found ${chats.length} chats`);
     const messageText = `${displayName} changed their phone number from ${oldNumber} to ${newNumber}`;
 
-    for (const chatDoc of chatsSnap.docs) {
-      const chatId       = chatDoc.id;
-      const members: string[] = chatDoc.data().members ?? [];
-      const otherMembers = members.filter((id) => id !== currentUserId);
-      const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
-      const batch        = fsDb().batch();
-
-      const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
-      batch.set(msgRef, {
-        messageId: msgRef.id, senderId: currentUserId,
-        text: messageText, type: 'system', subtype: 'number-change',
-        oldNumber, newNumber,
-        timestamp: firestore.FieldValue.serverTimestamp(),
-        expiresAt, readBy: [currentUserId],
+    let count = 0;
+    for (const chat of chats) {
+      const res = await endpoints.sendMessage(chat.chatId, {
+        type: 'system',
+        text: messageText,
+        subtype: 'number-change',
       });
-
-      const unreadUpdates = Object.fromEntries(
-        otherMembers.map((id) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
-      );
-      batch.update(fsDb().collection('chats').doc(chatId), {
-        'lastMessage.text':      messageText,
-        'lastMessage.senderId':  currentUserId,
-        'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-        ...unreadUpdates,
-      });
-
-      await batch.commit();
+      if (res.ok) count++;
     }
 
-    return { success: true, count: chatsSnap.docs.length };
+    return { success: true, count };
   } catch (err) {
     console.error('[sendNumberChangeNotification] Error:', err);
     return { success: false, count: 0 };
@@ -400,55 +268,39 @@ export async function sendNumberChangeNotification(
 }
 
 // ── Send a catalog product-card message ───────────────────────────────────────
-// Writes a message of type 'catalog' into the chat thread. The full CatalogItem
-// is embedded in the message document so the receiver sees name/price/image
-// without needing to fetch the sender's profile.
+// Writes a message of type 'catalog' with the full CatalogItem embedded so the
+// receiver sees name/price/image without fetching the sender's profile. If the
+// item image is a local URI it is uploaded first and the catalogItem carries an
+// object key; otherwise the existing value is kept (may already be an object
+// key stored in the catalog).
 export async function sendCatalogItemMessage(
   chatId:    string,
   senderId:  string,
   item:      import('../types').CatalogItem,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
-    const chatRef  = fsDb().collection('chats').doc(chatId);
-    const chatSnap = await chatRef.get();
-    if (!chatSnap.exists) return { success: false, messageId: '' };
+    let imageObjectKey: string | null = item.imageUri ?? null;
+    if (imageObjectKey && /^(file:|content:|https?:|assets-library:|ph:)/i.test(imageObjectKey)) {
+      const sizeBytes = await fileSize(imageObjectKey);
+      imageObjectKey = await mediaService.upload(imageObjectKey, 'chat-media', {
+        chatId,
+        sizeBytes,
+        ext: getFileExtension(imageObjectKey),
+      });
+    }
 
-    const members      = chatSnap.data()!.members ?? [];
-    const otherMembers = members.filter((id: string) => id !== senderId);
-    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
-    const batch        = fsDb().batch();
-
-    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
-    batch.set(msgRef, {
-      messageId:   msgRef.id,
-      senderId,
-      text:        null,
-      type:        'catalog',
+    const res = await endpoints.sendMessage(chatId, {
+      type: 'catalog',
       catalogItem: {
         id:          item.id,
         name:        item.name,
         price:       item.price,
         description: item.description ?? null,
-        imageUri:    item.imageUri ?? null,
+        imageUri:    imageObjectKey,
       },
-      timestamp:   firestore.FieldValue.serverTimestamp(),
-      expiresAt,
-      readBy:      [senderId],
-      deliveredTo: [],
     });
-
-    const unreadUpdates = Object.fromEntries(
-      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
-    );
-    batch.update(chatRef, {
-      'lastMessage.text':      `🛍️ ${item.name}`,
-      'lastMessage.senderId':  senderId,
-      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-      ...unreadUpdates,
-    });
-
-    await batch.commit();
-    return { success: true, messageId: msgRef.id };
+    if (!res.ok) return { success: false, messageId: '' };
+    return { success: true, messageId: res.data.message.id };
   } catch (err) {
     console.error('[sendCatalogItemMessage] error:', err);
     return { success: false, messageId: '' };
@@ -456,15 +308,9 @@ export async function sendCatalogItemMessage(
 }
 
 // ── Send a broadcast message to multiple recipients ───────────────────────────
-// Each recipient receives the message as a normal private DM — they have no
-// visibility into who else received it (same as WhatsApp Broadcast).
-//
-// Strategy:
-//   • Chunk recipients into groups of 10 and process each chunk with
-//     Promise.allSettled so one blocked/unreachable contact never kills
-//     the whole send.
-//   • Chunks run sequentially to respect Firestore write-rate limits.
-//   • Returns { sent, failed } so the caller can show "Sent to 11/12 contacts".
+// Each recipient receives the message as a normal private DM. Chunks run with
+// Promise.allSettled so one blocked/unreachable contact never kills the whole
+// send; chunks are processed sequentially.
 export async function sendBroadcastMessage(
   senderId:    string,
   recipients:  string[],
@@ -482,7 +328,8 @@ export async function sendBroadcastMessage(
     const results = await Promise.allSettled(
       chunk.map(async (recipientUid) => {
         const chatId = await getOrCreateDirectChat(senderId, recipientUid);
-        await sendMessage(chatId, senderId, text);
+        const ok = await sendMessage(chatId, senderId, text);
+        if (!ok) throw new Error('send failed');
       }),
     );
 
@@ -497,8 +344,8 @@ export async function sendBroadcastMessage(
 }
 
 // ── Send an order (cart checkout) message ─────────────────────────────────────
-// Stores the full line items (with product image URLs) so the recipient sees a
-// premium order card, not a plain-text summary.
+// Uploads each line-item image (when it's a local URI) via mediaService first,
+// so the stored order carries object keys, then posts a type:'order' message.
 export interface OrderLineItem {
   id: string;
   name: string;
@@ -516,45 +363,37 @@ export async function sendOrderMessage(
   try {
     if (items.length === 0) return { success: false, messageId: '' };
 
-    const chatRef  = fsDb().collection('chats').doc(chatId);
-    const chatSnap = await chatRef.get();
-    if (!chatSnap.exists) return { success: false, messageId: '' };
+    const orderItems: OrderPayload['items'] = await Promise.all(
+      items.map(async (it) => {
+        let imageObjectKey: string | null = it.imageUri ?? null;
+        if (imageObjectKey && /^(file:|content:|https?:|assets-library:|ph:)/i.test(imageObjectKey)) {
+          const sizeBytes = await fileSize(imageObjectKey);
+          imageObjectKey = await mediaService.upload(imageObjectKey, 'chat-media', {
+            chatId,
+            sizeBytes,
+            ext: getFileExtension(imageObjectKey),
+          });
+        }
+        return {
+          id: it.id,
+          name: it.name,
+          price: it.price,
+          imageObjectKey,
+          quantity: it.quantity,
+        };
+      }),
+    );
 
-    const members      = chatSnap.data()!.members ?? [];
-    const otherMembers = members.filter((id: string) => id !== senderId);
-    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
-    const batch        = fsDb().batch();
-
-    const totalQty = items.reduce((sum, it) => sum + it.quantity, 0);
-
-    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
-    batch.set(msgRef, {
-      messageId: msgRef.id, senderId,
-      text: null, type: 'order',
+    const res = await endpoints.sendMessage(chatId, {
+      type: 'order',
       order: {
-        items: items.map((it) => ({
-          id: it.id, name: it.name, price: it.price,
-          imageUri: it.imageUri ?? null, quantity: it.quantity,
-        })),
+        items: orderItems,
         total: total ?? null,
         currency: currency ?? '',
       },
-      timestamp: firestore.FieldValue.serverTimestamp(),
-      expiresAt, readBy: [senderId], deliveredTo: [],
     });
-
-    const unreadUpdates = Object.fromEntries(
-      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
-    );
-    batch.update(chatRef, {
-      'lastMessage.text':      `🛒 Order · ${totalQty} item${totalQty === 1 ? '' : 's'}`,
-      'lastMessage.senderId':  senderId,
-      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-      ...unreadUpdates,
-    });
-
-    await batch.commit();
-    return { success: true, messageId: msgRef.id };
+    if (!res.ok) return { success: false, messageId: '' };
+    return { success: true, messageId: res.data.message.id };
   } catch (err) {
     console.error('[sendOrderMessage] error:', err);
     return { success: false, messageId: '' };
@@ -571,48 +410,33 @@ export interface SharedContact {
   registered: boolean;
   photoURL: string | null;
 }
+
+function toContactPayloadEntry(c: SharedContact): NonNullable<ContactPayload['contacts']>[number] {
+  return {
+    name: c.name,
+    phone: c.phone,
+    userId: c.userId ?? null,
+    registered: !!c.registered,
+    // photoURL from the sender may be a remote URL or object key; store as-is as
+    // the contact's photo object key so render resolves it best-effort.
+    photoObjectKey: c.photoURL ?? null,
+  };
+}
+
 export async function sendContactMessage(
   chatId: string,
   senderId: string,
   contact: SharedContact,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
-    const chatRef  = fsDb().collection('chats').doc(chatId);
-    const chatSnap = await chatRef.get();
-    if (!chatSnap.exists) return { success: false, messageId: '' };
+    const payload: ContactPayload = toContactPayloadEntry(contact);
 
-    const members      = chatSnap.data()!.members ?? [];
-    const otherMembers = members.filter((id: string) => id !== senderId);
-    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
-    const batch        = fsDb().batch();
-
-    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
-    batch.set(msgRef, {
-      messageId: msgRef.id, senderId,
-      text: null, type: 'contact',
-      contact: {
-        name: contact.name,
-        phone: contact.phone,
-        userId: contact.userId ?? null,
-        registered: !!contact.registered,
-        photoURL: contact.photoURL ?? null,
-      },
-      timestamp: firestore.FieldValue.serverTimestamp(),
-      expiresAt, readBy: [senderId], deliveredTo: [],
+    const res = await endpoints.sendMessage(chatId, {
+      type: 'contact',
+      contact: payload,
     });
-
-    const unreadUpdates = Object.fromEntries(
-      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
-    );
-    batch.update(chatRef, {
-      'lastMessage.text':      `👤 ${contact.name}`,
-      'lastMessage.senderId':  senderId,
-      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-      ...unreadUpdates,
-    });
-
-    await batch.commit();
-    return { success: true, messageId: msgRef.id };
+    if (!res.ok) return { success: false, messageId: '' };
+    return { success: true, messageId: res.data.message.id };
   } catch (err) {
     console.error('[sendContactMessage] error:', err);
     return { success: false, messageId: '' };
@@ -620,8 +444,8 @@ export async function sendContactMessage(
 }
 
 // Share MULTIPLE contacts in a single message. The bubble shows a compact
-// "N contacts" card with a "View all" sheet. The first contact is also mirrored
-// into the top-level `contact` fields so older previews/fallbacks still work.
+// "N contacts" card. The first contact is mirrored into the top-level `contact`
+// fields so previews/fallbacks still work.
 export async function sendContactsMessage(
   chatId: string,
   senderId: string,
@@ -631,45 +455,17 @@ export async function sendContactsMessage(
     if (contacts.length === 0) return { success: false, messageId: '' };
     if (contacts.length === 1) return sendContactMessage(chatId, senderId, contacts[0]);
 
-    const chatRef  = fsDb().collection('chats').doc(chatId);
-    const chatSnap = await chatRef.get();
-    if (!chatSnap.exists) return { success: false, messageId: '' };
-
-    const members      = chatSnap.data()!.members ?? [];
-    const otherMembers = members.filter((id: string) => id !== senderId);
-    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
-    const batch        = fsDb().batch();
-
-    const normalized = contacts.map((c) => ({
-      name: c.name,
-      phone: c.phone,
-      userId: c.userId ?? null,
-      registered: !!c.registered,
-      photoURL: c.photoURL ?? null,
-    }));
+    const normalized = contacts.map(toContactPayloadEntry);
     const first = normalized[0];
 
-    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
-    batch.set(msgRef, {
-      messageId: msgRef.id, senderId,
-      text: null, type: 'contact',
-      contact: { ...first, contacts: normalized },
-      timestamp: firestore.FieldValue.serverTimestamp(),
-      expiresAt, readBy: [senderId], deliveredTo: [],
-    });
+    const payload: ContactPayload = { ...first, contacts: normalized };
 
-    const unreadUpdates = Object.fromEntries(
-      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
-    );
-    batch.update(chatRef, {
-      'lastMessage.text':      `👤 ${first.name} and ${normalized.length - 1} other${normalized.length - 1 === 1 ? '' : 's'}`,
-      'lastMessage.senderId':  senderId,
-      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-      ...unreadUpdates,
+    const res = await endpoints.sendMessage(chatId, {
+      type: 'contact',
+      contact: payload,
     });
-
-    await batch.commit();
-    return { success: true, messageId: msgRef.id };
+    if (!res.ok) return { success: false, messageId: '' };
+    return { success: true, messageId: res.data.message.id };
   } catch (err) {
     console.error('[sendContactsMessage] error:', err);
     return { success: false, messageId: '' };
@@ -692,40 +488,18 @@ export async function sendPollMessage(
     const options  = draft.options.map((o) => o.trim()).filter(Boolean);
     if (!question || options.length < 2) return { success: false, messageId: '' };
 
-    const chatRef  = fsDb().collection('chats').doc(chatId);
-    const chatSnap = await chatRef.get();
-    if (!chatSnap.exists) return { success: false, messageId: '' };
-
-    const members      = chatSnap.data()!.members ?? [];
-    const otherMembers = members.filter((id: string) => id !== senderId);
-    const expiresAt    = new Date(Date.now() + 72 * 60 * 60 * 1000);
-    const batch        = fsDb().batch();
-
     const optionObjs = options.map((text, i) => ({ id: `opt${i}`, text }));
-    const votes: Record<string, string[]> = {};
-    optionObjs.forEach((o) => { votes[o.id] = []; });
 
-    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc();
-    batch.set(msgRef, {
-      messageId: msgRef.id, senderId,
-      text: null, type: 'poll',
-      poll: { question, options: optionObjs, votes, multiple: !!draft.multiple },
-      timestamp: firestore.FieldValue.serverTimestamp(),
-      expiresAt, readBy: [senderId], deliveredTo: [],
+    const res = await endpoints.sendMessage(chatId, {
+      type: 'poll',
+      poll: {
+        question,
+        options: optionObjs,
+        multiple: !!draft.multiple,
+      },
     });
-
-    const unreadUpdates = Object.fromEntries(
-      otherMembers.map((id: string) => [`unreadCounts.${id}`, firestore.FieldValue.increment(1)])
-    );
-    batch.update(chatRef, {
-      'lastMessage.text':      `📊 ${question}`,
-      'lastMessage.senderId':  senderId,
-      'lastMessage.timestamp': firestore.FieldValue.serverTimestamp(),
-      ...unreadUpdates,
-    });
-
-    await batch.commit();
-    return { success: true, messageId: msgRef.id };
+    if (!res.ok) return { success: false, messageId: '' };
+    return { success: true, messageId: res.data.message.id };
   } catch (err) {
     console.error('[sendPollMessage] error:', err);
     return { success: false, messageId: '' };
@@ -733,8 +507,9 @@ export async function sendPollMessage(
 }
 
 // ── Cast / change a vote on a poll ────────────────────────────────────────────
-// Reads the current poll, toggles the voter on the chosen option, and (for
-// single-choice polls) removes them from all other options, then writes back.
+// The backend performs the atomic read-modify-write (toggle for the voter,
+// single-choice exclusivity) server-side, so the client just posts the chosen
+// option id.
 export async function votePollOption(
   chatId: string,
   messageId: string,
@@ -742,51 +517,8 @@ export async function votePollOption(
   optionId: string,
 ): Promise<boolean> {
   try {
-    const msgRef = fsDb().collection('chats').doc(chatId).collection('messages').doc(messageId);
-
-    // Run the read-modify-write inside a transaction so concurrent votes from
-    // different users merge atomically against the latest server state. Without
-    // this, two people voting around the same time each write the whole
-    // `poll.votes` map and the second write clobbers the first — which is why a
-    // receiver's vote used to cancel the sender's vote.
-    await fsDb().runTransaction(async (tx) => {
-      const snap = await tx.get(msgRef);
-      if (!snap.exists) return;
-      const poll = snap.data()!.poll;
-      if (!poll) return;
-
-      const votes: Record<string, string[]> = {};
-      for (const id of Object.keys(poll.votes ?? {})) {
-        votes[id] = Array.isArray(poll.votes[id]) ? [...poll.votes[id]] : [];
-      }
-      // Ensure every option key exists so the written map is complete.
-      for (const o of poll.options ?? []) {
-        if (!votes[o.id]) votes[o.id] = [];
-      }
-
-      const already = votes[optionId]?.includes(voterUid);
-
-      if (!poll.multiple) {
-        // Single-choice: clear this voter from every option first, then set the
-        // new one. Tapping a different option switches the vote in one write.
-        for (const id of Object.keys(votes)) {
-          votes[id] = votes[id].filter((u) => u !== voterUid);
-        }
-        // In single-choice mode, tapping the already-selected option retracts it;
-        // tapping any other option selects it (we already cleared the old one).
-        if (!already) votes[optionId] = [...(votes[optionId] ?? []), voterUid];
-      } else {
-        // Multiple-choice: plain toggle on just this option.
-        if (already) {
-          votes[optionId] = (votes[optionId] ?? []).filter((u) => u !== voterUid);
-        } else {
-          votes[optionId] = [...(votes[optionId] ?? []), voterUid];
-        }
-      }
-
-      tx.update(msgRef, { 'poll.votes': votes });
-    });
-    return true;
+    const res = await endpoints.votePoll(chatId, messageId, optionId);
+    return res.ok;
   } catch (err) {
     console.error('[votePollOption] error:', err);
     return false;

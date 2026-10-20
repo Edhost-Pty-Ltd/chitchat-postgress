@@ -1,5 +1,13 @@
 // ─── Hook: useStatus ──────────────────────────────────────────────────────────
 // Status management via backend REST + Socket.IO.
+//
+// COMPANION NOTE
+//   `currentUserId` is the account that owns these statuses (on a companion
+//   it's the owner's uid). A companion posts as the owner, but it must not
+//   mark statuses as viewed — that would record the OWNER as a viewer — so
+//   markAsViewed is skipped when `isCompanion` is true (the backend also
+//   treats a companion's view as a no-op). Deleting is owner-only on the
+//   backend; StatusScreen hides the delete action on companions.
 
 import React, { useState, useEffect, useCallback } from 'react';
 import type { FireStatus } from '../types';
@@ -58,7 +66,7 @@ async function resolveStatusMedia(statuses: FireStatus[]): Promise<void> {
   }
 }
 
-export function useStatus(currentUserId: string | null) {
+export function useStatus(currentUserId: string | null, isCompanion = false) {
   const [myStatuses,      setMyStatuses]      = useState<FireStatus[]>([]);
   const [contactStatuses, setContactStatuses] = useState<StatusGroup[]>([]);
   const [loading,         setLoading]         = useState(true);
@@ -153,11 +161,14 @@ export function useStatus(currentUserId: string | null) {
   const markAsViewed = useCallback(
     async (statusId: string) => {
       if (!currentUserId) return;
+      // Companions share the owner's uid; a view from here would make it look
+      // like the owner viewed the status. Skip the call entirely.
+      if (isCompanion) return;
       try { await endpoints.viewStatus(statusId); } catch (err) {
         console.error('[useStatus] Mark viewed error:', err);
       }
     },
-    [currentUserId],
+    [currentUserId, isCompanion],
   );
 
   const deleteStatus = useCallback(async (statusId: string, _mediaUrl: string | null) => {

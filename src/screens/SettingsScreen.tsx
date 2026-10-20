@@ -5,7 +5,7 @@ import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons'; // kept for IoniconName type
-import { Avatar, UserAvatar } from '../components';
+import { Avatar, BottomNav, UserAvatar } from '../components';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { useAuth } from '../context/AuthContext';
@@ -45,7 +45,7 @@ const SETTINGS_SECTIONS: {
 
 export default function SettingsScreen() {
   const navigation = useNavigation<NavProp>();
-  const { signOut, phone, displayName } = useAuth();
+  const { signOut, phone, displayName, isCompanion } = useAuth();
   const { FG } = useForeground();
   const { fontFamily, textColor, iconColor } = useTypography();
   const insets = useSafeAreaInsets();
@@ -86,36 +86,49 @@ export default function SettingsScreen() {
         </TouchableOpacity>
 
         {/* Each section: label + clean flat cards per row */}
-        {SETTINGS_SECTIONS.map((section, si) => (
-          <View key={si} style={styles.section}>
-            {section.label && <AppText style={[styles.sectionLabel, { color: FG.secondary }]}>{section.label}</AppText>}
-            {section.items.map((item) => (
-              <TouchableOpacity
-                key={item.id}
-                style={styles.settingsCard}
-                activeOpacity={0.75}
-                onPress={() => handleItem(item.id)}
-              >
-                <View style={[styles.iconCircle, item.danger && styles.iconCircleDanger]}>
-                  <AppIcon
-                    name={item.icon}
-                    size={18}
-                    color={item.danger ? COLORS.missed : COLORS.blue}
-                    fixedColor
-                  />
-                </View>
-                <AppText style={[styles.itemLabel, { color: textColor, fontFamily }, item.danger && styles.itemLabelDanger]}
-                  fixedColor={item.danger}
-                >
-                  {item.label}
-                </AppText>
-                {!item.danger && <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />}
-              </TouchableOpacity>
-            ))}
-          </View>
-        ))}
-      </ScrollView>
+        {SETTINGS_SECTIONS.map((section, si) => {
+          // Companion devices cannot open the Account tab (phone number, 2FA,
+          // account deletion are owner-only). Filter the entry out entirely
+          // rather than showing a disabled row.
+          const items = isCompanion
+            ? section.items.filter((i) => i.id !== 'account')
+            : section.items;
 
+          if (items.length === 0) return null;
+
+          return (
+            <View key={si} style={styles.section}>
+              {section.label && <AppText style={[styles.sectionLabel, { color: FG.secondary }]}>{section.label}</AppText>}
+              {items.map((item) => (
+                <TouchableOpacity
+                  key={item.id}
+                  style={styles.settingsCard}
+                  activeOpacity={0.75}
+                  onPress={() => handleItem(item.id)}
+                >
+                  <View style={[styles.iconCircle, item.danger && styles.iconCircleDanger]}>
+                    <AppIcon
+                      name={item.icon}
+                      size={18}
+                      color={item.danger ? COLORS.missed : COLORS.blue}
+                      fixedColor
+                    />
+                  </View>
+                  <AppText style={[styles.itemLabel, { color: textColor, fontFamily }, item.danger && styles.itemLabelDanger]}
+                    fixedColor={item.danger}
+                  >
+                    {item.label}
+                  </AppText>
+                  {!item.danger && <AppIcon name="chevron-forward" size={16} color={COLORS.sub} />}
+                </TouchableOpacity>
+              ))}
+            </View>
+          );
+        })}
+      </ScrollView>
+ 
+ 
+         <BottomNav active='settings'/>
 
     </View>
   );
