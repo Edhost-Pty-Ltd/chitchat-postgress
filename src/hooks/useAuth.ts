@@ -1,11 +1,11 @@
 // ─── useAuth Hook ─────────────────────────────────────────────────────────────
 // Phone OTP authentication via @react-native-firebase/auth.
 // Flow: enterPhone → sendOTP → verifyOTP → signed in
+// The backend (upsertUserOnFirstContact) creates the Postgres row on first
+// verified API call — no Firestore write needed here.
 
 import { useState, useEffect } from 'react';
 import { FirebaseAuthTypes, getAuth, onAuthStateChanged, signInWithPhoneNumber, signOut as firebaseSignOut } from '@react-native-firebase/auth';
-import firestore from '@react-native-firebase/firestore';
-import { db } from '../config/firebase';
 
 export type AuthStep = 'idle' | 'sending' | 'otpSent' | 'verifying' | 'done' | 'error';
 
@@ -14,12 +14,10 @@ export function useAuth() {
   const [step,    setStep]    = useState<AuthStep>('idle');
   const [error,   setError]   = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-
   const [confirm, setConfirm] = useState<FirebaseAuthTypes.ConfirmationResult | null>(null);
 
   useEffect(() => {
-    const authInstance = getAuth();
-    const unsub = onAuthStateChanged(authInstance, async (firebaseUser) => {
+    const unsub = onAuthStateChanged(getAuth(), (firebaseUser) => {
       setUser(firebaseUser);
       setLoading(false);
     });
@@ -28,16 +26,12 @@ export function useAuth() {
 
   async function sendOTP(phone: string): Promise<boolean> {
     try {
-      setStep('sending');
-      setError(null);
-      console.log('[useAuth] Sending OTP to:', phone);
-      const authInstance = getAuth();
-      const confirmation = await signInWithPhoneNumber(authInstance, phone);
+      setStep('sending'); setError(null);
+      const confirmation = await signInWithPhoneNumber(getAuth(), phone);
       setConfirm(confirmation);
       setStep('otpSent');
       return true;
     } catch (err: any) {
-      console.error('[useAuth] sendOTP error:', err.code, err.message);
       setError(getAuthErrorMessage(err.code));
       setStep('error');
       return false;
@@ -45,30 +39,14 @@ export function useAuth() {
   }
 
   async function verifyOTP(otp: string): Promise<boolean> {
-    if (!confirm) {
-      setError('No confirmation pending — please resend OTP');
-      return false;
-    }
+    if (!confirm) { setError('No confirmation pending — please resend OTP'); return false; }
     try {
-      setStep('verifying');
-      setError(null);
-      console.log('[useAuth] Confirming OTP...');
+      setStep('verifying'); setError(null);
       const result = await confirm.confirm(otp);
-      console.log('[useAuth] OTP confirmed, user authenticated:', result?.user?.uid);
-
-      if (result?.user) {
-        try {
-          await upsertUserProfile(result.user);
-        } catch (firestoreError: any) {
-          console.warn('[useAuth] Non-critical Firestore error - continuing with sign-in:', firestoreError);
-        }
-        setUser(result.user);
-      }
-
+      if (result?.user) setUser(result.user);
       setStep('done');
       return true;
     } catch (err: any) {
-      console.error('[useAuth] verifyOTP error:', err.code, err.message);
       setError(getAuthErrorMessage(err.code));
       setStep('error');
       return false;
@@ -76,40 +54,11 @@ export function useAuth() {
   }
 
   async function signOut() {
-    const authInstance = getAuth();
-    await firebaseSignOut(authInstance);
-    setUser(null);
-    setConfirm(null);
-    setStep('idle');
+    await firebaseSignOut(getAuth());
+    setUser(null); setConfirm(null); setStep('idle');
   }
 
   return { user, step, error, loading, sendOTP, verifyOTP, signOut };
-}
-
-async function upsertUserProfile(user: FirebaseAuthTypes.User) {
-  try {
-    const fsDb = db as ReturnType<typeof firestore>;
-    const ref = fsDb.collection('users').doc(user.uid);
-    const snap = await ref.get();
-
-    if (!snap.exists) {
-      console.log('[useAuth] Creating new user profile...');
-      await ref.set({
-        uid:         user.uid,
-        phone:       user.phoneNumber ?? '',
-        displayName: user.phoneNumber ?? '',
-        photoURL:    null,
-        createdAt:   firestore.FieldValue.serverTimestamp(),
-        lastSeen:    firestore.FieldValue.serverTimestamp(),
-      });
-    } else {
-      console.log('[useAuth] Updating existing user lastSeen...');
-      await ref.set({ lastSeen: firestore.FieldValue.serverTimestamp() }, { merge: true });
-    }
-  } catch (error: any) {
-    console.error('[useAuth] upsertUserProfile error:', error);
-    throw error;
-  }
 }
 
 function getAuthErrorMessage(code: string): string {

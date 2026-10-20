@@ -11,10 +11,10 @@ import {
   signOut as firebaseSignOut,
   User
 } from 'firebase/auth';
-import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
-import { db, auth as firebaseAuth } from '../config/firebase';
-// NOTE: This file is web-only. On web, db is the firebase/firestore JS SDK instance
-// so the JS SDK API (doc, setDoc, serverTimestamp, etc.) is correct here.
+import { auth as firebaseAuth } from '../config/firebase';
+import { endpoints } from '../api/endpoints';
+// NOTE: This file is web-only. Authentication uses the firebase/auth JS SDK.
+// Profile creation goes through the Postgres backend (no Firestore writes).
 
 export type AuthStep = 'idle' | 'sending' | 'otpSent' | 'verifying' | 'done' | 'error';
 
@@ -93,14 +93,10 @@ export function useAuth() {
           // Create new account
           console.log('[useAuth-Web] Creating new account');
           userCredential = await createUserWithEmailAndPassword(firebaseAuth, email, code);
-          
-          // Create user document in Firestore
-          const userDoc = {
-            phoneNumber: email.replace('@chitchat.test', ''),
-            displayName: `User ${email.split('@')[0].slice(-4)}`,
-            createdAt: serverTimestamp(),
-          };
-          await setDoc(doc(db, 'users', userCredential.user.uid), userDoc);
+
+          // Create the Postgres profile via the backend (no Firestore write).
+          const displayName = `User ${email.split('@')[0].slice(-4)}`;
+          await endpoints.updateMe({ displayName }).catch(() => {});
         } else {
           throw signInError;
         }

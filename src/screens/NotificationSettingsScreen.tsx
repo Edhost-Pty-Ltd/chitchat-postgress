@@ -1,14 +1,35 @@
 // ─── Screen: Notification Settings ──────────────────────────────────────────
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { View, Switch, TouchableOpacity, StyleSheet, ScrollView, Alert, Platform } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS, RADIUS } from '../types/theme';
 import { RootStackParamList } from '../types';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'NotificationSettings'>;
+
+const STORAGE_KEY = 'notification_settings';
+
+interface NotifSettings {
+  msgNotifs:    boolean;
+  msgSound:     boolean;
+  msgVibrate:   boolean;
+  groupNotifs:  boolean;
+  groupVibrate: boolean;
+  callNotifs:   boolean;
+}
+
+const DEFAULTS: NotifSettings = {
+  msgNotifs:    true,
+  msgSound:     true,
+  msgVibrate:   true,
+  groupNotifs:  true,
+  groupVibrate: false,
+  callNotifs:   true,
+};
 
 function Row({ icon, label, sub, value, onToggle, onPress, rightLabel }: {
   icon: string; label: string; sub?: string;
@@ -43,23 +64,42 @@ export default function NotificationSettingsScreen() {
   const { fontFamily, textColor } = useTypography();
   const insets = useSafeAreaInsets();
 
-  // Messages
-  const [msgNotifs,    setMsgNotifs]    = useState(true);
-  const [msgVibrate,   setMsgVibrate]   = useState(true);
-  const [msgSound,     setMsgSound]     = useState(true);
+  const [settings, setSettings] = useState<NotifSettings>(DEFAULTS);
+  const [loaded, setLoaded] = useState(false);
 
-  // Groups
-  const [groupNotifs,  setGroupNotifs]  = useState(true);
-  const [groupVibrate, setGroupVibrate] = useState(false);
+  // ── Load from AsyncStorage on mount ──────────────────────────────
+  useEffect(() => {
+    AsyncStorage.getItem(STORAGE_KEY)
+      .then((raw) => {
+        if (raw) {
+          try {
+            setSettings({ ...DEFAULTS, ...JSON.parse(raw) });
+          } catch {}
+        }
+      })
+      .finally(() => setLoaded(true));
+  }, []);
 
-  // Calls
-  const [callNotifs,   setCallNotifs]   = useState(true);
-  const [ringtoneSel,  setRingtoneSel]  = useState('Default');
+  // ── Persist whenever settings change (after initial load) ────────
+  useEffect(() => {
+    if (!loaded) return;
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(settings)).catch(() => {});
+  }, [settings, loaded]);
+
+  const update = useCallback((key: keyof NotifSettings, val: boolean) => {
+    setSettings((prev) => ({ ...prev, [key]: val }));
+  }, []);
+
+  const { msgNotifs, msgSound, msgVibrate, groupNotifs, groupVibrate, callNotifs } = settings;
 
   return (
     <View style={styles.root}>
       <AppBg />
-      <View style={[styles.header, { backgroundColor: FG.glassBg, borderBottomColor: FG.glassBorder, paddingTop: Platform.OS === 'web' ? 16 : insets.top + 12 }]}>
+      <View style={[styles.header, {
+        backgroundColor: FG.glassBg,
+        borderBottomColor: FG.glassBorder,
+        paddingTop: Platform.OS === 'web' ? 16 : insets.top + 12,
+      }]}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.back}>
           <AppIcon name="chevron-back" size={26} color={COLORS.blue} fixedColor />
         </TouchableOpacity>
@@ -76,23 +116,23 @@ export default function NotificationSettingsScreen() {
           label="Message Notifications"
           sub={msgNotifs ? 'Enabled' : 'Disabled'}
           value={msgNotifs}
-          onToggle={setMsgNotifs}
+          onToggle={(v) => update('msgNotifs', v)}
         />
         {msgNotifs && (
           <>
             <Row
               icon="volume-high-outline"
               label="Notification Sound"
-              sub={msgSound ? 'Default' : 'Silent'}
+              sub={msgSound ? 'Default sound' : 'Silent'}
               value={msgSound}
-              onToggle={setMsgSound}
+              onToggle={(v) => update('msgSound', v)}
             />
             <Row
               icon="phone-portrait-outline"
               label="Vibrate"
               sub={msgVibrate ? 'Vibrate with notification' : 'No vibration'}
               value={msgVibrate}
-              onToggle={setMsgVibrate}
+              onToggle={(v) => update('msgVibrate', v)}
             />
           </>
         )}
@@ -104,14 +144,14 @@ export default function NotificationSettingsScreen() {
           label="Group Notifications"
           sub={groupNotifs ? 'Enabled' : 'Disabled'}
           value={groupNotifs}
-          onToggle={setGroupNotifs}
+          onToggle={(v) => update('groupNotifs', v)}
         />
         {groupNotifs && (
           <Row
             icon="phone-portrait-outline"
             label="Vibrate"
             value={groupVibrate}
-            onToggle={setGroupVibrate}
+            onToggle={(v) => update('groupVibrate', v)}
           />
         )}
 
@@ -122,13 +162,19 @@ export default function NotificationSettingsScreen() {
           label="Incoming Calls"
           sub={callNotifs ? 'Ringtone & notification' : 'Silent'}
           value={callNotifs}
-          onToggle={setCallNotifs}
+          onToggle={(v) => update('callNotifs', v)}
         />
+        {/* BUG 14 — system ringtone picker is not available cross-platform.
+            We show an informative message instead of a broken stub. */}
         <Row
           icon="musical-notes-outline"
           label="Ringtone"
-          sub={ringtoneSel}
-          onPress={() => Alert.alert('Ringtone', 'Choose a ringtone from system sounds.')}
+          sub="Default"
+          onPress={() => Alert.alert(
+            'Ringtone',
+            'The ringtone is set to the default system sound. To change it, go to your device\'s Sound Settings.',
+            [{ text: 'OK' }],
+          )}
         />
 
       </ScrollView>
@@ -146,7 +192,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     borderBottomWidth: 1,
   },
-  back:  {
+  back: {
     width: 38, height: 38, borderRadius: 19,
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.65)',
@@ -155,20 +201,12 @@ const styles = StyleSheet.create({
   title: { flex: 1, textAlign: 'center', fontSize: 17, fontWeight: '700' },
   scroll: { paddingHorizontal: 14, paddingTop: 16, paddingBottom: 40, gap: 8 },
   sectionLabel: {
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1.2,
-    paddingHorizontal: 4,
-    paddingBottom: 2,
-    paddingTop: 8,
+    fontSize: 10, fontWeight: '700', letterSpacing: 1.2,
+    paddingHorizontal: 4, paddingBottom: 2, paddingTop: 8,
   },
   row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    borderRadius: RADIUS.lg,
-    paddingHorizontal: 14,
-    paddingVertical: 13,
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    borderRadius: RADIUS.lg, paddingHorizontal: 14, paddingVertical: 13,
   },
   rowMeta:    { flex: 1 },
   rowLabel:   { fontSize: 14, fontWeight: '500' },

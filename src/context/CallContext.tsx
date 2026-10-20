@@ -65,7 +65,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       const callId = activeCallIdRef.current;
       if (!callId) return;
 
-      console.log('[CallContext] ICE candidate generated, saving to Firestore');
+      console.log('[CallContext] ICE candidate generated, sending via signaling');
       SignalingService.addIceCandidate(callId, candidate, isCallerRef.current === false);
     },
 

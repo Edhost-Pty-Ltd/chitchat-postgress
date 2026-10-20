@@ -2,19 +2,21 @@
   "expo": {
     "name": "ChitChat Business",
     "slug": "Chit-Chat",
-    "version": "1.0.0",
+    "version": "1.3.0",
     "orientation": "portrait",
     "icon": "./assets/chitchat-logo.png",
     "userInterfaceStyle": "light",
     "experiments": {
       "precompiledFrameworks": false
     },
-
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.edhost.ChitChatBusiness",
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "ChitChat Business needs access to your photo library to share images and videos in chats.",
+        "NSPhotoLibraryAddUsageDescription": "ChitChat Business needs permission to save photos to your library.",
+        "NSCameraUsageDescription": "ChitChat Business needs camera access to take photos and videos.",
         "NSMicrophoneUsageDescription": "ChitChat Business needs access to your microphone to record voice notes.",
         "NSContactsUsageDescription": "ChitChat Business needs access to your contacts to help you find friends on the app.",
         "NSUserNotificationsUsageDescription": "ChitChat Business needs permission to send you notifications for new messages, calls, and status updates.",
@@ -22,16 +24,18 @@
       },
       "bitcode": false
     },
-
     "autolinking": {
       "ios": {
-        "buildFromSource": [".*"]
+        "buildFromSource": [
+          ".*"
+        ]
       },
       "android": {
-        "buildFromSource": [".*"]
+        "buildFromSource": [
+          ".*"
+        ]
       }
     },
-
     "plugins": [
       [
         "expo-contacts",
@@ -39,11 +43,11 @@
           "contactsPermission": "ChitChat uses your contacts to help you invite friends to meetings."
         }
       ],
-
       [
         "expo-build-properties",
         {
           "ios": {
+            "enableSceneSupport": true,
             "deploymentTarget": "16.4",
             "useFrameworks": "static",
             "forceStaticLinking": [
@@ -61,19 +65,15 @@
           }
         }
       ],
-
       "@react-native-firebase/app",
-      
       "@config-plugins/react-native-webrtc",
       "expo-font",
-
       [
         "expo-audio",
         {
           "microphonePermission": "ChitChat Business needs access to your microphone to record voice notes."
         }
       ],
-
       [
         "expo-image-picker",
         {
@@ -81,7 +81,6 @@
           "cameraPermission": "ChitChat Business needs camera access to take photos and videos."
         }
       ],
-
       [
         "expo-camera",
         {
@@ -89,7 +88,6 @@
           "microphonePermission": "ChitChat Business needs microphone access to record videos with sound."
         }
       ],
-
       [
         "expo-media-library",
         {
@@ -98,29 +96,25 @@
           "isAccessMediaLocationEnabled": true
         }
       ],
-
-      "expo-video",
-
-      [
+      "expo-video",      [
         "expo-notifications",
         {
           "color": "#0A2463",
           "mode": "production"
         }
       ],
-
       "@react-native-firebase/auth",
       "@react-native-community/datetimepicker",
-      
       [
         "@config-plugins/react-native-webrtc",
         {
           "cameraPermission": "ChitChat Business needs access to your camera for video calls.",
           "microphonePermission": "ChitChat Business needs access to your microphone for video calls."
         }
-      ]
+      ],
+      "expo-sharing",
+      "expo-status-bar"
     ],
-
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -156,17 +150,14 @@
       ],
       "softwareKeyboardLayoutMode": "pan"
     },
-
     "web": {
       "favicon": "./assets/favicon.png"
     },
-
     "extra": {
       "eas": {
         "projectId": "5a60de81-ed09-49dd-9ab9-3e6d63f9436d"
       }
     },
-
     "owner": "alex_sly"
   }
 }

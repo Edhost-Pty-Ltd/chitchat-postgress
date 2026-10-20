@@ -83,49 +83,33 @@ If you see "Profile Creation Failed" even with test numbers, check:
 ### 1. **Check the error logs**
 Look at the Metro/Expo console for the actual error message.
 
+> **Architecture note:** Firebase is now used **only** for phone-OTP
+> authentication. Profiles, chats, messages, calls, statuses and media live on
+> the app's own backend (PostgreSQL + Redis + S3/MinIO) — see
+> [`server/README.md`](./server/README.md). There are **no** Firestore or
+> Firebase Storage security rules to configure anymore; profile creation is a
+> `PATCH /me` call against the backend after the Firebase ID token is verified.
+
 ### 2. **Common Issues**:
 
-**Firestore Rules:**
-Ensure your Firestore security rules allow writes:
-```javascript
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /users/{userId} {
-      allow read: if true;
-      allow write: if request.auth != null && request.auth.uid == userId;
-    }
-    match /chats/{chatId} {
-      allow read, write: if request.auth != null;
-    }
-    match /messages/{messageId} {
-      allow read, write: if request.auth != null;
-    }
-  }
-}
-```
+**Backend reachability:**
+Profile creation now writes to the backend, not Firestore. If "Profile Creation
+Failed" appears:
+- Confirm `EXPO_PUBLIC_API_URL` in the repo-root `.env` points at a reachable
+  backend (on a physical device, use the Mac's LAN IP, not `localhost`).
+- Confirm the backend is running (`cd server && npm run dev`) and the Dev_Stack
+  is up (`docker compose up -d` from the repo root).
+- Check `GET /health` returns 200.
 
-**Storage Rules:**
-Ensure Firebase Storage rules allow uploads:
-```javascript
-rules_version = '2';
-service firebase.storage {
-  match /b/{bucket}/o {
-    match /profile-pictures/{userId}.jpg {
-      allow read: if true;
-      allow write: if request.auth != null && request.auth.uid == userId;
-    }
-    match /voice-notes/{allPaths=**} {
-      allow read, write: if request.auth != null;
-    }
-  }
-}
-```
+**Firebase Auth issues:**
+- Verify the Firebase Auth config in `src/config/firebase.ts`.
+- Ensure Phone sign-in is enabled in the Firebase console and the test numbers
+  are registered (see below).
 
 **Network Issues:**
-- Check internet connection
-- Verify Firebase config in `src/config/firebase.ts`
-- Ensure all Firebase services are enabled in console
+- Check the device's internet connection.
+- Confirm the backend's `FIREBASE_SERVICE_ACCOUNT_*` is set so it can verify ID
+  tokens (otherwise authenticated requests return 401).
 
 ---
 
@@ -157,9 +141,10 @@ Make sure these are configured in Firebase Console as test numbers!
 
 If you're still experiencing issues:
 1. Check the exact error message in the console
-2. Verify Firebase rules (Firestore and Storage)
-3. Ensure Firebase project is properly configured
-4. Check that all required Firebase services are enabled
+2. Confirm Phone sign-in is enabled in the Firebase console (Auth is the only
+   Firebase service this app uses)
+3. Confirm the backend is running and reachable (see the architecture note above)
+4. Check that the backend can verify Firebase ID tokens (service account set)
 
 ---
 

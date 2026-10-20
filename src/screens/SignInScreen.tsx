@@ -816,16 +816,16 @@ const styles = StyleSheet.create({
     width: 46,
     height: 54,
     borderRadius: RADIUS.md,
-    backgroundColor: 'rgba(30,156,240,0.06)',
+    backgroundColor: 'rgba(9,178,238,0.06)',
     borderWidth: 1,
-    borderColor: 'rgba(30,156,240,0.18)',
+    borderColor: 'rgba(9,178,238,0.18)',
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
   },
   otpBoxFilled: {
     borderColor: COLORS.blue,
-    backgroundColor: 'rgba(30,156,240,0.12)',
+    backgroundColor: 'rgba(9,178,238,0.12)',
   },
   otpBoxFocused: {
     borderColor: COLORS.blue,
@@ -1019,7 +1019,7 @@ const picker = StyleSheet.create({
     paddingVertical: 13,
     gap: 12,
   },
-  itemSelected: { backgroundColor: 'rgba(30,156,240,0.08)' },
+  itemSelected: { backgroundColor: 'rgba(9,178,238,0.08)' },
 
   flag: { fontSize: 24, width: 32, textAlign: 'center' },
   countryName: { flex: 1, fontSize: 15, color: COLORS.text },

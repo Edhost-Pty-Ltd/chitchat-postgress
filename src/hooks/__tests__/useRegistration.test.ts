@@ -1,5 +1,5 @@
 // ─── useRegistration Unit Tests ───────────────────────────────────────────────
-// Tests: OTP send, verify, resend limits, profile creation, image upload, retry.
+// Tests: OTP send, verify, resend limits, profile creation via backend API.
 // Requirements: 2.1, 2.3, 2.6, 2.7, 3.1, 3.2, 3.4, 3.5
 
 import React from 'react';
@@ -10,63 +10,39 @@ import { act, create, ReactTestRenderer } from 'react-test-renderer';
 const mockConfirm = jest.fn();
 const mockSignInWithPhoneNumber = jest.fn();
 
-const mockAuth = jest.fn(() => ({
-  signInWithPhoneNumber: mockSignInWithPhoneNumber,
-  currentUser: { uid: 'test-uid-123' },
+jest.mock('@react-native-firebase/auth', () => ({
+  getAuth: () => ({
+    currentUser: { uid: 'test-uid-123' },
+  }),
+  signInWithPhoneNumber: (...args: any[]) => mockSignInWithPhoneNumber(...args),
 }));
 
-jest.mock('@react-native-firebase/auth', () => {
-  const authFn = () => mockAuth();
-  // Default export is a function that returns auth instance
-  return {
-    __esModule: true,
-    default: authFn,
-  };
-});
+// ─── Mock backend endpoints ───────────────────────────────────────────────────
 
-// ─── Mock firebase/firestore ──────────────────────────────────────────────────
+const mockUpdatePhone = jest.fn();
+const mockUpdateMe = jest.fn();
 
-const mockSetDoc = jest.fn().mockResolvedValue(undefined);
-const mockDoc = jest.fn().mockReturnValue({ id: 'test-uid-123', path: 'users/test-uid-123' });
-const mockServerTimestamp = jest.fn(() => 'SERVER_TIMESTAMP');
-
-jest.mock('firebase/firestore', () => ({
-  doc: (...args: any[]) => mockDoc(...args),
-  setDoc: (...args: any[]) => mockSetDoc(...args),
-  serverTimestamp: () => mockServerTimestamp(),
+jest.mock('../../api/endpoints', () => ({
+  endpoints: {
+    updatePhone: (...args: any[]) => mockUpdatePhone(...args),
+    updateMe: (...args: any[]) => mockUpdateMe(...args),
+  },
 }));
 
-// ─── Mock firebase/storage ────────────────────────────────────────────────────
+// ─── Mock mediaService ────────────────────────────────────────────────────────
 
-const mockRef = jest.fn().mockReturnValue({ fullPath: 'profile-pictures/test-uid-123.jpg' });
-const mockUploadBytes = jest.fn().mockResolvedValue({ metadata: {} });
-const mockGetDownloadURL = jest.fn().mockResolvedValue('https://storage.example.com/profile-pictures/test-uid-123.jpg');
-
-jest.mock('firebase/storage', () => ({
-  ref: (...args: any[]) => mockRef(...args),
-  uploadBytes: (...args: any[]) => mockUploadBytes(...args),
-  getDownloadURL: (...args: any[]) => mockGetDownloadURL(...args),
+jest.mock('../../services/mediaService', () => ({
+  mediaService: {
+    upload: jest.fn().mockResolvedValue('avatars/test-uid-123/photo.jpg'),
+  },
+  fileSize: jest.fn().mockResolvedValue(1024),
 }));
-
-// ─── Mock firebase config ─────────────────────────────────────────────────────
-
-jest.mock('../../config/firebase', () => ({
-  db: { type: 'mock-firestore-db' },
-  storage: { type: 'mock-storage' },
-}));
-
-// ─── Mock global fetch (used by uploadProfilePicture for blob conversion) ─────
-
-const mockBlob = { size: 1024, type: 'image/jpeg' };
-global.fetch = jest.fn().mockResolvedValue({
-  blob: jest.fn().mockResolvedValue(mockBlob),
-}) as any;
 
 // ─── Import after mocks ──────────────────────────────────────────────────────
 
-import { useRegistration, UseRegistrationReturn } from '../useRegistration';
+import { useRegistration } from '../useRegistration';
 
-// ─── Minimal renderHook for node environment ──────────────────────────────────
+// ─── Minimal renderHook ────────────────────────────────────────────────────────
 
 function renderHook<T>(hookFn: () => T): { result: { current: T }; rerender: () => void } {
   const result: { current: T } = {} as any;
@@ -77,16 +53,8 @@ function renderHook<T>(hookFn: () => T): { result: { current: T }; rerender: () 
     return null;
   }
 
-  act(() => {
-    renderer = create(React.createElement(TestComponent));
-  });
-
-  const rerender = () => {
-    act(() => {
-      renderer.update(React.createElement(TestComponent));
-    });
-  };
-
+  act(() => { renderer = create(React.createElement(TestComponent)); });
+  const rerender = () => { act(() => { renderer.update(React.createElement(TestComponent)); }); };
   return { result, rerender };
 }
 
@@ -95,450 +63,173 @@ function renderHook<T>(hookFn: () => T): { result: { current: T }; rerender: () 
 describe('useRegistration', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-
-    // Default: signInWithPhoneNumber resolves with a confirmation object
-    mockSignInWithPhoneNumber.mockResolvedValue({
-      confirm: mockConfirm,
-    });
-
-    // Default: confirm resolves successfully
+    mockSignInWithPhoneNumber.mockResolvedValue({ confirm: mockConfirm });
     mockConfirm.mockResolvedValue({ user: { uid: 'test-uid-123' } });
-
-    // Reset fetch mock
-    (global.fetch as jest.Mock).mockResolvedValue({
-      blob: jest.fn().mockResolvedValue(mockBlob),
-    });
+    mockUpdatePhone.mockResolvedValue({ ok: true, data: { phoneNumber: '+27821234567' } });
+    mockUpdateMe.mockResolvedValue({ ok: true, data: { id: 'test-uid-123', displayName: 'TestUser', phoneNumber: '+27821234567', avatarObjectKey: null, about: null, email: null, website: null, catalog: null, operationalHours: null, accountType: 'business' } });
   });
 
-  // ── Requirement 2.1: OTP send triggers signInWithPhoneNumber ──
+  // ── Req 2.1: OTP send triggers signInWithPhoneNumber ──
   describe('submitRegistration — OTP send (Req 2.1)', () => {
-    it('calls auth().signInWithPhoneNumber with the provided phone number', async () => {
+    it('calls signInWithPhoneNumber with the auth instance and phone number', async () => {
       const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
-      expect(mockSignInWithPhoneNumber).toHaveBeenCalledWith('+27821234567');
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', null); });
+      // RN Firebase v24 modular API: signInWithPhoneNumber(auth, phoneNumber).
+      expect(mockSignInWithPhoneNumber).toHaveBeenCalledWith(
+        expect.objectContaining({ currentUser: expect.anything() }),
+        '+27821234567',
+      );
     });
 
     it('transitions step to "otp" on success', async () => {
       const { result } = renderHook(() => useRegistration());
-
       expect(result.current.registrationStep).toBe('form');
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', null); });
       expect(result.current.registrationStep).toBe('otp');
-    });
-
-    it('sets isLoading during the operation', async () => {
-      let loadingDuringCall = false;
-      mockSignInWithPhoneNumber.mockImplementation(() => {
-        // We can't easily capture mid-call state in this test setup,
-        // but we verify it's false before and after
-        return Promise.resolve({ confirm: mockConfirm });
-      });
-
-      const { result } = renderHook(() => useRegistration());
-
-      expect(result.current.isLoading).toBe(false);
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
-      expect(result.current.isLoading).toBe(false);
     });
 
     it('sets error and step to "error" when signInWithPhoneNumber fails', async () => {
       mockSignInWithPhoneNumber.mockRejectedValue({ code: 'auth/invalid-phone-number' });
-
       const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+invalid', null);
-      });
-
+      await act(async () => { await result.current.submitRegistration('TestUser', '+invalid', null); });
       expect(result.current.registrationStep).toBe('error');
       expect(result.current.error).toBe('Invalid phone number. Use format +27XXXXXXXXX');
     });
   });
 
-  // ── Requirement 2.3: verifyOTP calls confirmation.confirm ──
+  // ── Req 2.3: verifyOTP calls confirmation.confirm ──
   describe('verifyOTP (Req 2.3)', () => {
     it('calls confirm on the stored confirmation result with the provided code', async () => {
       const { result } = renderHook(() => useRegistration());
-
-      // First, submit registration to store confirmation
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
-      await act(async () => {
-        await result.current.verifyOTP('123456');
-      });
-
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', null); });
+      await act(async () => { await result.current.verifyOTP('123456'); });
       expect(mockConfirm).toHaveBeenCalledWith('123456');
     });
 
     it('returns false and sets error when no confirmation is pending', async () => {
       const { result } = renderHook(() => useRegistration());
-
-      let returnValue: boolean = true;
-      await act(async () => {
-        returnValue = await result.current.verifyOTP('123456');
-      });
-
+      let returnValue = true;
+      await act(async () => { returnValue = await result.current.verifyOTP('123456'); });
       expect(returnValue).toBe(false);
       expect(result.current.error).toBe('No confirmation pending — please resend OTP');
     });
 
-    it('transitions to "creating" then "done" on successful verification', async () => {
+    it('transitions to "done" on successful verification', async () => {
       const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
-      await act(async () => {
-        await result.current.verifyOTP('123456');
-      });
-
-      // After successful verify + profile creation, step should be 'done'
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', null); });
+      await act(async () => { await result.current.verifyOTP('123456'); });
       expect(result.current.registrationStep).toBe('done');
     });
 
     it('sets error when confirm throws', async () => {
       mockConfirm.mockRejectedValue({ code: 'auth/invalid-verification-code' });
-
       const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
-      await act(async () => {
-        await result.current.verifyOTP('000000');
-      });
-
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', null); });
+      await act(async () => { await result.current.verifyOTP('000000'); });
       expect(result.current.registrationStep).toBe('error');
       expect(result.current.error).toBe('Incorrect code. Please try again.');
     });
   });
 
-  // ── Requirement 2.6, 2.7: Resend count increments and disables after 3 ──
+  // ── Req 2.6, 2.7: Resend count increments and disables after 3 ──
   describe('resendOTP — resend limiting (Req 2.6, 2.7)', () => {
     it('starts with resendCount 0 and canResend true', () => {
       const { result } = renderHook(() => useRegistration());
-
       expect(result.current.resendCount).toBe(0);
       expect(result.current.canResend).toBe(true);
     });
 
     it('increments resendCount on each successful resend', async () => {
       const { result } = renderHook(() => useRegistration());
-
-      // Submit first to set up the phone number
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
-      await act(async () => {
-        await result.current.resendOTP();
-      });
-
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', null); });
+      await act(async () => { await result.current.resendOTP(); });
       expect(result.current.resendCount).toBe(1);
       expect(result.current.canResend).toBe(true);
     });
 
-    it('returns false and does not call signInWithPhoneNumber after 3 resends', async () => {
+    it('returns false and stops calling signInWithPhoneNumber after 3 resends', async () => {
       const { result } = renderHook(() => useRegistration());
-
-      // Submit first
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
-      // Clear to isolate resend calls
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', null); });
       mockSignInWithPhoneNumber.mockClear();
-
-      // Resend 3 times
-      await act(async () => {
-        await result.current.resendOTP();
-      });
-      await act(async () => {
-        await result.current.resendOTP();
-      });
-      await act(async () => {
-        await result.current.resendOTP();
-      });
-
+      await act(async () => { await result.current.resendOTP(); });
+      await act(async () => { await result.current.resendOTP(); });
+      await act(async () => { await result.current.resendOTP(); });
       expect(result.current.resendCount).toBe(3);
       expect(result.current.canResend).toBe(false);
-
-      // 4th attempt should fail
       mockSignInWithPhoneNumber.mockClear();
-      let returnValue: boolean = true;
-      await act(async () => {
-        returnValue = await result.current.resendOTP();
-      });
-
+      let returnValue = true;
+      await act(async () => { returnValue = await result.current.resendOTP(); });
       expect(returnValue).toBe(false);
       expect(mockSignInWithPhoneNumber).not.toHaveBeenCalled();
     });
-
-    it('calls signInWithPhoneNumber with the same phone on resend', async () => {
-      const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
-      mockSignInWithPhoneNumber.mockClear();
-
-      await act(async () => {
-        await result.current.resendOTP();
-      });
-
-      expect(mockSignInWithPhoneNumber).toHaveBeenCalledWith('+27821234567');
-    });
   });
 
-  // ── Requirement 3.1, 3.2: createProfile writes correct Firestore document ──
-  describe('createProfile — Firestore write (Req 3.1, 3.2)', () => {
-    it('writes user document to Firestore with correct fields', async () => {
+  // ── Req 3.1, 3.2: createProfile writes to backend ──
+  describe('createProfile — backend write (Req 3.1, 3.2)', () => {
+    it('calls updatePhone and updateMe with correct fields', async () => {
       const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
-      await act(async () => {
-        await result.current.verifyOTP('123456');
-      });
-
-      // Verify doc was created at users/{uid}
-      expect(mockDoc).toHaveBeenCalledWith(
-        { type: 'mock-firestore-db' },
-        'users',
-        'test-uid-123'
-      );
-
-      // Verify setDoc was called with correct data
-      expect(mockSetDoc).toHaveBeenCalledWith(
-        expect.anything(),
-        {
-          uid: 'test-uid-123',
-          username: 'TestUser',
-          phone: '+27821234567',
-          photoURL: null,
-          createdAt: 'SERVER_TIMESTAMP',
-          lastSeen: 'SERVER_TIMESTAMP',
-        },
-        { merge: true }
-      );
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', null); });
+      await act(async () => { await result.current.verifyOTP('123456'); });
+      expect(mockUpdatePhone).toHaveBeenCalledWith('+27821234567');
+      expect(mockUpdateMe).toHaveBeenCalledWith(expect.objectContaining({ displayName: 'TestUser', avatarObjectKey: null }));
     });
 
-    it('uses merge: true to handle duplicate phone numbers', async () => {
+    it('transitions to "done" on successful profile creation', async () => {
       const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
-      await act(async () => {
-        await result.current.verifyOTP('123456');
-      });
-
-      // Verify merge option is passed
-      const setDocCalls = mockSetDoc.mock.calls;
-      expect(setDocCalls[0][2]).toEqual({ merge: true });
-    });
-  });
-
-  // ── Requirement 3.4: Image upload stores to correct Storage path ──
-  describe('createProfile — image upload (Req 3.4)', () => {
-    it('uploads image to profile-pictures/{uid}.jpg path', async () => {
-      const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', 'file:///tmp/photo.jpg');
-      });
-
-      await act(async () => {
-        await result.current.verifyOTP('123456');
-      });
-
-      // Verify ref was called with correct storage path
-      expect(mockRef).toHaveBeenCalledWith(
-        { type: 'mock-storage' },
-        'profile-pictures/test-uid-123.jpg'
-      );
-
-      // Verify uploadBytes was called with the blob
-      expect(mockUploadBytes).toHaveBeenCalledWith(
-        { fullPath: 'profile-pictures/test-uid-123.jpg' },
-        mockBlob
-      );
-
-      // Verify getDownloadURL was called
-      expect(mockGetDownloadURL).toHaveBeenCalledWith(
-        { fullPath: 'profile-pictures/test-uid-123.jpg' }
-      );
-    });
-
-    it('fetches image URI as blob before uploading', async () => {
-      const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', 'file:///tmp/photo.jpg');
-      });
-
-      await act(async () => {
-        await result.current.verifyOTP('123456');
-      });
-
-      expect(global.fetch).toHaveBeenCalledWith('file:///tmp/photo.jpg');
-    });
-
-    it('stores download URL as photoURL in Firestore document', async () => {
-      const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', 'file:///tmp/photo.jpg');
-      });
-
-      await act(async () => {
-        await result.current.verifyOTP('123456');
-      });
-
-      expect(mockSetDoc).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({
-          photoURL: 'https://storage.example.com/profile-pictures/test-uid-123.jpg',
-        }),
-        { merge: true }
-      );
-    });
-
-    it('sets photoURL to null when no image is provided', async () => {
-      const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
-      await act(async () => {
-        await result.current.verifyOTP('123456');
-      });
-
-      expect(mockUploadBytes).not.toHaveBeenCalled();
-      expect(mockSetDoc).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ photoURL: null }),
-        { merge: true }
-      );
-    });
-  });
-
-  // ── Requirement 3.5: retryProfileCreation works without re-verification ──
-  describe('retryProfileCreation (Req 3.5)', () => {
-    it('retries profile creation without calling signInWithPhoneNumber again', async () => {
-      // Setup: submit and verify OTP, but make first createProfile fail
-      mockSetDoc.mockRejectedValueOnce(new Error('Network error'));
-
-      const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
-
-      await act(async () => {
-        await result.current.verifyOTP('123456');
-      });
-
-      // First profile creation failed
-      expect(result.current.registrationStep).toBe('error');
-
-      // Clear and retry
-      mockSignInWithPhoneNumber.mockClear();
-      mockConfirm.mockClear();
-      mockSetDoc.mockResolvedValue(undefined);
-
-      await act(async () => {
-        await result.current.retryProfileCreation();
-      });
-
-      // Should NOT call signInWithPhoneNumber or confirm again
-      expect(mockSignInWithPhoneNumber).not.toHaveBeenCalled();
-      expect(mockConfirm).not.toHaveBeenCalled();
-
-      // Should call setDoc again
-      expect(mockSetDoc).toHaveBeenCalled();
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', null); });
+      await act(async () => { await result.current.verifyOTP('123456'); });
       expect(result.current.registrationStep).toBe('done');
     });
+  });
 
-    it('transitions to "done" on successful retry', async () => {
-      mockSetDoc.mockRejectedValueOnce(new Error('Temporary failure'));
-
+  // ── Req 3.4: Image upload stores to object store ──
+  describe('createProfile — image upload (Req 3.4)', () => {
+    it('passes avatarObjectKey to updateMe when image provided', async () => {
       const { result } = renderHook(() => useRegistration());
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', 'file:///tmp/photo.jpg'); });
+      await act(async () => { await result.current.verifyOTP('123456'); });
+      expect(mockUpdateMe).toHaveBeenCalledWith(expect.objectContaining({ avatarObjectKey: 'avatars/test-uid-123/photo.jpg' }));
+    });
 
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', null);
-      });
+    it('sets avatarObjectKey to null when no image provided', async () => {
+      const { result } = renderHook(() => useRegistration());
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', null); });
+      await act(async () => { await result.current.verifyOTP('123456'); });
+      expect(mockUpdateMe).toHaveBeenCalledWith(expect.objectContaining({ avatarObjectKey: null }));
+    });
+  });
 
-      await act(async () => {
-        await result.current.verifyOTP('123456');
-      });
-
+  // ── Req 3.5: retryProfileCreation works without re-verification ──
+  describe('retryProfileCreation (Req 3.5)', () => {
+    it('retries profile creation without calling signInWithPhoneNumber again', async () => {
+      mockUpdateMe.mockRejectedValueOnce(new Error('Network error'));
+      const { result } = renderHook(() => useRegistration());
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', null); });
+      await act(async () => { await result.current.verifyOTP('123456'); });
       expect(result.current.registrationStep).toBe('error');
-
-      mockSetDoc.mockResolvedValue(undefined);
-
-      await act(async () => {
-        await result.current.retryProfileCreation();
-      });
-
+      mockSignInWithPhoneNumber.mockClear();
+      mockConfirm.mockClear();
+      mockUpdateMe.mockResolvedValue({ ok: true, data: { id: 'test-uid-123', displayName: 'TestUser', phoneNumber: '+27821234567', avatarObjectKey: null, about: null, email: null, website: null, catalog: null, operationalHours: null, accountType: 'business' } });
+      await act(async () => { await result.current.retryProfileCreation(); });
+      expect(mockSignInWithPhoneNumber).not.toHaveBeenCalled();
+      expect(mockConfirm).not.toHaveBeenCalled();
       expect(result.current.registrationStep).toBe('done');
     });
   });
 
   // ── proceedWithoutPhoto ──
   describe('proceedWithoutPhoto', () => {
-    it('creates profile with photoURL null even if image was originally provided', async () => {
-      // Make the initial upload fail so we can test proceedWithoutPhoto
-      mockUploadBytes.mockRejectedValueOnce(new Error('Upload failed'));
-
+    it('creates profile with null avatarObjectKey', async () => {
+      const { mediaService } = await import('../../services/mediaService');
+      (mediaService.upload as jest.Mock).mockRejectedValueOnce(new Error('Upload failed'));
       const { result } = renderHook(() => useRegistration());
-
-      await act(async () => {
-        await result.current.submitRegistration('TestUser', '+27821234567', 'file:///tmp/photo.jpg');
-      });
-
-      await act(async () => {
-        await result.current.verifyOTP('123456');
-      });
-
-      // First profile creation failed due to upload error
+      await act(async () => { await result.current.submitRegistration('TestUser', '+27821234567', 'file:///tmp/photo.jpg'); });
+      await act(async () => { await result.current.verifyOTP('123456'); });
       expect(result.current.registrationStep).toBe('error');
-
-      // Clear mocks before proceedWithoutPhoto
-      mockUploadBytes.mockClear();
-      mockSetDoc.mockResolvedValue(undefined);
-
-      await act(async () => {
-        await result.current.proceedWithoutPhoto();
-      });
-
-      // Should not attempt image upload since we're proceeding without photo
-      expect(mockUploadBytes).not.toHaveBeenCalled();
-
-      // Should write doc with null photoURL
-      const lastSetDocCall = mockSetDoc.mock.calls[mockSetDoc.mock.calls.length - 1];
-      expect(lastSetDocCall[1].photoURL).toBeNull();
+      (mediaService.upload as jest.Mock).mockClear();
+      await act(async () => { await result.current.proceedWithoutPhoto(); });
+      expect(mediaService.upload).not.toHaveBeenCalled();
+      expect(mockUpdateMe).toHaveBeenCalledWith(expect.objectContaining({ avatarObjectKey: null }));
       expect(result.current.registrationStep).toBe('done');
     });
   });

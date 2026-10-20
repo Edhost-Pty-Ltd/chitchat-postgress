@@ -171,9 +171,10 @@ export function CreateStatusModal({ visible, onClose, onCreate }: CreateStatusMo
       }
 
       handleClose();
-    } catch (err) {
+    } catch (err: any) {
       console.error('[CreateStatusModal] Post error:', err);
-      Alert.alert('Error', 'Failed to post status');
+      const detail = err?.message ?? String(err);
+      Alert.alert('Error', `Failed to post status\n\n${detail}`);
     } finally {
       setUploading(false);
     }

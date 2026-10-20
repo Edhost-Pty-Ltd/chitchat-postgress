@@ -59,8 +59,8 @@ export function useIncomingCallAnswer() {
         console.log('[useIncomingCallAnswer] Creating answer...');
         const answer = await createAnswer(offer);
 
-        // Step 3: Save answer to Firestore
-        console.log('[useIncomingCallAnswer] Saving answer to Firestore...');
+        // Step 3: Send the answer through the signaling backend
+        console.log('[useIncomingCallAnswer] Sending answer via signaling...');
         await SignalingService.saveAnswer(callId, answer);
 
         // Step 4: Listen for ICE candidates from caller and call status changes
@@ -68,7 +68,7 @@ export function useIncomingCallAnswer() {
         console.log('[useIncomingCallAnswer] Listener setup for call:', callId);
         
         unsubscribeRef.current = SignalingService.onCallUpdated(callId, async (call) => {
-          console.log('[useIncomingCallAnswer] ==== Firestore Listener Triggered ====');
+          console.log('[useIncomingCallAnswer] ==== Signaling Listener Triggered ====');
           
           if (!call) {
             console.log('[useIncomingCallAnswer] Call document deleted, cleaning up...');
@@ -77,7 +77,7 @@ export function useIncomingCallAnswer() {
             return;
           }
 
-          console.log('[useIncomingCallAnswer] Firestore update - status:', call.status, 'callId:', call.callId);
+          console.log('[useIncomingCallAnswer] Signaling update - status:', call.status, 'callId:', call.callId);
 
           // Handle call ended by caller - IMMEDIATELY cleanup
           if (call.status === 'ended') {
@@ -95,7 +95,7 @@ export function useIncomingCallAnswer() {
             
             // Unsubscribe from further updates
             if (unsubscribeRef.current) {
-              console.log('[useIncomingCallAnswer] Step 5: Unsubscribing from Firestore...');
+              console.log('[useIncomingCallAnswer] Step 5: Unsubscribing from signaling...');
               unsubscribeRef.current();
               unsubscribeRef.current = null;
               console.log('[useIncomingCallAnswer] Step 6: Unsubscribed successfully');
@@ -168,10 +168,10 @@ export function useIncomingCallAnswer() {
       console.log('[useIncomingCallAnswer] Ending call...');
 
       try {
-        // Update call status in Firestore
-        console.log('[useIncomingCallAnswer] Step 1: Updating Firestore status to ended...');
+        // Update call status via the signaling backend
+        console.log('[useIncomingCallAnswer] Step 1: Updating call status to ended...');
         await SignalingService.updateCallStatus(callId, 'ended', duration);
-        console.log('[useIncomingCallAnswer] Step 2: Firestore updated successfully');
+        console.log('[useIncomingCallAnswer] Step 2: Call status updated successfully');
 
         // Save to call history
         console.log('[useIncomingCallAnswer] Step 3: Fetching call document...');

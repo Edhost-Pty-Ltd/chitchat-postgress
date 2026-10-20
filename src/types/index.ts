@@ -210,10 +210,21 @@ export interface FireStatus {
 }
 
 
+// ─── Tab navigator param list ──────────────────────────────────────────────
+export type TabParamList = {
+  Chats: undefined;
+  Calls: undefined;
+  Status: undefined;
+  Calendar: undefined;
+  Settings: undefined;
+};
+
 // ─── Navigation param list ─────────────────────────────────────────────────
 export type RootStackParamList = {
   Splash: undefined;
   SignIn: undefined;
+  /** Authenticated root — hosts the bottom-tab navigator */
+  Tabs: undefined;
   Chats: undefined;
   Chat: { chatId: string; displayName: string; isGroup: boolean; otherUserId?: string; otherUserPhoto?: string | null; openProfile?: boolean; openAddContact?: boolean };
   Calendar:undefined;

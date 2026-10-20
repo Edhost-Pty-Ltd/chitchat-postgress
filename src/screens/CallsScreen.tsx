@@ -7,7 +7,7 @@ import {
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Avatar, BottomNav } from '../components';
+import { Avatar } from '../components';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import type { CallHistoryItem } from '../types/call';
 import type { RootStackParamList } from '../types';
@@ -645,7 +645,7 @@ export default function CallsScreen() {
         </View>
       )}
 
-      <BottomNav active="calls" />
+
     </View>
   );
 }
@@ -665,7 +665,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: RADIUS.full,
-    shadowColor: '#1E9CF0',
+    shadowColor: '#09B2EE',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.40,
     shadowRadius: 12,
@@ -682,7 +682,7 @@ const styles = StyleSheet.create({
   tabRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingBottom: 14 },
   tabPill: {
     paddingHorizontal: 18, paddingVertical: 8, borderRadius: RADIUS.full,
-    shadowColor: '#1E9CF0',
+    shadowColor: '#09B2EE',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.40,
     shadowRadius: 12,
@@ -737,7 +737,7 @@ const styles = StyleSheet.create({
   },
   handle: {
     alignSelf: 'center', width: 40, height: 4, borderRadius: 2,
-    backgroundColor: 'rgba(30,156,240,0.30)', marginTop: 10, marginBottom: 4,
+    backgroundColor: 'rgba(9,178,238,0.30)', marginTop: 10, marginBottom: 4,
   },
   sheetHeader: {
     flexDirection: 'row', alignItems: 'center',
