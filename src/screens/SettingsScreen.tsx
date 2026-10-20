@@ -8,7 +8,6 @@ import { BottomNav, UserAvatar } from '../components';
 import { COLORS, RADIUS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { useAuth } from '../context/AuthContext';
-import { useTeamInbox } from '../context/TeamInboxContext';
 import { AppBg, AppText, AppIcon, useForeground, useTypography } from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -28,8 +27,7 @@ const SETTINGS_SECTIONS: {
   },
   {
     items: [
-      // "Linked Devices & Team" — a single entry that opens the unified screen
-      { id: 'devices',    icon: 'phone-portrait-outline', label: 'Linked Devices & Team' },
+      { id: 'devices',    icon: 'phone-portrait-outline', label: 'Linked Devices' },
       { id: 'appearance', icon: 'color-palette-outline',  label: 'Appearance'            },
     ],
   },
@@ -50,7 +48,6 @@ export default function SettingsScreen() {
   const { FG }  = useForeground();
   const { fontFamily, textColor } = useTypography();
   const insets = useSafeAreaInsets();
-  const { agents, role } = useTeamInbox();
 
   const handleItem = (id: string) => {
     if (id === 'signout')       { signOut(); return; }
@@ -155,17 +152,6 @@ const styles = StyleSheet.create({
   profileText: { flex: 1 },
   profileName: { fontSize: 16, fontWeight: '700', color: COLORS.text },
   profileSub:  { fontSize: 12, color: COLORS.sub, marginTop: 2 },
-
-  // Team context pill
-  teamPill: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: 'rgba(30,156,240,0.08)',
-    borderRadius: RADIUS.md,
-    paddingHorizontal: 14, paddingVertical: 10,
-    marginBottom: 4,
-    borderWidth: 1, borderColor: 'rgba(30,156,240,0.18)',
-  },
-  teamPillTxt: { flex: 1, fontSize: 13, fontWeight: '600' },
 
   section:      { gap: 8, marginBottom: 6 },
   sectionLabel: { fontSize: 10, fontWeight: '700', color: COLORS.sub, letterSpacing: 1.2, paddingHorizontal: 4, paddingBottom: 2 },

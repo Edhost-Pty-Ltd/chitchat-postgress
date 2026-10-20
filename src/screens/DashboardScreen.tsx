@@ -519,7 +519,7 @@ export default function DashboardScreen() {
               />
               <ActionRow
                 icon="people-outline"
-                label="Team & linked devices"
+                label="Linked devices"
                 onPress={() => navigation.navigate('LinkedDevices')}
                 textColor={textColor}
                 fgSecondary={FG.secondary}

@@ -199,7 +199,7 @@ interface Props {
   tickIcon?:  { icon: 'checkmark' | 'checkmark-done'; color: string };
 }
 
-export function CatalogBubble({ item, isOutgoing, sellerUid, timestamp, tickIcon }: Props) {
+export const CatalogBubble = React.memo(function CatalogBubble({ item, isOutgoing, sellerUid, timestamp, tickIcon }: Props) {
   const { addItem, removeItem, getQuantity, sellerUid: cartSeller } = useCart();
   const qty = getQuantity(item.id);
   const [viewerVisible, setViewerVisible] = useState(false);
@@ -311,7 +311,7 @@ export function CatalogBubble({ item, isOutgoing, sellerUid, timestamp, tickIcon
       )}
     </>
   );
-}
+});
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const CARD_W = Math.min(SCREEN_W * 0.72, 280);

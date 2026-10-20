@@ -98,7 +98,7 @@ function PollOption({ text, count, pct, mine, isLeading, onPress }: PollOptionPr
   );
 }
 
-export function PollBubble({ poll, isOutgoing, currentUserId, onVote, timestamp, tickIcon }: Props) {
+export const PollBubble = React.memo(function PollBubble({ poll, isOutgoing, currentUserId, onVote, timestamp, tickIcon }: Props) {
   const { resolveName } = usePhoneBook();
   const [resultsOpen, setResultsOpen] = useState(false);
   const [voterMap, setVoterMap] = useState<Record<string, VoterInfo>>({});
@@ -345,7 +345,7 @@ export function PollBubble({ poll, isOutgoing, currentUserId, onVote, timestamp,
       </Modal>
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   wrapper: { marginVertical: 3, marginHorizontal: 6, maxWidth: CARD_W },
@@ -408,7 +408,7 @@ const styles = StyleSheet.create({
 
 // ── Results sheet styles ──────────────────────────────────────────────────────
 const rs = StyleSheet.create({
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.4)' },
+  backdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.4)' },
   sheet: {
     position: 'absolute', left: 0, right: 0, bottom: 0,
     backgroundColor: '#fff',

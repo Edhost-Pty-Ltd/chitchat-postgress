@@ -295,13 +295,13 @@ function SingleContactCard({ contact, isOutgoing, timestamp, tickIcon, onSaveCon
   );
 }
 
-export function ContactBubble({ contact, isOutgoing, timestamp, tickIcon, onSaveContact }: Props) {
+export const ContactBubble = React.memo(function ContactBubble({ contact, isOutgoing, timestamp, tickIcon, onSaveContact }: Props) {
   const list = contact.contacts;
   if (list && list.length > 1) {
     return <MultiContactCard contacts={list} isOutgoing={isOutgoing} timestamp={timestamp} tickIcon={tickIcon} onSaveContact={onSaveContact} />;
   }
   return <SingleContactCard contact={contact} isOutgoing={isOutgoing} timestamp={timestamp} tickIcon={tickIcon} onSaveContact={onSaveContact} />;
-}
+});
 
 const styles = StyleSheet.create({
   wrapper: { marginVertical: 3, marginHorizontal: 6, maxWidth: CARD_W },
@@ -352,7 +352,7 @@ const styles = StyleSheet.create({
 });
 
 const sheet = StyleSheet.create({
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.4)' },
+  backdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.4)' },
   container: {
     position: 'absolute', left: 0, right: 0, bottom: 0,
     backgroundColor: '#fff',

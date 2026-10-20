@@ -14,7 +14,6 @@ import { CallProvider } from './src/context/CallContext';
 import { NotificationProvider } from './src/context/NotificationContext';
 import { FloatingCallProvider } from './src/context/FloatingCallContext';
 import { CartProvider } from './src/context/CartContext';
-import { TeamInboxProvider } from './src/context/TeamInboxContext';
 import AppNavigator from './src/navigation/AppNavigator';
 import ToastOverlay from './src/components/ToastNotification';
 import { FloatingCallManager } from './src/components/FloatingCallManager';
@@ -123,17 +122,15 @@ export default function App() {
             <NotificationProvider>
               <FloatingCallProvider>
                 <CartProvider>
-                  <TeamInboxProvider>
-                    <ActivityWatcher />
-                    <PushNotificationManager />
-                    <NavigationContainer>
-                      <StatusBar style="auto" />
-                      <AppNavigator />
-                      <ToastOverlay />
-                      <FloatingCallManager />
-                      <BiometricGate />
-                    </NavigationContainer>
-                  </TeamInboxProvider>
+                  <ActivityWatcher />
+                  <PushNotificationManager />
+                  <NavigationContainer>
+                    <StatusBar style="auto" />
+                    <AppNavigator />
+                    <ToastOverlay />
+                    <FloatingCallManager />
+                    <BiometricGate />
+                  </NavigationContainer>
                 </CartProvider>
               </FloatingCallProvider>
             </NotificationProvider>

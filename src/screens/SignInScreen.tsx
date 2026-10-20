@@ -598,7 +598,7 @@ export default function SignInScreen() {
                         On your signed-in device:
                       </AppText>
                       {[
-                        'Settings  →  Linked Devices & Team',
+                        'Settings  →  Linked Devices',
                         'Tap the  +  button',
                         'Choose  Scan QR Code  or  Enter Code',
                         'Scan this QR or type the code below',

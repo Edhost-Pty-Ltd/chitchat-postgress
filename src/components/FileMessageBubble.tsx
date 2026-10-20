@@ -54,7 +54,7 @@ function getFileExtension(fileName: string): string {
   return 'FILE';
 }
 
-export function FileMessageBubble({
+export const FileMessageBubble = React.memo(function FileMessageBubble({
   fileName,
   fileSize,
   fileUrl,
@@ -141,7 +141,7 @@ export function FileMessageBubble({
       {content}
     </LinearGradient>
   );
-}
+});
 
 const styles = StyleSheet.create({
   bubble: {

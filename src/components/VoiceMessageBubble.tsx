@@ -71,7 +71,7 @@ function formatTime(date: Date | null): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function VoiceMessageBubble({
+export const VoiceMessageBubble = React.memo(function VoiceMessageBubble({
   messageId,
   voiceUrl: _voiceUrl,
   durationMs,
@@ -225,7 +225,7 @@ export function VoiceMessageBubble({
       </View>
     </BubbleWrapper>
   );
-}
+});
 
 // ─── Bubble wrapper ───────────────────────────────────────────────────────────
 

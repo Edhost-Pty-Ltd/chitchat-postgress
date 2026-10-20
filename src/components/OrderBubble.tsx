@@ -32,7 +32,7 @@ function lineSubtotal(price: string, qty: number): string {
   return `${prefix}${(n * qty).toFixed(2)}`;
 }
 
-export function OrderBubble({ order, isOutgoing, timestamp, tickIcon }: Props) {
+export const OrderBubble = React.memo(function OrderBubble({ order, isOutgoing, timestamp, tickIcon }: Props) {
   const totalQty = order.items.reduce((s, it) => s + it.quantity, 0);
 
   return (
@@ -92,7 +92,7 @@ export function OrderBubble({ order, isOutgoing, timestamp, tickIcon }: Props) {
       </View>
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   wrapper: { marginVertical: 3, marginHorizontal: 6, maxWidth: CARD_W },

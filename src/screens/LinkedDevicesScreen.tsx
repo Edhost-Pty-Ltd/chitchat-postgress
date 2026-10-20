@@ -1,4 +1,4 @@
-// ─── Screen: Linked Devices & Team ───────────────────────────────────────────
+// ─── Screen: Linked Devices ──────────────────────────────────────────────────
 //
 // Devices tab — real Firestore-backed linked devices, QR scanning, code entry,
 // and remote sign-out.
@@ -10,18 +10,17 @@
 //   primary phone.
 //
 import React, {
-  useState, useCallback, useMemo, useEffect, memo,
+  useState, useCallback,
 } from 'react';
 import {
   View, TouchableOpacity, StyleSheet, ScrollView, Modal, Platform,
-  FlatList, TextInput, ActivityIndicator, Alert, Image,
-  KeyboardAvoidingView, Dimensions,
+  TextInput, ActivityIndicator, Alert,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { LinearGradient }   from 'expo-linear-gradient';
 import { Ionicons }         from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import firestore             from '@react-native-firebase/firestore';
 
 let CameraView: any = null;
 let useCameraPermissions: any = () => [{ status: 'undetermined' }, async () => ({ status: 'granted' })];
@@ -37,10 +36,6 @@ import {
   AppBg, AppText, AppIcon, useForeground, useTypography, useGlass,
 } from '../context/ThemeContext';
 import { useAuth }      from '../context/AuthContext';
-import { useTeamInbox } from '../context/TeamInboxContext';
-import { usePhoneBook } from '../hooks/usePhoneBook';
-import { useInboxConversations } from '../hooks/useTeamInbox';
-import { addAgent, removeAgent, updateAgentRole } from '../hooks/useTeamAgents';
 import {
   useLinkedDevices,
   claimLinkRequest,
@@ -49,15 +44,9 @@ import {
   removeAllOtherDevices,
   LinkedDevice,
 } from '../hooks/useLinkedDevices';
-import { ConversationStatusBadge } from '../components/ConversationStatusBadge';
-import { AssignmentSheet }          from '../components/AssignmentSheet';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
-import { TeamAgent, AgentRole, InboxConversation } from '../types';
-import { db } from '../config/firebase';
 
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
-type ScreenTab   = 'devices' | 'team';
-type InboxTab    = 'all' | 'mine' | 'unassigned' | 'resolved';
 
 const DEVICE_ICON: Record<LinkedDevice['type'], IoniconName> = {
   phone:   'phone-portrait-outline',
@@ -67,28 +56,6 @@ const DEVICE_ICON: Record<LinkedDevice['type'], IoniconName> = {
 };
 
 const LINK_QR_PATTERN = /^chitchat:\/\/link\/([0-9a-f]{64})$/i;
-
-function getInitials(name: string): string {
-  const p = name.trim().split(/\s+/);
-  return p.length >= 2 ? (p[0][0] + p[1][0]).toUpperCase() : name.slice(0, 2).toUpperCase();
-}
-
-function stringToColor(s: string): string {
-  const pal = ['#f97316','#8b5cf6','#ec4899','#06b6d4','#10b981','#f59e0b','#6366f1','#e11d48'];
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = s.charCodeAt(i) + ((h << 5) - h);
-  return pal[Math.abs(h) % pal.length];
-}
-
-function formatTime(d: Date | null): string {
-  if (!d) return '';
-  const diff = Date.now() - d.getTime();
-  const days = Math.floor(diff / 86_400_000);
-  if (days === 0) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  if (days === 1) return 'Yesterday';
-  if (days < 7)  return d.toLocaleDateString([], { weekday: 'short' });
-  return d.toLocaleDateString([], { day: '2-digit', month: 'short' });
-}
 
 function formatRelative(d: Date): string {
   const m = Math.floor((Date.now() - d.getTime()) / 60_000);
@@ -100,23 +67,6 @@ function formatRelative(d: Date): string {
   if (dy === 1) return 'yesterday';
   if (dy < 7)  return `${dy}d ago`;
   return d.toLocaleDateString([], { day: 'numeric', month: 'short' });
-}
-
-const memberCache = new Map<string, { displayName: string; photoURL: string | null; phone: string | null }>();
-async function fetchMemberInfo(uid: string) {
-  if (memberCache.has(uid)) return memberCache.get(uid)!;
-  try {
-    const snap = await (db as ReturnType<typeof firestore>).collection('users').doc(uid).get();
-    const info = snap.exists()
-      ? {
-          displayName: snap.data()!.displayName ?? uid,
-          photoURL: snap.data()!.photoURL ?? null,
-          phone: snap.data()!.phone ?? snap.data()!.phoneNumber ?? null,
-        }
-      : { displayName: uid, photoURL: null, phone: null };
-    memberCache.set(uid, info);
-    return info;
-  } catch { return { displayName: uid, photoURL: null, phone: null }; }
 }
 
 // ─── DeviceCard — supports a `readOnly` variant for companions ───────────────
@@ -180,128 +130,6 @@ function DeviceCard({ device, FG, textColor, fontFamily, readOnly, onRemove }: D
   );
 }
 
-// ─── AgentCard ────────────────────────────────────────────────────────────────
-interface AgentCardProps {
-  agent: TeamAgent; isAdmin: boolean; ownerUid: string;
-  onRemove: (a: TeamAgent) => void;
-  onRoleChange: (a: TeamAgent, r: AgentRole) => void;
-  textColor: string; fontFamily: string;
-  readOnly?: boolean;
-  displayName: string;
-}
-const AgentCard = memo(function AgentCard({
-  agent, isAdmin, ownerUid, onRemove, onRoleChange, textColor, fontFamily, readOnly, displayName,
-}: AgentCardProps) {
-  const { bevel } = useGlass();
-  const color = stringToColor(displayName);
-  const [menuOpen, setMenuOpen] = useState(false);
-  return (
-    <View style={[S.card, bevel, readOnly && S.cardReadOnly]}>
-      <View style={[S.agentAvatar, { backgroundColor: readOnly ? COLORS.sub : color }]}>
-        {agent.photoURL
-          ? <Image source={{ uri: agent.photoURL }} style={S.agentAvatarImg} />
-          : <AppText style={S.agentAvatarTxt} fixedColor>{getInitials(displayName)}</AppText>}
-      </View>
-      <View style={S.deviceInfo}>
-        <View style={S.deviceNameRow}>
-          <AppText style={[S.deviceName, { color: readOnly ? COLORS.sub : textColor, fontFamily }]} numberOfLines={1}>
-            {displayName}
-          </AppText>
-          <View style={[S.rolePill, agent.role === 'admin' ? S.roleAdmin : S.roleAgent]}>
-            <AppText style={[S.roleTxt, agent.role === 'admin' ? S.roleTxtAdmin : S.roleTxtAgent]} fixedColor>
-              {agent.role === 'admin' ? 'Admin' : 'Agent'}
-            </AppText>
-          </View>
-        </View>
-        <AppText style={[S.deviceMeta, { color: COLORS.sub }]}>{agent.phone}</AppText>
-        <View style={S.deviceDetailRow}>
-          <AppIcon name="time-outline" size={12} color={COLORS.sub} />
-          <AppText style={[S.deviceDetail, { color: COLORS.sub }]}>
-            Linked {agent.addedAt.toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' })}
-          </AppText>
-        </View>
-      </View>
-      {isAdmin && agent.uid !== ownerUid && !readOnly && (
-        <TouchableOpacity onPress={() => setMenuOpen(true)} style={S.logoutBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <AppIcon name="ellipsis-vertical" size={20} color={COLORS.sub} />
-        </TouchableOpacity>
-      )}
-      {readOnly && isAdmin && agent.uid !== ownerUid && (
-        <View style={S.logoutBtn}>
-          <AppIcon name="lock-closed-outline" size={16} color={COLORS.sub} />
-        </View>
-      )}
-      {menuOpen && (
-        <Modal visible transparent animationType="fade" onRequestClose={() => setMenuOpen(false)}>
-          <TouchableOpacity style={S.menuBackdrop} activeOpacity={1} onPress={() => setMenuOpen(false)} />
-          <View style={[S.agentMenuCard, bevel]}>
-            <AppText style={S.agentMenuName} numberOfLines={1}>{displayName}</AppText>
-            <View style={S.agentMenuDivider} />
-            <TouchableOpacity style={S.agentMenuItem} onPress={() => { setMenuOpen(false); onRoleChange(agent, agent.role === 'admin' ? 'agent' : 'admin'); }}>
-              <View style={S.agentMenuIcon}><Ionicons name={agent.role === 'admin' ? 'person-outline' : 'shield-outline'} size={18} color={COLORS.blue} /></View>
-              <AppText style={S.agentMenuLabel}>{agent.role === 'admin' ? 'Demote to Agent' : 'Promote to Admin'}</AppText>
-            </TouchableOpacity>
-            <TouchableOpacity style={S.agentMenuItem} onPress={() => { setMenuOpen(false); onRemove(agent); }}>
-              <View style={[S.agentMenuIcon, S.agentMenuIconDanger]}><Ionicons name="person-remove-outline" size={18} color={COLORS.missed} /></View>
-              <AppText style={[S.agentMenuLabel, { color: COLORS.missed }]}>Unlink account</AppText>
-            </TouchableOpacity>
-          </View>
-        </Modal>
-      )}
-    </View>
-  );
-});
-
-// ─── InboxRow ─────────────────────────────────────────────────────────────────
-interface InboxRowProps {
-  item: InboxConversation; ownerUid: string; onPress: () => void;
-  bevel: object; textColor: string; fontFamily: string;
-  resolveName: (phone?: string | null, fallback?: string) => string;
-}
-const InboxRow = memo(function InboxRow({ item, ownerUid, onPress, bevel, textColor, fontFamily, resolveName }: InboxRowProps) {
-  const [info, setInfo] = useState<{ displayName: string; photoURL: string | null; phone: string | null } | null>(null);
-  React.useEffect(() => {
-    if (item.type === 'direct') {
-      const other = item.members.find((m) => m !== ownerUid);
-      if (other) fetchMemberInfo(other).then(setInfo);
-    }
-  }, [item.members, item.type, ownerUid]);
-  const name = item.type === 'group'
-    ? (item.groupName || 'Group')
-    : (info ? resolveName(info.phone, info.displayName) : '…');
-  const photoURL = item.type === 'direct' ? info?.photoURL ?? null : null;
-  const color = stringToColor(name);
-  return (
-    <TouchableOpacity style={[S.inboxRow, bevel]} activeOpacity={0.76} onPress={onPress}>
-      <View style={[S.inboxAvatar, { backgroundColor: color }]}>
-        {photoURL ? <Image source={{ uri: photoURL }} style={S.inboxAvatarImg} />
-          : item.type === 'group' ? <Ionicons name="people" size={18} color="#fff" />
-          : <AppText style={S.inboxAvatarTxt} fixedColor>{getInitials(name)}</AppText>}
-      </View>
-      <View style={{ flex: 1 }}>
-        <View style={S.inboxTop}>
-          <AppText style={[S.inboxName, { color: textColor, fontFamily }]} numberOfLines={1}>{name}</AppText>
-          <AppText style={S.inboxTime}>{formatTime(item.timestamp)}</AppText>
-        </View>
-        <View style={S.inboxBottom}>
-          <AppText style={S.inboxPreview} numberOfLines={1}>{item.lastMessage || 'No messages'}</AppText>
-          {item.unreadCount > 0 && (
-            <View style={S.inboxBadge}><AppText style={S.inboxBadgeTxt} fixedColor>{item.unreadCount > 99 ? '99+' : item.unreadCount}</AppText></View>
-          )}
-        </View>
-        <View style={{ marginTop: 4 }}>
-          <ConversationStatusBadge status={item.status} assignedToName={item.assignedToName} />
-        </View>
-      </View>
-    </TouchableOpacity>
-  );
-});
-
-const INBOX_TABS: { id: InboxTab; label: string }[] = [
-  { id: 'all', label: 'All' }, { id: 'mine', label: 'Mine' },
-  { id: 'unassigned', label: 'Unassigned' }, { id: 'resolved', label: 'Resolved' },
-];
-
 export default function LinkedDevicesScreen() {
   const navigation = useNavigation();
   const insets     = useSafeAreaInsets();
@@ -310,10 +138,6 @@ export default function LinkedDevicesScreen() {
   const { bevel }  = useGlass();
 
   const { userId, ownerUid, isCompanion, displayName: myDisplayName } = useAuth();
-  const { isAdmin, isOwner, agents, agentsLoading } = useTeamInbox();
-  const { resolveName } = usePhoneBook();
-
-  const [screenTab, setScreenTab] = useState<ScreenTab>('devices');
 
   // Companion sees the list but can't act on it. Pass ownerUid so the list
   // loads — but every interactive element will be disabled.
@@ -422,94 +246,6 @@ export default function LinkedDevicesScreen() {
     setLinkMode('scan');
   }, [requestCameraPermission, isCompanion, noAuthority]);
 
-  // ── Team / Inbox state ───────────────────────────────────────────────────
-  const [inboxTab,    setInboxTab]    = useState<InboxTab>('all');
-  const [inboxSearch, setInboxSearch] = useState('');
-  const [agentModalVisible, setAgentModalVisible] = useState(false);
-  const [phoneInput,  setPhoneInput]  = useState('');
-  const [selRole,     setSelRole]     = useState<AgentRole>('agent');
-  const [agentLinking,setAgentLinking]= useState(false);
-  const [agentLinkErr,setAgentLinkErr]= useState<string | null>(null);
-  const [assignChatId,   setAssignChatId]   = useState<string | null>(null);
-  const [assignVisible,  setAssignVisible]  = useState(false);
-  const [assignStatus,   setAssignStatus]   = useState<any>('open');
-  const [assignTo,       setAssignTo]       = useState<string | null>(null);
-  const [assignToName,   setAssignToName]   = useState<string | null>(null);
-
-  const { conversations, loading: inboxLoading } = useInboxConversations(ownerUid, ownerUid, isAdmin);
-
-  const filteredConvs = useMemo(() => {
-    let list = conversations;
-    if (inboxTab === 'mine')       list = list.filter((c) => c.assignedTo === ownerUid && c.status !== 'resolved');
-    if (inboxTab === 'unassigned') list = list.filter((c) => !c.assignedTo && c.status !== 'resolved');
-    if (inboxTab === 'resolved')   list = list.filter((c) => c.status === 'resolved');
-    if (inboxSearch.trim()) {
-      const q = inboxSearch.toLowerCase();
-      list = list.filter((c) =>
-        c.groupName?.toLowerCase().includes(q) ||
-        c.lastMessage.toLowerCase().includes(q) ||
-        c.assignedToName?.toLowerCase().includes(q)
-      );
-    }
-    return list;
-  }, [conversations, inboxTab, ownerUid, inboxSearch]);
-
-  const inboxCounts = useMemo(() => ({
-    all:        conversations.filter((c) => c.status !== 'resolved').length,
-    mine:       conversations.filter((c) => c.assignedTo === ownerUid && c.status !== 'resolved').length,
-    unassigned: conversations.filter((c) => !c.assignedTo && c.status !== 'resolved').length,
-    resolved:   conversations.filter((c) => c.status === 'resolved').length,
-  }), [conversations, ownerUid]);
-
-  const handleAgentLink = useCallback(async () => {
-    if (isCompanion) { noAuthority('link team members'); return; }
-    if (!ownerUid || !userId || !phoneInput.trim()) return;
-    setAgentLinking(true); setAgentLinkErr(null);
-    let phone = phoneInput.trim();
-    if (!phone.startsWith('+')) phone = `+${phone}`;
-    const r = await addAgent(ownerUid, userId, phone, selRole);
-    setAgentLinking(false);
-    if (r.success) { setPhoneInput(''); setSelRole('agent'); setAgentModalVisible(false); }
-    else setAgentLinkErr(r.error ?? 'Failed to link account.');
-  }, [ownerUid, userId, phoneInput, selRole, isCompanion, noAuthority]);
-
-  const handleUnlink = useCallback((agent: TeamAgent) => {
-    if (isCompanion) { noAuthority('unlink team members'); return; }
-    Alert.alert('Unlink Account', `Remove ${resolveName(agent.phone, agent.displayName)} from the team?`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Unlink', style: 'destructive', onPress: async () => {
-          if (!ownerUid) return;
-          const r = await removeAgent(ownerUid, agent.uid);
-          if (!r.success) Alert.alert('Error', r.error ?? 'Failed to unlink.');
-        }},
-    ]);
-  }, [ownerUid, isCompanion, noAuthority, resolveName]);
-
-  const handleRoleChange = useCallback(async (agent: TeamAgent, role: AgentRole) => {
-    if (isCompanion) { noAuthority('change roles'); return; }
-    if (!ownerUid) return;
-    const r = await updateAgentRole(ownerUid, agent.uid, role);
-    if (!r.success) Alert.alert('Error', r.error ?? 'Failed to update role.');
-  }, [ownerUid, isCompanion, noAuthority]);
-
-  const openChat = useCallback((conv: InboxConversation) => {
-    if (conv.type === 'group') {
-      (navigation as any).navigate('Chat', {
-        chatId: conv.chatId, displayName: conv.groupName ?? 'Group', isGroup: true,
-      });
-      return;
-    }
-    // Direct chat: pass the counterpart's uid so ChatScreen can resolve the
-    // real contact name (phone book) instead of showing an empty placeholder.
-    const otherUserId = conv.members.find((m) => m !== ownerUid) ?? null;
-    (navigation as any).navigate('Chat', {
-      chatId: conv.chatId,
-      displayName: '',          // ChatScreen resolves the name from otherUserId
-      isGroup: false,
-      otherUserId,
-    });
-  }, [navigation, ownerUid]);
-
   return (
     <View style={S.root}>
       <AppBg />
@@ -519,57 +255,22 @@ export default function LinkedDevicesScreen() {
         <TouchableOpacity onPress={() => navigation.goBack()} style={S.backBtn}>
           <AppIcon name="chevron-back" size={26} color={COLORS.blue} fixedColor />
         </TouchableOpacity>
-        <AppText style={[S.title, { color: textColor, fontFamily }]}>Linked Devices & Team</AppText>
-        {screenTab === 'devices' ? (
-          isCompanion ? (
-            <View style={S.addBtnDisabled}>
-              <Ionicons name="lock-closed" size={18} color={COLORS.sub} />
-            </View>
-          ) : (
-            <TouchableOpacity style={S.addBtn} onPress={() => { setLinkError(null); setLinkMode('choose'); }}>
-              <LinearGradient colors={GRADIENTS.primary} style={S.addBtnGrad}>
-                <Ionicons name="add" size={20} color="#fff" />
-              </LinearGradient>
-            </TouchableOpacity>
-          )
-        ) : isAdmin && !isCompanion ? (
-          <TouchableOpacity style={S.addBtn} onPress={() => { setAgentLinkErr(null); setPhoneInput(''); setAgentModalVisible(true); }}>
+        <AppText style={[S.title, { color: textColor, fontFamily }]}>Linked Devices</AppText>
+        {isCompanion ? (
+          <View style={S.addBtnDisabled}>
+            <Ionicons name="lock-closed" size={18} color={COLORS.sub} />
+          </View>
+        ) : (
+          <TouchableOpacity style={S.addBtn} onPress={() => { setLinkError(null); setLinkMode('choose'); }}>
             <LinearGradient colors={GRADIENTS.primary} style={S.addBtnGrad}>
               <Ionicons name="add" size={20} color="#fff" />
             </LinearGradient>
           </TouchableOpacity>
-        ) : (
-          <View style={{ width: 36 }} />
         )}
       </View>
 
-      {/* Screen tabs */}
-      <View style={S.screenTabBar}>
-        {(['devices', 'team'] as ScreenTab[]).map((tab) => {
-          const active = screenTab === tab;
-          return (
-            <TouchableOpacity key={tab} style={[S.screenTab, active && S.screenTabActive]}
-              activeOpacity={0.75} onPress={() => setScreenTab(tab)}>
-              <AppIcon name={tab === 'devices' ? 'phone-portrait-outline' : 'people-outline'}
-                size={16} color={active ? '#fff' : COLORS.blue} fixedColor />
-              <AppText style={[S.screenTabLabel, active && S.screenTabLabelActive]} fixedColor={active}>
-                {tab === 'devices' ? 'Devices' : 'Team'}
-              </AppText>
-              {tab === 'team' && agents.length > 0 && (
-                <View style={[S.screenTabBadge, active && S.screenTabBadgeActive]}>
-                  <AppText style={[S.screenTabBadgeTxt, active && { color: COLORS.blue }]} fixedColor={!active}>
-                    {agents.length}
-                  </AppText>
-                </View>
-              )}
-            </TouchableOpacity>
-          );
-        })}
-      </View>
 
-      {/* ══ DEVICES TAB ═══════════════════════════════════════════════════════ */}
-      {screenTab === 'devices' && (
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={S.scroll}>
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={S.scroll}>
           {linkDone && (
             <View style={S.successBanner}>
               <Ionicons name="checkmark-circle" size={18} color={COLORS.green} />
@@ -665,105 +366,9 @@ export default function LinkedDevicesScreen() {
             </>
           )}
         </ScrollView>
-      )}
 
-      {/* ══ TEAM TAB ══════════════════════════════════════════════════════════ */}
-      {screenTab === 'team' && (
-        <View style={{ flex: 1 }}>
-          <View style={[S.infoBanner, { backgroundColor: 'rgba(255,255,255,0.6)', marginHorizontal: 14, marginTop: 12, marginBottom: 6 }]}>
-            <AppIcon name={isCompanion ? 'lock-closed-outline' : 'information-circle-outline'} size={18} color={COLORS.blue} fixedColor />
-            <AppText style={[S.infoBannerTxt, { color: FG.secondary }]}>
-              {isCompanion
-                ? 'Team members can only be managed from the primary device.'
-                : 'Linked accounts are other ChitChatBusiness users who can operate this inbox.' +
-                  (isOwner ? ' Tap + to link an account.' : '')}
-            </AppText>
-          </View>
 
-          <View style={S.teamAgentsSection}>
-            <View style={S.sectionRow}>
-              <AppText style={[S.sectionLabel, { color: FG.secondary }]}>LINKED ACCOUNTS ({agents.length})</AppText>
-            </View>
-            {agentsLoading ? (
-              <ActivityIndicator size="small" color={COLORS.blue} style={{ marginVertical: 16 }} />
-            ) : agents.length === 0 ? (
-              <View style={[S.emptyWrap, { paddingTop: 20, paddingBottom: 12 }]}>
-                <AppIcon name="people-outline" size={36} color={COLORS.sub} />
-                <AppText style={[S.emptyTxt, { color: FG.secondary }]}>No linked accounts yet</AppText>
-                {isOwner && !isCompanion && (
-                  <AppText style={[S.emptySubTxt, { color: FG.secondary }]}>Tap + to link a team member's account</AppText>
-                )}
-              </View>
-            ) : (
-              <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 240 }}
-                contentContainerStyle={{ paddingHorizontal: 14, gap: 8, paddingBottom: 4 }}>
-                {agents.map((agent) => (
-                  <AgentCard
-                    key={agent.uid}
-                    agent={agent}
-                    displayName={resolveName(agent.phone, agent.displayName)}
-                    isAdmin={isAdmin}
-                    ownerUid={ownerUid ?? ''}
-                    onRemove={handleUnlink}
-                    onRoleChange={handleRoleChange}
-                    textColor={textColor}
-                    fontFamily={fontFamily}
-                    readOnly={isCompanion}
-                  />
-                ))}
-              </ScrollView>
-            )}
-          </View>
 
-          <View style={S.inboxSection}>
-            <View style={S.inboxSectionHeader}>
-              <AppText style={[S.sectionLabel, { color: FG.secondary, marginBottom: 0 }]}>SHARED INBOX</AppText>
-              <View style={[S.inboxSearchWrap, bevel]}>
-                <AppIcon name="search" size={14} color={COLORS.sub} />
-                <TextInput style={[S.inboxSearchInput, { color: textColor }]} placeholder="Search…"
-                  placeholderTextColor={COLORS.sub} value={inboxSearch} onChangeText={setInboxSearch} />
-              </View>
-            </View>
-            <View style={S.inboxTabBar}>
-              {INBOX_TABS.map((tab) => {
-                const active = inboxTab === tab.id;
-                const count  = inboxCounts[tab.id];
-                return (
-                  <TouchableOpacity key={tab.id} style={S.inboxTabItem} onPress={() => setInboxTab(tab.id)} activeOpacity={0.75}>
-                    <View style={S.inboxTabContent}>
-                      <AppText style={[S.inboxTabLabel, active && S.inboxTabLabelActive]}>{tab.label}</AppText>
-                      {count > 0 && (
-                        <View style={[S.inboxTabBadge, active && S.inboxTabBadgeActive]}>
-                          <AppText style={[S.inboxTabBadgeTxt, active && S.inboxTabBadgeTxtActive]} fixedColor={active}>{count}</AppText>
-                        </View>
-                      )}
-                    </View>
-                    {active && <View style={S.inboxTabLine} />}
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            {inboxLoading ? (
-              <ActivityIndicator size="large" color={COLORS.blue} style={{ marginTop: 24 }} />
-            ) : filteredConvs.length === 0 ? (
-              <View style={S.inboxEmpty}>
-                <Ionicons name={inboxTab === 'resolved' ? 'checkmark-done-circle-outline' : 'chatbubbles-outline'} size={36} color={COLORS.sub} />
-                <AppText style={[S.inboxEmptyTxt, { color: textColor }]}>
-                  {inboxTab === 'all' ? 'No conversations yet' : inboxTab === 'mine' ? 'Nothing assigned to you' : inboxTab === 'unassigned' ? 'All caught up!' : 'No resolved conversations'}
-                </AppText>
-              </View>
-            ) : (
-              <FlatList data={filteredConvs} keyExtractor={(c) => c.chatId}
-                contentContainerStyle={S.inboxList} showsVerticalScrollIndicator={false}
-                ItemSeparatorComponent={() => <View style={{ height: 6 }} />}
-                renderItem={({ item }) => (
-                  <InboxRow item={item} ownerUid={ownerUid ?? ''} onPress={() => openChat(item)}
-                    bevel={bevel} textColor={textColor} fontFamily={fontFamily} resolveName={resolveName} />
-                )} />
-            )}
-          </View>
-        </View>
-      )}
 
       {/* ══ MODALS ════════════════════════════════════════════════════════════ */}
 
@@ -953,78 +558,6 @@ export default function LinkedDevicesScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
-      {/* Link account by phone (team) */}
-      <Modal visible={agentModalVisible} transparent animationType="slide" onRequestClose={() => setAgentModalVisible(false)}>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-          <TouchableOpacity style={S.sheetBackdrop} activeOpacity={1} onPress={() => setAgentModalVisible(false)} />
-          <View style={[S.linkSheet, { backgroundColor: 'rgba(255,255,255,0.97)' }]}>
-            <View style={S.sheetHandle} />
-            <View style={S.sheetHeaderRow}>
-              <View style={{ width: 36 }} />
-              <AppText style={S.sheetTitle}>Link Account</AppText>
-              <TouchableOpacity onPress={() => setAgentModalVisible(false)} style={{ width: 36, alignItems: 'flex-end' }}>
-                <AppIcon name="close" size={20} color={COLORS.sub} />
-              </TouchableOpacity>
-            </View>
-            <ScrollView contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 44, paddingTop: 4 }} keyboardShouldPersistTaps="handled">
-              <AppText style={S.fieldLabel}>Phone Number</AppText>
-              <View style={[S.codeInputWrap, bevel]}>
-                <AppIcon name="call-outline" size={18} color={COLORS.sub} />
-                <TextInput style={[S.codeInputField, { color: textColor }]} placeholder="+27 82 123 4567"
-                  placeholderTextColor={COLORS.sub} value={phoneInput} onChangeText={setPhoneInput}
-                  keyboardType="phone-pad" autoFocus returnKeyType="done" onSubmitEditing={handleAgentLink} />
-              </View>
-              <AppText style={[S.fieldHint, { marginBottom: 16 }]}>
-                Enter the team member's phone number as registered in ChitChatBusiness.
-              </AppText>
-              <AppText style={[S.fieldLabel, { marginTop: 4 }]}>Role</AppText>
-              <View style={{ flexDirection: 'row', gap: 10, marginBottom: 16 }}>
-                {(['agent', 'admin'] as AgentRole[]).map((r) => (
-                  <TouchableOpacity key={r} style={[S.roleOption, bevel, selRole === r && S.roleOptionActive]}
-                    activeOpacity={0.75} onPress={() => setSelRole(r)}>
-                    <Ionicons name={r === 'admin' ? 'shield-outline' : 'person-outline'} size={20}
-                      color={selRole === r ? '#fff' : COLORS.blue} />
-                    <AppText style={[S.roleOptionTxt, selRole === r && S.roleOptionTxtActive]} fixedColor={selRole === r}>
-                      {r === 'admin' ? 'Admin' : 'Agent'}
-                    </AppText>
-                  </TouchableOpacity>
-                ))}
-              </View>
-              {agentLinkErr && (
-                <View style={S.linkErrorBanner}>
-                  <Ionicons name="alert-circle" size={16} color={COLORS.missed} />
-                  <AppText style={S.linkErrorTxt} fixedColor>{agentLinkErr}</AppText>
-                </View>
-              )}
-              <TouchableOpacity style={[S.linkSubmitBtn, (!phoneInput.trim() || agentLinking) && { opacity: 0.5 }]}
-                activeOpacity={0.85} disabled={!phoneInput.trim() || agentLinking} onPress={handleAgentLink}>
-                <LinearGradient colors={GRADIENTS.primary} style={S.linkSubmitGrad}>
-                  {agentLinking
-                    ? <ActivityIndicator size="small" color="#fff" />
-                    : <><Ionicons name="link-outline" size={18} color="#fff" />
-                       <AppText style={S.linkSubmitTxt} fixedColor>Link Account</AppText></>}
-                </LinearGradient>
-              </TouchableOpacity>
-            </ScrollView>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* Assignment sheet */}
-      {assignChatId && (
-        <AssignmentSheet
-          visible={assignVisible}
-          onClose={() => { setAssignVisible(false); setAssignChatId(null); }}
-          chatId={assignChatId}
-          currentStatus={assignStatus}
-          assignedTo={assignTo}
-          assignedToName={assignToName}
-          agents={agents}
-          actorUid={ownerUid ?? ''}
-          actorName={myDisplayName || 'Agent'}
-          isAdmin={isAdmin}
-        />
-      )}
     </View>
   );
 }
@@ -1038,14 +571,6 @@ const S = StyleSheet.create({
   addBtnGrad: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', ...SHADOW.button },
   addBtnDisabled: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.06)' },
 
-  screenTabBar: { flexDirection: 'row', marginHorizontal: 14, marginBottom: 4, backgroundColor: 'rgba(255,255,255,0.55)', borderRadius: RADIUS.full, padding: 4, gap: 4 },
-  screenTab: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 8, borderRadius: RADIUS.full },
-  screenTabActive: { backgroundColor: COLORS.blue, ...SHADOW.button },
-  screenTabLabel: { fontSize: 13, fontWeight: '600', color: COLORS.blue },
-  screenTabLabelActive: { color: '#fff' },
-  screenTabBadge: { paddingHorizontal: 5, paddingVertical: 1, borderRadius: RADIUS.full, backgroundColor: 'rgba(30,156,240,0.15)', minWidth: 18, alignItems: 'center' },
-  screenTabBadgeActive: { backgroundColor: 'rgba(255,255,255,0.25)' },
-  screenTabBadgeTxt: { fontSize: 10, fontWeight: '700', color: COLORS.blue },
 
   scroll: { paddingHorizontal: 14, paddingTop: 10, paddingBottom: 48, gap: 8 },
   infoBanner: { flexDirection: 'row', gap: 10, alignItems: 'flex-start', borderRadius: RADIUS.lg, paddingHorizontal: 14, paddingVertical: 12, marginBottom: 4 },
@@ -1090,53 +615,6 @@ const S = StyleSheet.create({
   currentBadgeTxt: { fontSize: 10, fontWeight: '700', color: '#fff' },
   logoutBtn: { padding: 4, alignSelf: 'center' },
 
-  agentAvatar: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  agentAvatarImg: { width: 48, height: 48, borderRadius: 24 },
-  agentAvatarTxt: { fontSize: 16, fontWeight: '700', color: '#fff' },
-  rolePill: { paddingHorizontal: 7, paddingVertical: 2, borderRadius: RADIUS.full },
-  roleAdmin: { backgroundColor: 'rgba(30,156,240,0.15)' },
-  roleAgent: { backgroundColor: 'rgba(90,127,160,0.12)' },
-  roleTxt: { fontSize: 10, fontWeight: '700' },
-  roleTxtAdmin: { color: COLORS.blue },
-  roleTxtAgent: { color: COLORS.sub },
-  agentMenuCard: { position: 'absolute', right: 20, top: '28%', width: 210, borderRadius: RADIUS.lg, paddingVertical: 6, backgroundColor: 'rgba(255,255,255,0.97)', ...SHADOW.card },
-  menuBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.30)' },
-  agentMenuName: { fontSize: 13, fontWeight: '700', color: COLORS.sub, paddingHorizontal: 14, paddingVertical: 6 },
-  agentMenuDivider: { height: 1, backgroundColor: COLORS.border, marginHorizontal: 10, marginBottom: 4 },
-  agentMenuItem: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 11 },
-  agentMenuIcon: { width: 30, height: 30, borderRadius: 15, backgroundColor: 'rgba(30,156,240,0.10)', alignItems: 'center', justifyContent: 'center' },
-  agentMenuIconDanger: { backgroundColor: 'rgba(232,67,67,0.10)' },
-  agentMenuLabel: { fontSize: 14, fontWeight: '500', color: COLORS.text },
-
-  teamAgentsSection: { borderBottomWidth: 1, borderBottomColor: COLORS.border, paddingBottom: 8 },
-  inboxSection: { flex: 1 },
-  inboxSectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingTop: 6, paddingBottom: 4 },
-  inboxSearchWrap: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 6, borderRadius: RADIUS.full, minWidth: 100 },
-  inboxSearchInput: { fontSize: 13, minWidth: 80 },
-  inboxTabBar: { flexDirection: 'row', paddingHorizontal: 10, marginBottom: 4 },
-  inboxTabItem: { flex: 1, alignItems: 'center', paddingVertical: 6 },
-  inboxTabContent: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  inboxTabLabel: { fontSize: 12, fontWeight: '500', color: COLORS.sub },
-  inboxTabLabelActive: { fontWeight: '700', color: COLORS.blue },
-  inboxTabBadge: { paddingHorizontal: 4, paddingVertical: 1, borderRadius: RADIUS.full, backgroundColor: 'rgba(90,127,160,0.15)', minWidth: 16, alignItems: 'center' },
-  inboxTabBadgeActive: { backgroundColor: COLORS.blue },
-  inboxTabBadgeTxt: { fontSize: 10, fontWeight: '700', color: COLORS.sub },
-  inboxTabBadgeTxtActive: { color: '#fff' },
-  inboxTabLine: { position: 'absolute', bottom: -1, left: '10%', right: '10%', height: 2, borderRadius: 1, backgroundColor: COLORS.blue },
-  inboxList: { paddingHorizontal: 12, paddingBottom: 20, paddingTop: 2 },
-  inboxRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderRadius: RADIUS.lg, paddingHorizontal: 12, paddingVertical: 10 },
-  inboxAvatar: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', marginTop: 2, flexShrink: 0 },
-  inboxAvatarImg: { width: 42, height: 42, borderRadius: 21 },
-  inboxAvatarTxt: { fontSize: 14, fontWeight: '700', color: '#fff' },
-  inboxTop: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  inboxName: { flex: 1, fontSize: 14, fontWeight: '700', color: COLORS.text },
-  inboxTime: { fontSize: 11, color: COLORS.sub },
-  inboxBottom: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  inboxPreview: { flex: 1, fontSize: 12, color: COLORS.sub },
-  inboxBadge: { backgroundColor: COLORS.blue, borderRadius: 9, minWidth: 18, height: 18, paddingHorizontal: 4, alignItems: 'center', justifyContent: 'center' },
-  inboxBadgeTxt: { color: '#fff', fontSize: 10, fontWeight: '700' },
-  inboxEmpty: { alignItems: 'center', justifyContent: 'center', paddingVertical: 32, gap: 10 },
-  inboxEmptyTxt: { fontSize: 15, fontWeight: '600', color: COLORS.text },
 
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.50)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28 },
   modalCard: { width: '100%', borderRadius: 20, borderWidth: 1, alignItems: 'center', padding: 28, gap: 12, overflow: 'hidden', ...SHADOW.glow },
@@ -1180,8 +658,4 @@ const S = StyleSheet.create({
   linkSubmitBtn: { marginTop: 20 },
   linkSubmitGrad: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, borderRadius: RADIUS.full, ...SHADOW.button },
   linkSubmitTxt: { fontSize: 16, fontWeight: '700', color: '#fff' },
-  roleOption: { flex: 1, alignItems: 'center', gap: 4, borderRadius: RADIUS.md, paddingVertical: 14 },
-  roleOptionActive: { backgroundColor: COLORS.blue },
-  roleOptionTxt: { fontSize: 14, fontWeight: '700', color: COLORS.blue },
-  roleOptionTxtActive: { color: '#fff' },
 });
