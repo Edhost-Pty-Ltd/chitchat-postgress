@@ -13,6 +13,7 @@ import {
   listOwnStatuses,
   listVisibleStatuses,
   recordView,
+  canViewStatus,
   deleteStatus,
   getStatusOwner,
 } from '../../db/repositories/statuses.js';
@@ -97,6 +98,13 @@ export async function registerStatusRoutes(app: FastifyInstance): Promise<void> 
       // A companion browsing statuses must not mark them viewed on the owner's
       // behalf (old useStatus skipped markAsViewed on companions).
       if (request.identity!.isCompanion) return { ok: true, skipped: true };
+      // Visibility guard: only record a view (and notify the owner) if this
+      // status is actually visible to the viewer. Without this a user could
+      // mark themselves as a viewer of a private status and inject a forged
+      // "viewed your status" notification to the owner.
+      if (!(await canViewStatus(viewerId, request.params.id))) {
+        return { ok: true, skipped: true };
+      }
       const ownerId = await recordView(request.params.id, viewerId);
       if (ownerId && ownerId !== viewerId) {
         emitToUser(ownerId, 'status:viewed', { statusId: request.params.id, viewerId });

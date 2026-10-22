@@ -1,7 +1,7 @@
 // ─── Context: Call ───────────────────────────────────────────────────────────
 // Global call state management for WebRTC calls
 
-import React, { createContext, useContext, useState, useCallback, useRef, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useCallback, useRef, useMemo, ReactNode } from 'react';
 import type { CallState, IncomingCallData, CallStatus } from '../types/call';
 import { useWebRTC, type NetworkQuality, type WebRTCHandlers } from '../hooks/useWebRTC';
 import type { MediaStream } from '../utils/webrtc-platform';
@@ -133,7 +133,12 @@ export function CallProvider({ children }: { children: ReactNode }) {
     isCallerRef.current = isCaller;
   }, []);
 
-  const value: CallContextValue = {
+  // Memoize so the provider value only changes when call state or the WebRTC
+  // instance's reactive fields change — not on every unrelated re-render. The
+  // set* callbacks are already stable (useCallback), and the webrtc.* methods
+  // are stable across renders, so only state + the stream/connection fields
+  // drive a new value identity.
+  const value = useMemo<CallContextValue>(() => ({
     ...state,
     setActiveCallId,
     setIncomingCall,
@@ -165,7 +170,17 @@ export function CallProvider({ children }: { children: ReactNode }) {
     stopNetworkMonitoring: webrtc.stopNetworkMonitoring,
     cleanup: webrtc.cleanup,
     getPeerConnection: webrtc.getPeerConnection,
-  };
+  }), [
+    state,
+    setActiveCallId, setIncomingCall, setCallStatus, setMuted, setSpeakerOn,
+    setCallDuration, incrementCallDuration, resetCallState, setIsCaller,
+    webrtc.localStream, webrtc.remoteStream, webrtc.streamVersion,
+    webrtc.connectionState, webrtc.networkQuality,
+    webrtc.initializePeerConnection, webrtc.createOffer, webrtc.createAnswer,
+    webrtc.setRemoteAnswer, webrtc.addIceCandidate, webrtc.toggleMute,
+    webrtc.toggleVideo, webrtc.switchCamera, webrtc.startNetworkMonitoring,
+    webrtc.stopNetworkMonitoring, webrtc.cleanup, webrtc.getPeerConnection,
+  ]);
 
   return <CallContext.Provider value={value}>{children}</CallContext.Provider>;
 }

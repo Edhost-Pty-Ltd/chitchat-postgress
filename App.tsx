@@ -19,6 +19,7 @@ import ToastOverlay from './src/components/ToastNotification';
 import { FloatingCallManager } from './src/components/FloatingCallManager';
 import { BiometricGate } from './src/components/BiometricGate';
 import { usePushNotifications } from './src/hooks/usePushNotifications';
+import { initializeWebRTC } from './src/utils/webrtc-platform';
 
 // Disable native screens on web to avoid touch/interaction issues
 if (Platform.OS === 'web') {
@@ -67,6 +68,13 @@ function PushNotificationManager() {
 }
 
 export default function App() {
+  // Initialize WebRTC globals once at startup. Required for call AUDIO — it
+  // wires up @livekit/react-native-webrtc's native audio device module. Deferred
+  // to an effect so the native bridge is ready before the require() runs.
+  useEffect(() => {
+    initializeWebRTC();
+  }, []);
+
   // Global handler for unhandled promise rejections
   useEffect(() => {
     if (Platform.OS === 'web') {

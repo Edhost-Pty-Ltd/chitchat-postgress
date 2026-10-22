@@ -49,44 +49,32 @@ export function IncomingCallManager() {
     console.log('[IncomingCallManager] Answering call:', incomingCall.callId, 'Type:', incomingCall.type);
 
     try {
-      // Get the full call document to retrieve the offer
+      // Verify the offer is already buffered (useIncomingCalls joined the room
+      // and set up the signal listener, so it should be present).
       const callDoc = await SignalingService.getCall(incomingCall.callId);
-      
       if (!callDoc || !callDoc.offer) {
         console.error('[IncomingCallManager] Call document or offer not found');
         setIncomingCall(null);
         return;
       }
 
-      // Answer the call with the correct type - wait for completion before navigation
-      const success = await incomingCallAnswer.answerCall(
-        incomingCall.callId, 
-        callDoc.offer,
-        incomingCall.type // Pass the call type (audio or video)
-      );
-
-      if (success) {
-        // Small delay to ensure answer is fully processed
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-        // Navigate to appropriate call screen based on type
-        if (incomingCall.type === 'video') {
-          navigation.navigate('VideoCall', {
-            callId: incomingCall.callId,
-            isOutgoing: false,
-            otherParty: incomingCall.caller,
-          });
-        } else {
-          navigation.navigate('AudioCall', {
-            callId: incomingCall.callId,
-            isOutgoing: false,
-            otherParty: incomingCall.caller,
-          });
-        }
-
-        // Clear incoming call from context after navigation starts
-        setTimeout(() => setIncomingCall(null), 200);
+      // Navigate to the call screen — it handles WebRTC setup (answerCall) to
+      // avoid creating two peer connections when this manager also called it.
+      if (incomingCall.type === 'video') {
+        navigation.navigate('VideoCall', {
+          callId: incomingCall.callId,
+          isOutgoing: false,
+          otherParty: incomingCall.caller,
+        });
+      } else {
+        navigation.navigate('AudioCall', {
+          callId: incomingCall.callId,
+          isOutgoing: false,
+          otherParty: incomingCall.caller,
+        });
       }
+
+      setTimeout(() => setIncomingCall(null), 200);
     } catch (error) {
       console.error('[IncomingCallManager] Error answering call:', error);
       setIncomingCall(null);

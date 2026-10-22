@@ -77,10 +77,15 @@ export async function registerMeRoutes(app: FastifyInstance): Promise<void> {
         isBlocked(targetId, viewerId),
       ]);
       const photoHidden = privacy.profilePhoto === 'Nobody' || blockedMe;
+      // Don't hand the phone number to someone the target has blocked. (The app
+      // still needs it for contact matching between users who aren't blocked,
+      // so we only withhold it on the block relationship — the clear abuse
+      // vector for number harvesting.)
+      const phoneHidden = blockedMe;
 
       return {
         id: row.id,
-        phoneNumber: row.phone_number,
+        phoneNumber: phoneHidden ? null : row.phone_number,
         displayName: row.display_name,
         about: row.about,
         avatarObjectKey: photoHidden ? null : row.avatar_object_key,

@@ -3,7 +3,7 @@
 // only one voice note plays at a time. Handles audio mode configuration,
 // progress tracking, interruption, and cleanup.
 //
-// Uses expo-audio (SDK 56).
+// Uses expo-audio (SDK 57).
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from 'expo-audio';
@@ -45,20 +45,30 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
   const [state, setState] = useState<PlaybackState>(INITIAL_STATE);
   const [currentSource, setCurrentSource] = useState<string | null>(null);
 
-  // Create a player with current source
+  // Player is recreated by expo-audio whenever currentSource changes.
   const player = useAudioPlayer(currentSource);
   const playerStatus = useAudioPlayerStatus(player);
 
   const activeMessageIdRef = useRef<string | null>(null);
-  const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const wasPlayingRef = useRef(false);
+  const loadingTimeoutRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wasPlayingRef      = useRef(false);
 
-  // ── Sync player status to state ─────────────────────────────────────────
+  // ── Helpers ─────────────────────────────────────────────────────────────
+
+  function clearLoadingTimeout() {
+    if (loadingTimeoutRef.current) {
+      clearTimeout(loadingTimeoutRef.current);
+      loadingTimeoutRef.current = null;
+    }
+  }
+
+  // ── Sync player status → React state ────────────────────────────────────
   useEffect(() => {
-    // Only process status updates when we have an active message
+    // Only process status updates when we have an active message.
     if (!activeMessageIdRef.current) return;
 
     if (playerStatus.error) {
+      clearLoadingTimeout();
       setState((prev) => ({
         ...prev,
         status: 'error',
@@ -69,25 +79,27 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
     }
 
     if (playerStatus.didJustFinish) {
-      setState((prev) => ({
-        ...prev,
-        status: 'idle',
-        positionMs: 0,
-      }));
+      clearLoadingTimeout();
+      setState((prev) => ({ ...prev, status: 'idle', positionMs: 0 }));
       wasPlayingRef.current = false;
       return;
     }
 
     if (playerStatus.playing) {
+      // Audio has actually started — this is the authoritative transition to
+      // 'playing'. Clear the loading timeout here, not before.
+      clearLoadingTimeout();
       wasPlayingRef.current = true;
       setState((prev) => ({
         ...prev,
         status: 'playing',
         positionMs: Math.round(playerStatus.currentTime * 1000),
-        durationMs: playerStatus.duration > 0 ? Math.round(playerStatus.duration * 1000) : prev.durationMs,
+        durationMs: playerStatus.duration > 0
+          ? Math.round(playerStatus.duration * 1000)
+          : prev.durationMs,
       }));
     } else if (playerStatus.isLoaded && wasPlayingRef.current && !playerStatus.isBuffering) {
-      // Audio was interrupted externally (phone call etc.)
+      // Audio was interrupted externally (phone call, headphone unplug, etc.)
       wasPlayingRef.current = false;
       setState((prev) => {
         if (prev.status === 'playing') {
@@ -103,67 +115,53 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
       setState((prev) => ({
         ...prev,
         positionMs: Math.round(playerStatus.currentTime * 1000),
-        durationMs: playerStatus.duration > 0 ? Math.round(playerStatus.duration * 1000) : prev.durationMs,
+        durationMs: playerStatus.duration > 0
+          ? Math.round(playerStatus.duration * 1000)
+          : prev.durationMs,
       }));
     }
   }, [playerStatus]);
 
-  // ── Auto-play when source is set ────────────────────────────────────────
+  // ── Auto-play when source changes ────────────────────────────────────────
+  // expo-audio creates a new player instance when currentSource changes.
+  // We call play() here (not inside the play() callback) because the new
+  // player reference is only available after the re-render triggered by
+  // setCurrentSource().
   useEffect(() => {
-    if (currentSource && player && activeMessageIdRef.current) {
-      // Source was set, start playing
-      try {
-        player.play();
-      } catch (err) {
-        console.error('[useVoicePlayer] Auto-play error:', err);
-      }
+    if (!currentSource || !player || !activeMessageIdRef.current) return;
+    try {
+      player.play();
+    } catch (err) {
+      console.error('[useVoicePlayer] Auto-play error:', err);
+      clearLoadingTimeout();
+      const id = activeMessageIdRef.current;
+      activeMessageIdRef.current = null;
+      setState((prev) =>
+        prev.activeMessageId === id
+          ? { ...prev, status: 'error', error: 'Failed to start playback' }
+          : prev,
+      );
     }
   }, [currentSource, player]);
 
   // ── Cleanup on unmount ──────────────────────────────────────────────────
   useEffect(() => {
-    return () => {
-      clearLoadingTimeout();
-    };
+    return () => { clearLoadingTimeout(); };
   }, []);
-
-  // ── Helpers ─────────────────────────────────────────────────────────────
-
-  function clearLoadingTimeout() {
-    if (loadingTimeoutRef.current) {
-      clearTimeout(loadingTimeoutRef.current);
-      loadingTimeoutRef.current = null;
-    }
-  }
 
   // ── Play ────────────────────────────────────────────────────────────────
 
   const play = useCallback(async (voiceUrl: string, messageId: string, durationMs: number) => {
-    console.log('[useVoicePlayer] play() called:', {
-      voiceUrl,
-      messageId,
-      durationMs,
-      currentSource,
-      isLocal: voiceUrl.startsWith('file://'),
-      isFirebase: voiceUrl.startsWith('https://firebasestorage'),
-    });
-    
-    // If this is a new voice note (different URL), stop the current one first
+    console.log('[useVoicePlayer] play():', { messageId, isLocal: voiceUrl.startsWith('file://') });
+
+    // Stop current player if switching to a different voice note.
     if (currentSource && currentSource !== voiceUrl) {
-      try {
-        if (player) {
-          player.pause();
-        }
-      } catch (err) {
-        // Ignore errors from pausing - player might not be loaded
-        console.warn('[useVoicePlayer] Pause before new play (expected):', err);
-      }
+      try { player?.pause(); } catch { /* ignore — old player might be unloaded */ }
     }
-    
+
     clearLoadingTimeout();
     activeMessageIdRef.current = messageId;
 
-    // Set loading state
     setState({
       activeMessageId: messageId,
       status: 'loading',
@@ -172,11 +170,15 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
       error: null,
     });
 
-    // Configure audio mode for playback
+    // FIX 1: Always include allowsRecording: false.
+    // The voice recorder sets allowsRecording: true for iOS to use the recording
+    // audio session. Without resetting it here, iOS keeps routing audio to the
+    // earpiece (recording mode) — the speaker produces no sound during playback.
     try {
       await setAudioModeAsync({
         playsInSilentMode: true,
         interruptionMode: 'duckOthers',
+        allowsRecording: false,
       });
     } catch {
       setState((prev) => ({
@@ -187,7 +189,8 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
       return;
     }
 
-    // Set up loading timeout
+    // Arm the loading timeout. It is cleared when playerStatus.playing fires
+    // (audio actually started) or when an error occurs.
     loadingTimeoutRef.current = setTimeout(() => {
       setState((prev) => ({
         ...prev,
@@ -198,32 +201,23 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
     }, LOADING_TIMEOUT_MS);
 
     try {
-      // If same source, just seek to start and play
       if (currentSource === voiceUrl && player) {
-        console.log('[useVoicePlayer] Replaying same audio, seeking to start');
+        // Replay the same note: seek to start and play immediately.
         player.seekTo(0);
         player.play();
         clearLoadingTimeout();
         wasPlayingRef.current = true;
-        setState((prev) => ({
-          ...prev,
-          status: 'playing',
-        }));
+        setState((prev) => ({ ...prev, status: 'playing' }));
       } else {
-        // Different source - update source to trigger player recreation
-        console.log('[useVoicePlayer] Loading new audio source');
+        // FIX 2: New source — set state and let the auto-play effect call
+        // player.play() once expo-audio has created the new player instance.
+        // Do NOT prematurely set status:'playing' or clear the timeout here;
+        // the playerStatus sync effect handles both when playing actually starts.
         setCurrentSource(voiceUrl);
-        clearLoadingTimeout();
-        wasPlayingRef.current = true;
-        setState((prev) => ({
-          ...prev,
-          status: 'playing',
-        }));
       }
     } catch (error: any) {
       clearLoadingTimeout();
       activeMessageIdRef.current = null;
-
       console.error('[useVoicePlayer] Play error:', error);
       setState((prev) => ({
         ...prev,
@@ -237,14 +231,9 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
 
   const pause = useCallback(async () => {
     try {
-      if (player) {
-        player.pause();
-        wasPlayingRef.current = false;
-        setState((prev) => ({
-          ...prev,
-          status: 'paused',
-        }));
-      }
+      player?.pause();
+      wasPlayingRef.current = false;
+      setState((prev) => ({ ...prev, status: 'paused' }));
     } catch (err) {
       console.error('[useVoicePlayer] Pause error:', err);
     }
@@ -254,37 +243,29 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
 
   const resume = useCallback(async () => {
     try {
-      if (player) {
-        player.play();
-        wasPlayingRef.current = true;
-        setState((prev) => ({
-          ...prev,
-          status: 'playing',
-        }));
-      }
+      player?.play();
+      wasPlayingRef.current = true;
+      setState((prev) => ({ ...prev, status: 'playing' }));
     } catch (err) {
       console.error('[useVoicePlayer] Resume error:', err);
     }
   }, [player]);
 
-  // ── Stop (public) ──────────────────────────────────────────────────────
+  // ── Stop ────────────────────────────────────────────────────────────────
 
   const stop = useCallback(async () => {
     try {
       clearLoadingTimeout();
       wasPlayingRef.current = false;
       activeMessageIdRef.current = null;
-      
       if (player && currentSource) {
         player.pause();
         player.seekTo(0);
       }
-      
-      // Don't set currentSource to null - keep it so replay works
+      // Don't clear currentSource — keeping it lets replay work without refetch.
       setState(INITIAL_STATE);
     } catch (err) {
       console.error('[useVoicePlayer] Stop error:', err);
-      // Reset state even if stop fails
       setState(INITIAL_STATE);
     }
   }, [player, currentSource]);
@@ -294,12 +275,8 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
   const seek = useCallback(async (positionMs: number) => {
     try {
       if (player && activeMessageIdRef.current) {
-        const positionSeconds = positionMs / 1000;
-        player.seekTo(positionSeconds);
-        setState((prev) => ({
-          ...prev,
-          positionMs,
-        }));
+        player.seekTo(positionMs / 1000);
+        setState((prev) => ({ ...prev, positionMs }));
       }
     } catch (err) {
       console.error('[useVoicePlayer] Seek error:', err);

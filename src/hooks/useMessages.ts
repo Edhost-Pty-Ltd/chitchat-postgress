@@ -234,10 +234,20 @@ function mapBackendMessage(m: BackendMessage, urls: Record<string, string>): Fir
   };
 }
 
+// How many messages to request per page. The first page loads instantly; older
+// pages are fetched on demand when the user scrolls toward the top.
+const MESSAGE_PAGE_SIZE = 30;
+
 export function useMessages(chatId: string | null, ownerUid: string | null) {
   const [messages, setMessages] = useState<FireMessage[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
+  // Pagination: cursor for the next (older) page, and whether more remain.
+  const [loadingMore, setLoadingMore] = useState(false);
+  const nextCursorRef = useRef<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  // Guard against overlapping loadOlder calls (onEndReached can fire rapidly).
+  const loadingMoreRef = useRef(false);
   // This user's server-side "cleared" cutoff (ms): messages at/before it are
   // hidden for this user only. Does not affect the other members.
   const [clearedAt, setClearedAt] = useState<number>(0);
@@ -263,7 +273,14 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
   }, [chatId]);
 
   // The cutoff belongs to one chat; it is re-read from the server on load.
-  useEffect(() => { setClearedAt(0); }, [chatId]);
+  // Also reset pagination state so a loadOlder fired right after a chat switch
+  // can't page the PREVIOUS chat's cursor into the new chat's list.
+  useEffect(() => {
+    setClearedAt(0);
+    nextCursorRef.current = null;
+    loadingMoreRef.current = false;
+    setHasMore(false);
+  }, [chatId]);
 
   // Apply the server's cutoff: hide everything at/before it now and prune the
   // local cache so a later reload can't bring those messages back.
@@ -288,6 +305,40 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     setMessages(merged);
   }, []);
 
+  // Fetch the next (older) page of messages and merge it into the list. Called
+  // when the user scrolls toward the top. No-op when there's nothing older or a
+  // fetch is already in flight.
+  const loadOlder = useCallback(async () => {
+    const activeChatId = chatIdRef.current;
+    const cursor = nextCursorRef.current;
+    if (!activeChatId || !cursor || loadingMoreRef.current) return;
+
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const res = await endpoints.listMessages(activeChatId, { cursor, limit: MESSAGE_PAGE_SIZE });
+      if (activeChatId !== chatIdRef.current) return; // chat switched mid-fetch
+      if (!res.ok) return;
+
+      nextCursorRef.current = res.data.nextCursor;
+      setHasMore(res.data.nextCursor != null);
+
+      const urls = await mediaService.getDownloadUrls(collectObjectKeys(res.data.messages));
+      if (activeChatId !== chatIdRef.current) return;
+      const mapped = res.data.messages
+        .filter((m) => !m.deletedForEveryone)
+        .map((m) => mapBackendMessage(m, urls));
+      if (mapped.length > 0) {
+        await mergeLocalMessages(activeChatId, mapped).catch(() => {});
+        const merged = await loadLocalMessages(activeChatId);
+        if (activeChatId === chatIdRef.current) setMessages(merged);
+      }
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }
+  }, []);
+
   // Initial load + live socket updates.
   useEffect(() => {
     if (!chatId) return;
@@ -299,13 +350,17 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
       // the cutoff itself is only needed to prune the local cache, which may
       // predate a clear made on another device.
       const [res, cutoff] = await Promise.all([
-        endpoints.listMessages(chatId),
+        endpoints.listMessages(chatId, { limit: MESSAGE_PAGE_SIZE }),
         fetchClearedAt(chatId),
       ]);
       if (!active) return;
       if (cutoff > 0) await applyClearedAt(chatId, cutoff);
       if (!active) return;
       if (res.ok) {
+        // Remember where the next (older) page starts.
+        nextCursorRef.current = res.data.nextCursor;
+        setHasMore(res.data.nextCursor != null);
+
         const urls = await mediaService.getDownloadUrls(collectObjectKeys(res.data.messages));
         if (!active) return;
         const mapped = res.data.messages
@@ -358,6 +413,53 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
       if (chatIdRef.current) removeLocalMessage(chatIdRef.current, p.messageId).catch(() => {});
     };
 
+    // A recipient acknowledged delivery of one of OUR messages. The server
+    // emits { chatId, messageId, userId }; add that user to the message's
+    // deliveredTo list so the tick advances to the grey double-tick live.
+    const onDelivered = (payload: unknown) => {
+      const p = payload as { chatId?: string; messageId?: string; userId?: string };
+      if (!p?.messageId || !p.userId || p.chatId !== chatIdRef.current) return;
+      setMessages((prev) => {
+        let changed = false;
+        const next = prev.map((m) => {
+          if (m.messageId !== p.messageId) return m;
+          const delivered = m.deliveredTo ?? [];
+          if (delivered.includes(p.userId!)) return m;
+          changed = true;
+          return { ...m, deliveredTo: [...delivered, p.userId!] };
+        });
+        if (changed && chatIdRef.current) {
+          const updated = next.find((m) => m.messageId === p.messageId);
+          if (updated) mergeLocalMessages(chatIdRef.current, [updated]).catch(() => {});
+        }
+        return changed ? next : prev;
+      });
+    };
+
+    // A recipient read one or more of OUR messages. The server emits
+    // { chatId, messageIds, userId }; add that user to each message's readBy
+    // list so the tick turns blue live.
+    const onRead = (payload: unknown) => {
+      const p = payload as { chatId?: string; messageIds?: string[]; userId?: string };
+      if (!Array.isArray(p?.messageIds) || !p.userId || p.chatId !== chatIdRef.current) return;
+      const ids = new Set(p.messageIds);
+      setMessages((prev) => {
+        const touched: FireMessage[] = [];
+        const next = prev.map((m) => {
+          if (!ids.has(m.messageId)) return m;
+          const read = m.readBy ?? [];
+          if (read.includes(p.userId!)) return m;
+          const updated = { ...m, readBy: [...read, p.userId!] };
+          touched.push(updated);
+          return updated;
+        });
+        if (touched.length > 0 && chatIdRef.current) {
+          mergeLocalMessages(chatIdRef.current, touched).catch(() => {});
+        }
+        return touched.length > 0 ? next : prev;
+      });
+    };
+
     const onEditedOrPoll = (payload: unknown) => {
       const message = (payload as { message?: BackendMessage })?.message;
       if (!message || message.chatId !== chatIdRef.current) return;
@@ -374,6 +476,8 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     const unsubs = [
       socketClient.subscribe('message:new', onNew),
       socketClient.subscribe('message:deleted', onDeleted),
+      socketClient.subscribe('message:delivered', onDelivered),
+      socketClient.subscribe('message:read', onRead),
       socketClient.subscribe('message:edited', onEditedOrPoll),
       socketClient.subscribe('poll:updated', onEditedOrPoll),
       socketClient.subscribe('chat:cleared', onCleared),
@@ -473,7 +577,11 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     return true;
   });
 
-  return { messages: visibleMessages, loading, error, sendMessage, clearMessages, deleteMessage, addOptimisticMessage };
+  return {
+    messages: visibleMessages, loading, error,
+    sendMessage, clearMessages, deleteMessage, addOptimisticMessage,
+    loadOlder, hasMore, loadingMore,
+  };
 }
 
 // ── Mark incoming messages as read ────────────────────────────────────────────

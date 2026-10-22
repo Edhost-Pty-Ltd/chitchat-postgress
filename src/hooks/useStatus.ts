@@ -101,25 +101,50 @@ export function useStatus(currentUserId: string | null, isCompanion = false) {
           };
         });
 
-        // Resolve all raw S3 object keys to presigned download URLs so
-        // StatusViewer receives real https:// URIs, not bare storage keys.
-        await resolveStatusMedia([...mine, ...others.flatMap((g) => g.statuses)]).catch(() => {});
-
+        // Show the list IMMEDIATELY with raw object keys — the UI can render
+        // text/background statuses without waiting for presigned URLs.
         setMyStatuses(mine);
         setContactStatuses(others);
+        setLoading(false);
+
+        // Resolve presigned download URLs in the background, then update state
+        // once they're ready. This avoids blocking the initial render on URL signing.
+        resolveStatusMedia([...mine, ...others.flatMap((g) => g.statuses)])
+          .then(() => {
+            if (!active) return;
+            setMyStatuses([...mine]);
+            setContactStatuses([...others]);
+          })
+          .catch(() => {});
       } else {
         setError(String(res.error.code));
+        setLoading(false);
       }
-      setLoading(false);
     };
 
     void socketClient.connect().then(load).catch(() => load());
     loadRef.current = load;
+
+    // Collapse bursts of status events into a single refetch. With the
+    // mediaService URL cache, the re-resolve on reload is near-free for keys
+    // already seen, so the remaining cost is one /statuses GET per burst.
+    let resyncTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleResync = () => {
+      if (resyncTimer) return;
+      resyncTimer = setTimeout(() => { resyncTimer = null; void load(); }, 500);
+    };
+
     const unsubs = [
-      socketClient.subscribe('status:update', () => void load()),
-      socketClient.subscribe('status:viewed', () => void load()),
+      socketClient.subscribe('status:update', scheduleResync),
+      socketClient.subscribe('status:viewed', scheduleResync),
+      socketClient.subscribe('client:reconnect', () => void load()),
     ];
-    return () => { active = false; loadRef.current = null; unsubs.forEach((u) => u()); };
+    return () => {
+      active = false;
+      loadRef.current = null;
+      if (resyncTimer) { clearTimeout(resyncTimer); resyncTimer = null; }
+      unsubs.forEach((u) => u());
+    };
   }, [currentUserId]);
 
   const createStatus = useCallback(

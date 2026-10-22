@@ -200,6 +200,48 @@ export async function getStatusOwner(statusId: string): Promise<string | null> {
 }
 
 /**
+ * True when the (unexpired) status `statusId` is currently visible to
+ * `viewerId` under the same block + visibility rules as listVisibleStatuses /
+ * canViewStatusMediaKey. Used to gate POST /statuses/:id/view so a user cannot
+ * record a view on (or trigger a "viewed" notification for) a status they are
+ * not allowed to see.
+ */
+export async function canViewStatus(viewerId: string, statusId: string): Promise<boolean> {
+  const res = await query<{ ok: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM statuses s
+        WHERE s.id = $2
+          AND s.expires_at > now()
+          AND (
+            s.user_id = $1
+            OR (
+              NOT EXISTS (
+                SELECT 1 FROM blocked_users b
+                 WHERE (b.blocker_id = $1 AND b.blocked_id = s.user_id)
+                    OR (b.blocker_id = s.user_id AND b.blocked_id = $1)
+              )
+              AND (
+                s.visibility = 'everyone'
+                OR (s.visibility = 'contacts' AND EXISTS (
+                      SELECT 1 FROM chat_members a
+                      JOIN chat_members b2 ON a.chat_id = b2.chat_id
+                      WHERE a.user_id = s.user_id AND b2.user_id = $1))
+                OR (s.visibility = 'except' AND NOT EXISTS (
+                      SELECT 1 FROM status_visibility_users v
+                      WHERE v.status_id = s.id AND v.mode = 'except' AND v.user_id = $1))
+                OR (s.visibility = 'only' AND EXISTS (
+                      SELECT 1 FROM status_visibility_users v
+                      WHERE v.status_id = s.id AND v.mode = 'only' AND v.user_id = $1))
+              )
+            )
+          )
+     ) AS ok`,
+    [viewerId, statusId],
+  );
+  return res.rows[0]?.ok ?? false;
+}
+
+/**
  * Authorize a status media download for `viewerId` by object key. True when a
  * status that references this key (as media or thumbnail) is either owned by
  * the viewer or currently visible to them under the same block + visibility

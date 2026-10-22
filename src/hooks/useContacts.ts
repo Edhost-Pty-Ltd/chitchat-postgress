@@ -52,6 +52,47 @@ async function loadSyncedContacts(): Promise<AppContact[]> {
   );
 }
 
+// ── Resolved-contacts cache ──────────────────────────────────────────────────
+// Reading the full device phone book + matching it against the backend is
+// meaningful JS work, and several screens (Chats, Chat, Calendar) each mount
+// their own useContacts. Cache the resolved list briefly so the 2nd/3rd mount
+// reuses it instead of re-scanning and competing with the screen's first paint.
+// An explicit reload() or a cache older than the TTL still does a fresh scan.
+const CONTACTS_CACHE_TTL_MS = 60 * 1000; // 1 minute
+let contactsCache: { ownerUid: string; isCompanion: boolean; contacts: AppContact[]; at: number } | null = null;
+
+function getCachedContacts(ownerUid: string, isCompanion: boolean): AppContact[] | null {
+  if (
+    contactsCache &&
+    contactsCache.ownerUid === ownerUid &&
+    contactsCache.isCompanion === isCompanion &&
+    Date.now() - contactsCache.at < CONTACTS_CACHE_TTL_MS
+  ) {
+    return contactsCache.contacts;
+  }
+  return null;
+}
+
+// Subscribers (e.g. usePhoneBook) notified whenever the resolved list changes,
+// so they can reuse this single device read instead of scanning again.
+const cacheListeners = new Set<(contacts: AppContact[]) => void>();
+
+function setCachedContacts(ownerUid: string, isCompanion: boolean, contacts: AppContact[]): void {
+  contactsCache = { ownerUid, isCompanion, contacts, at: Date.now() };
+  for (const fn of cacheListeners) fn(contacts);
+}
+
+/** The most recently resolved contact list (any owner), or null. */
+export function peekCachedContacts(): AppContact[] | null {
+  return contactsCache?.contacts ?? null;
+}
+
+/** Subscribe to resolved-contacts updates; returns an unsubscribe fn. */
+export function subscribeContacts(fn: (contacts: AppContact[]) => void): () => void {
+  cacheListeners.add(fn);
+  return () => { cacheListeners.delete(fn); };
+}
+
 // ── Snapshot upload (primary only) ───────────────────────────────────────────
 // Every screen mounts its own useContacts, so identical snapshots are only
 // uploaded once per owner (and never while an identical upload is in flight).
@@ -102,9 +143,21 @@ export function useContacts() {
   const [permission,  setPermission]  = useState<PermState>('undetermined');
   const [canAskAgain, setCanAskAgain] = useState(true);
 
-  const loadContacts = useCallback(async () => {
+  const loadContacts = useCallback(async (force = false) => {
     // Wait for auth: the backend calls below need a signed-in owner.
     if (!ownerUid) { setLoading(false); return; }
+
+    // Serve a recent resolved list immediately (unless the caller forces a
+    // refresh), so a second screen mounting doesn't re-scan the phone book.
+    if (!force) {
+      const cached = getCachedContacts(ownerUid, isCompanion);
+      if (cached) {
+        setContacts(cached);
+        setPermission('granted');
+        setLoading(false);
+        return;
+      }
+    }
 
     try {
       setLoading(true); setError(null);
@@ -113,7 +166,9 @@ export function useContacts() {
       if (isCompanion) {
         setPermission('granted');
         setCanAskAgain(true);
-        setContacts(await loadSyncedContacts());
+        const synced = await loadSyncedContacts();
+        setContacts(synced);
+        setCachedContacts(ownerUid, isCompanion, synced);
         return;
       }
 
@@ -195,6 +250,7 @@ export function useContacts() {
 
       sortByName(appContacts);
       setContacts(appContacts);
+      setCachedContacts(ownerUid, isCompanion, appContacts);
 
       // Sync the matched snapshot for companion devices (fire-and-forget). Only
       // after a fully successful match, so a partial result never overwrites
@@ -207,11 +263,43 @@ export function useContacts() {
     }
   }, [ownerUid, isCompanion]);
 
-  useEffect(() => { loadContacts(); }, [loadContacts]);
+  useEffect(() => {
+    // If a recent resolved list is already cached, apply it synchronously so
+    // the screen has data on first paint with zero work. Otherwise defer the
+    // (expensive) device scan + backend match until after the navigation
+    // interaction finishes, so it never blocks the screen appearing.
+    const cached = ownerUid ? getCachedContacts(ownerUid, isCompanion) : null;
+    if (cached) {
+      setContacts(cached);
+      setPermission('granted');
+      setLoading(false);
+      return;
+    }
+    // Defer the expensive scan until after the navigation interaction so it
+    // never blocks the screen's first paint. Lazy-require InteractionManager so
+    // this module's import graph stays light (no static react-native import).
+    // When it isn't available (e.g. the test environment) fall back to loading
+    // directly so behaviour is unchanged there.
+    let cancelled = false;
+    let handle: { cancel?: () => void } | null = null;
+    try {
+      const { InteractionManager } = require('react-native');
+      handle = InteractionManager.runAfterInteractions(() => {
+        if (!cancelled) void loadContacts();
+      });
+    } catch {
+      void loadContacts();
+    }
+    return () => { cancelled = true; handle?.cancel?.(); };
+  }, [loadContacts, ownerUid, isCompanion]);
+
+  // reload() always does a fresh scan (focus/sheet-open use it to pick up a
+  // contact the user just edited on the device), bypassing the mount cache.
+  const reload = useCallback(() => loadContacts(true), [loadContacts]);
 
   return {
     contacts, loading, error, permission, canAskAgain,
     hasPermission: permission === 'granted',
-    reload: loadContacts,
+    reload,
   };
 }

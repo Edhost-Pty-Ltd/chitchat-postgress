@@ -594,27 +594,30 @@ export default function CallsScreen() {
         })}
       </View>
 
-      {/* Loading state */}
-      {loading ? (
-        <View style={styles.centerWrap}>
-          <ActivityIndicator size="large" color={COLORS.blue} />
-          <AppText style={styles.centerText}>Loading call history...</AppText>
+      {/* Error banner */}
+      {error ? (
+        <View style={styles.errorBanner}>
+          <AppIcon name="alert-circle-outline" size={16} color={COLORS.missed} fixedColor />
+          <AppText style={styles.errorBannerText}>Couldn't load calls</AppText>
         </View>
-      ) : error ? (
-        <View style={styles.centerWrap}>
-          <AppIcon name="alert-circle-outline" size={48} color={COLORS.missed} />
-          <AppText style={styles.centerText}>Failed to load calls</AppText>
-          <AppText style={styles.errorText}>{error}</AppText>
-        </View>
-      ) : (
-        <FlatList
-          data={filtered}
-          keyExtractor={(item) => item.callId}
-          renderItem={renderCall}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.listContent}
-          ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
-          ListEmptyComponent={
+      ) : null}
+
+      <FlatList
+        data={filtered}
+        keyExtractor={(item) => item.callId}
+        renderItem={renderCall}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.listContent}
+        ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+        ListHeaderComponent={
+          loading ? (
+            <View style={styles.loadingRow}>
+              <ActivityIndicator size="small" color={COLORS.blue} />
+            </View>
+          ) : null
+        }
+        ListEmptyComponent={
+          loading ? null : (
             <View style={styles.emptyWrap}>
               <AppIcon name="call-outline" size={48} color={COLORS.sub} />
               <AppText style={styles.emptyText}>
@@ -624,9 +627,9 @@ export default function CallsScreen() {
                 Tap + to start a new call
               </AppText>
             </View>
-          }
-        />
-      )}
+          )
+        }
+      />
 
       {/* Calling overlay */}
       {calling && (
@@ -701,11 +704,22 @@ const styles = StyleSheet.create({
   callRight:      { alignItems: 'flex-end', gap: 6 },
   callTime:       { fontSize: 12, color: COLORS.sub },
 
-  centerWrap: { alignItems: 'center', paddingTop: 80, gap: 12 },
-  centerText: { fontSize: 15, color: COLORS.sub },
-  errorText:  { fontSize: 13, color: COLORS.missed, textAlign: 'center', paddingHorizontal: 40 },
-  
+  loadingRow: { alignItems: 'center', paddingVertical: 14 },
+
+  errorBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginHorizontal: 14, marginBottom: 8,
+    paddingHorizontal: 14, paddingVertical: 10,
+    borderRadius: RADIUS.md,
+    backgroundColor: 'rgba(255,59,48,0.10)',
+  },
+  errorBannerText: { fontSize: 13, color: COLORS.missed, fontWeight: '600' },
+
   emptyWrap: { alignItems: 'center', paddingTop: 80, gap: 12 },
+  // Centered container for the contact-picker loading/empty states. Was
+  // referenced by the picker but never defined, so those states rendered with
+  // no layout (top-left, uncentered).
+  centerWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingTop: 80, gap: 12 },
   emptyText: { fontSize: 15, color: COLORS.sub, fontWeight: '600' },
   emptyHint: { fontSize: 13, color: COLORS.sub },
 

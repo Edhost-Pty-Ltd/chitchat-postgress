@@ -63,67 +63,14 @@ export function useIncomingCallAnswer() {
         console.log('[useIncomingCallAnswer] Sending answer via signaling...');
         await SignalingService.saveAnswer(callId, answer);
 
-        // Step 4: Listen for ICE candidates from caller and call status changes
-        console.log('[useIncomingCallAnswer] Listening for ICE candidates and status updates...');
-        console.log('[useIncomingCallAnswer] Listener setup for call:', callId);
-        
-        unsubscribeRef.current = SignalingService.onCallUpdated(callId, async (call) => {
-          console.log('[useIncomingCallAnswer] ==== Signaling Listener Triggered ====');
-          
-          if (!call) {
-            console.log('[useIncomingCallAnswer] Call document deleted, cleaning up...');
-            setCallStatus('ended');
-            cleanup();
-            return;
-          }
-
-          console.log('[useIncomingCallAnswer] Signaling update - status:', call.status, 'callId:', call.callId);
-
-          // Handle call ended by caller - IMMEDIATELY cleanup
-          if (call.status === 'ended') {
-            console.log('[useIncomingCallAnswer] ⚠️ DETECTED CALL ENDED - Starting immediate cleanup');
-            
-            // Cleanup WebRTC FIRST to stop audio immediately
-            console.log('[useIncomingCallAnswer] Step 1: Cleaning up WebRTC...');
-            cleanup();
-            console.log('[useIncomingCallAnswer] Step 2: WebRTC cleanup complete');
-            
-            // Then update status
-            console.log('[useIncomingCallAnswer] Step 3: Updating call status to ended...');
-            setCallStatus('ended');
-            console.log('[useIncomingCallAnswer] Step 4: Call status updated');
-            
-            // Unsubscribe from further updates
-            if (unsubscribeRef.current) {
-              console.log('[useIncomingCallAnswer] Step 5: Unsubscribing from signaling...');
-              unsubscribeRef.current();
-              unsubscribeRef.current = null;
-              console.log('[useIncomingCallAnswer] Step 6: Unsubscribed successfully');
-            }
-            
-            console.log('[useIncomingCallAnswer] ✅ Cleanup sequence complete');
-            return; // Stop processing
-          } else if (call.status === 'rejected') {
-            console.log('[useIncomingCallAnswer] Call rejected');
-            setCallStatus('rejected');
-            cleanup();
-            return;
-          }
-
-          // Add ICE candidates from caller (only new ones)
-          if (call.callerIceCandidates.length > 0) {
-            for (const candidate of call.callerIceCandidates) {
-              // Create a unique key for this candidate
-              const candidateKey = `${candidate.candidate}-${candidate.sdpMLineIndex}-${candidate.sdpMid}`;
-              
-              if (!iceCandidatesProcessedRef.current.has(candidateKey)) {
-                iceCandidatesProcessedRef.current.add(candidateKey);
-                console.log('[useIncomingCallAnswer] Adding ICE candidate');
-                await addIceCandidate(candidate);
-              }
-            }
-          }
-        });
+        // NOTE: answerCall deliberately does NOT register its own
+        // SignalingService.onCallUpdated listener. The call screen
+        // (AudioCallScreen / VideoCallScreen) already owns a single listener
+        // that applies the caller's ICE candidates and handles 'ended'/
+        // 'rejected' (including WebRTC cleanup). Registering a second listener
+        // here caused BOTH to iterate caller ICE candidates with separate
+        // dedup sets, applying every candidate twice. One owner avoids that
+        // race entirely.
 
         setIsProcessing(false);
         console.log('[useIncomingCallAnswer] Call answered successfully');
@@ -136,7 +83,7 @@ export function useIncomingCallAnswer() {
         return false;
       }
     },
-    [initializePeerConnection, createAnswer, addIceCandidate, cleanup, setActiveCallId, setCallStatus]
+    [initializePeerConnection, createAnswer, setActiveCallId, setCallStatus]
   );
 
   // ── Reject call ────────────────────────────────────────────────────────────

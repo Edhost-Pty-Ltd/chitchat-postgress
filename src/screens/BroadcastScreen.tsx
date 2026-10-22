@@ -35,7 +35,7 @@ import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { BroadcastList } from '../types';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type View = 'list' | 'create' | 'compose' | 'edit';
+type BroadcastView = 'list' | 'create' | 'compose' | 'edit';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function formatRelativeDate(date: Date | null): string {
@@ -65,7 +65,7 @@ export default function BroadcastScreen() {
   const { contacts }       = useContacts();
 
   // ── View state ──────────────────────────────────────────────────────────────
-  const [view,         setView]         = useState<View>('list');
+  const [view,         setView]         = useState<BroadcastView>('list');
   const [activeList,   setActiveList]   = useState<BroadcastList | null>(null);
 
   // ── Create / Edit state ─────────────────────────────────────────────────────

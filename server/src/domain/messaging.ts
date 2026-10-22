@@ -42,13 +42,16 @@ export function previewBody(m: StoredMessage): string {
 }
 
 const PHONE_LIKE = /^\+?[\d\s\-()]{5,}$/;
+// A Firebase uid: a long run of letters/digits with no spaces. We must never
+// surface this as a notification title (it reads as gibberish to the user).
+const UID_LIKE = /^[A-Za-z0-9]{20,}$/;
 
 /** Display name for notifications: a real name if set, otherwise the phone. */
 export function notificationName(user: Pick<UserRow, 'display_name' | 'phone_number'> | null): string {
   const dn = (user?.display_name ?? '').trim();
   const ph = (user?.phone_number ?? '').trim();
-  if (dn && !PHONE_LIKE.test(dn) && dn !== ph) return dn;
-  return ph || dn || 'Someone';
+  if (dn && !PHONE_LIKE.test(dn) && !UID_LIKE.test(dn) && dn !== ph) return dn;
+  return ph || 'Someone';
 }
 
 /**

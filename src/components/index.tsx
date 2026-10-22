@@ -64,7 +64,7 @@ export function Avatar({ initials, color, size = 44, status: _status, style, ima
 }
 
 // ─── BottomNav ────────────────────────────────────────────────────────────────
-type TabKey = 'chats' | 'calendar' | 'calls' | 'status' | 'dashboard' | 'settings';
+export type TabKey = 'chats' | 'calendar' | 'calls' | 'status' | 'dashboard' | 'settings';
 
 const TABS: {
   id: TabKey;
@@ -81,9 +81,15 @@ const TABS: {
   { id: 'settings',  icon: 'person-outline',       iconActive: 'person',       label: 'You',       screen: 'Settings'  },
 ];
 
-interface BottomNavProps { active: TabKey; }
+interface BottomNavProps {
+  active: TabKey;
+  /** Optional tap handler. When provided (e.g. by the custom tab bar in
+   *  TabNavigator, which emits a cancelable tabPress event), it is used
+   *  instead of BottomNav's own navigate call. */
+  onTabPress?: (tabId: TabKey) => void;
+}
 
-export function BottomNav({ active }: BottomNavProps) {
+export function BottomNav({ active, onTabPress }: BottomNavProps) {
   const navigation = useNavigation<NavProp>();
   const { FG } = useForeground();
   const { fontFamily } = useTypography();
@@ -110,7 +116,7 @@ export function BottomNav({ active }: BottomNavProps) {
             key={t.id}
             style={styles.navItem}
             activeOpacity={0.75}
-            onPress={() => navigation.navigate(t.screen as any)}
+            onPress={() => (onTabPress ? onTabPress(t.id) : navigation.navigate(t.screen as any))}
           >
             <View>
               {t.id === 'settings' ? (

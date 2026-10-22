@@ -1,6 +1,6 @@
 // ─── Navigation ──────────────────────────────────────────────────────────────
 import React, { useState, useEffect, useCallback, lazy, Suspense } from 'react';
-import { View, ActivityIndicator, StyleSheet, Text, TouchableOpacity } from 'react-native';
+import { View, ActivityIndicator, StyleSheet, Text, TouchableOpacity, InteractionManager } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../types';
 import { useAuth } from '../context/AuthContext';
@@ -21,13 +21,22 @@ import ChatsScreen from '../screens/ChatsScreen';
 // Each lazy component is wrapped in a Suspense boundary so the navigator
 // always receives a real synchronous component reference.
 // ── Lazy imports ──────────────────────────────────────────────────────────────
-function makeLazy<T extends object>(factory: () => Promise<{ default: React.ComponentType<T> }>) {
+// A lazy screen that also exposes a `preload()` so we can warm its chunk during
+// idle time after startup — then the first navigation to it is instant instead
+// of paying the dynamic import() + module-eval cost on the JS thread.
+type Preloadable<T> = React.FC<T> & { preload: () => Promise<unknown> };
+
+function makeLazy<T extends object>(factory: () => Promise<{ default: React.ComponentType<T> }>): Preloadable<T> {
   const Lazy = lazy(factory);
-  const Wrapped = (props: T) => (
+  const Wrapped = ((props: T) => (
     <Suspense fallback={<ScreenFallback />}>
       <Lazy {...(props as any)} />
     </Suspense>
-  );
+  )) as Preloadable<T>;
+  // Kick the import once; the promise is cached by the bundler so repeat calls
+  // (and the eventual real navigation) reuse the same in-flight/resolved chunk.
+  let started: Promise<unknown> | null = null;
+  Wrapped.preload = () => (started ??= factory());
   return Wrapped;
 }
 
@@ -56,20 +65,25 @@ import { IncomingCallManager } from '../components';
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 function ScreenFallback() {
-  return <View style={{ flex: 1 }} />;
+  // Render the app background (not a bare white view) so a not-yet-warmed chunk
+  // reads as a brief themed placeholder rather than a flash.
+  return (
+    <View style={{ flex: 1 }}>
+      <AppBg />
+    </View>
+  );
 }
 
+// Instant navigation: screens appear immediately with no slide transition.
 const screenOptions = {
   headerShown: false,
-  animation: 'slide_from_right' as const,
-  animationDuration: 200,
+  animation: 'none' as const,
   gestureEnabled: true,
 } as const;
 
 const modalOptions = {
   headerShown: false,
-  animation: 'slide_from_bottom' as const,
-  animationDuration: 250,
+  animation: 'none' as const,
   gestureEnabled: true,
 } as const;
 
@@ -83,6 +97,27 @@ export default function AppNavigator() {
   // Companions must not write the owner's presence — they'd fight the primary.
   const { userId } = useAuth();
   useWritePresence(isCompanion ? null : userId);
+
+  // ── Warm the lazy screen chunks after startup ─────────────────────────────
+  // Every navigated-to screen is React.lazy, so the FIRST navigation to each
+  // otherwise blocks on its dynamic import() + module eval. Once the app is
+  // signed in and idle, preload them (most-used first, lightly staggered) so by
+  // the time the user navigates the chunk is already parsed and the screen
+  // appears instantly. preload() is a no-op after the first call.
+  useEffect(() => {
+    if (!isSignedIn) return;
+    const task = InteractionManager.runAfterInteractions(() => {
+      const warm = [
+        ChatScreen, StatusScreen, CallsScreen, CalendarScreen, // primary tabs
+        ProfileScreen, DashboardScreen, ContactsScreen,        // common jumps
+        SettingsScreen, BroadcastScreen, NotificationsScreen,  // secondary
+      ];
+      warm.forEach((screen, i) => {
+        setTimeout(() => { void screen.preload?.(); }, i * 120);
+      });
+    });
+    return () => task.cancel();
+  }, [isSignedIn]);
 
   const [profileExists, setProfileExists] = useState<boolean | null>(null);
   const [profileCheckError, setProfileCheckError] = useState(false);
@@ -237,7 +272,7 @@ export default function AppNavigator() {
             </>
           ) : (
             <>
-              <Stack.Screen name="Splash" component={SplashScreen} options={{ animation: 'fade' }} />
+              <Stack.Screen name="Splash" component={SplashScreen} />
               <Stack.Screen name="SignIn" component={SignInScreen} />
               <Stack.Screen name="CreateAccount" component={CreateAccountScreen} />
             </>

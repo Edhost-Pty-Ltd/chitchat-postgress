@@ -3,7 +3,7 @@ import React, { useState, useRef, useMemo, useEffect, useCallback, memo } from '
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
   TextInput, Modal, Pressable, ScrollView, Animated,
-  ActivityIndicator, Image, Platform, Alert,
+  ActivityIndicator, Image, Platform, Alert, Share,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -38,6 +38,7 @@ type TabType   = 'Chats' | 'Groups' | 'Broadcast' | string;
 type SheetMode = 'select' | 'newContact' | 'newGroup';
 
 const NO_CHAT_PREFIX = '__nochat__';
+const BUSINESS_LINK_BASE = 'https://www.chitchatbusiness.com';
 
 // ─── Chat Label types ────────────────────────────────────────────────────────
 interface ChatLabel {
@@ -83,10 +84,26 @@ function getInitials(name: string): string {
 }
 
 function formatSAPhone(phone: string): string {
-  const digits = phone.replace(/\D/g, '');
+  let digits = phone.replace(/\D/g, '');
+
+  // E.164 SA numbers are stored as +27XXXXXXXXX (country code 27 + 9 national
+  // digits). Convert back to the national 0XX XXX XXXX form the user typed so
+  // the full 10-digit number is shown (previously the leading 0 was dropped
+  // and the string was truncated to 9 digits).
+  if (digits.startsWith('27') && digits.length === 11) {
+    digits = `0${digits.slice(2)}`; // 27XXXXXXXXX → 0XXXXXXXXX
+  }
+
+  // National mobile format: 0XX XXX XXXX (10 digits) → "073 123 4567".
+  if (digits.length === 10) {
+    return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6)}`;
+  }
+
+  // Fallbacks for partial / non-standard inputs — group in 3s, never truncate.
   if (digits.length <= 3) return digits;
   if (digits.length <= 6) return `${digits.slice(0, 3)} ${digits.slice(3)}`;
-  return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6, 9)}`;
+  if (digits.length <= 9) return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6)}`;
+  return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6, 9)} ${digits.slice(9)}`;
 }
 
 function classifyChat(c: ChatPreview): 'direct' | 'group' {
@@ -1345,7 +1362,7 @@ export default function ChatsScreen() {
   const { bevel, iconButton }     = useGlass();
   const insets = useSafeAreaInsets();
 
-  const { chats, loading: chatsLoading, reload: reloadChats } = useChats(userId);
+  const { chats, loading: chatsLoading, reload: reloadChats, markChatRead } = useChats(userId);
   // useChats returns a fresh `reload` each render; keep the latest in a ref.
   const reloadChatsRef = useRef(reloadChats);
   reloadChatsRef.current = reloadChats;
@@ -1414,11 +1431,20 @@ export default function ChatsScreen() {
     if (sheetOpen) reloadContacts();
   }, [sheetOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Refresh contacts whenever the screen regains focus, so a contact edited or
-  // deleted inside a chat is reflected in the chat list name immediately.
+  // Tracks when contacts were last force-rescanned so we don't do a full
+  // phone-book scan on every navigate-back.
+  const lastContactRescanRef = useRef<number>(0);
+
+  // Refresh contacts when the screen regains focus, but throttle to at most
+  // once per minute. Navigating back quickly (open chat → back) serves the
+  // cache; the rescan only fires after the throttle window.
   useFocusEffect(
     useCallback(() => {
-      reloadContacts();
+      const RESCAN_INTERVAL_MS = 60 * 1000;
+      if (Date.now() - lastContactRescanRef.current > RESCAN_INTERVAL_MS) {
+        lastContactRescanRef.current = Date.now();
+        reloadContacts();
+      }
     }, [reloadContacts])
   );
 
@@ -1813,6 +1839,29 @@ export default function ChatsScreen() {
 
   const handleSelectContact = useCallback(async (contact: AppContact) => {
     if (!userId) return;
+
+    // Only registered ChitChat users have a real account id. For an
+    // unregistered device contact `contact.userId` is just their phone number,
+    // which the backend can't make a chat with (chat_members.user_id is a FK to
+    // users). Offer to invite them instead of silently failing.
+    if (!contact.isSaved) {
+      Alert.alert(
+        `${contact.displayName} isn't on ChitChat yet`,
+        'You can only start a chat with contacts who use ChitChat Business. Invite them to join.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Invite',
+            onPress: () => {
+              const msg = `Let's chat on ChitChat Business: ${BUSINESS_LINK_BASE}`;
+              Share.share({ message: msg }).catch(() => {});
+            },
+          },
+        ],
+      );
+      return;
+    }
+
     setSheetOpen(false);
     try {
       const chatId = await getOrCreateDirectChat(userId, contact.userId);
@@ -1823,7 +1872,10 @@ export default function ChatsScreen() {
         otherUserId: contact.userId,
         otherUserPhoto: contact.photoUri || contact.firebasePhotoURL || null,
       });
-    } catch {}
+    } catch (err) {
+      console.error('[ChatsScreen] handleSelectContact failed:', err);
+      Alert.alert('Error', 'Could not open the chat. Please try again.');
+    }
   }, [userId, navigation]);
 
   const handleNavigateToGroup = useCallback((chatId: string, groupName: string) => {
@@ -2042,13 +2094,16 @@ export default function ChatsScreen() {
           isPinned={isPinned}
           isMuted={isMuted}
           isFavourite={favourites.includes(item.chatId)}
-          onPress={() => navigation.navigate('Chat', {
-            chatId: item.chatId,
-            displayName,
-            isGroup,
-            otherUserId: otherMemberId || undefined,
-            otherUserPhoto: firebasePhotoURL || contactPhotoUri || null,
-          })}
+          onPress={() => {
+            markChatRead(item.chatId);
+            navigation.navigate('Chat', {
+              chatId: item.chatId,
+              displayName,
+              isGroup,
+              otherUserId: otherMemberId || undefined,
+              otherUserPhoto: firebasePhotoURL || contactPhotoUri || null,
+            });
+          }}
           onLongPress={() => setPreviewChat({
             chatId: item.chatId,
             displayName,
@@ -2067,7 +2122,7 @@ export default function ChatsScreen() {
   }, [
     userId, contacts, contactsMap, memberInfoMap, privacyPhotoMap, userStatusMap,
     bevel, textColor, fontFamily, FG.secondary, navigation, openOrCreateDirectChat,
-    pinned, mutedChats, favourites, handleTogglePin, toggleMute, openChatActions,
+    pinned, mutedChats, favourites, handleTogglePin, toggleMute, openChatActions, markChatRead,
   ]);
 
   const openPreviewedChat = useCallback(() => {
@@ -2610,14 +2665,6 @@ export default function ChatsScreen() {
 
       {tab === 'Broadcast' ? (
         <BroadcastScreen />
-      ) : (chats.length === 0 && (chatsLoading || !namesReady)) ? (
-        // Only show the spinner when we have nothing cached/loaded yet.
-        // Once there are chats (from cache or the live listener), render the
-        // list immediately — no "Loading chats…" flash on launch.
-        <View style={styles.emptyWrap}>
-          <ActivityIndicator size="large" color={COLORS.blue} />
-          <Text style={styles.emptyText}>Loading chats…</Text>
-        </View>
       ) : (
         <FlatList
           ref={chatsListRef}
@@ -2631,20 +2678,29 @@ export default function ChatsScreen() {
           maxToRenderPerBatch={10}
           windowSize={10}
           initialNumToRender={12}
+          ListHeaderComponent={
+            chatsLoading ? (
+              <View style={styles.loadingRow}>
+                <ActivityIndicator size="small" color={COLORS.blue} />
+              </View>
+            ) : null
+          }
           ListEmptyComponent={
-            <View style={styles.emptyWrap}>
-              <AppIcon name="chatbubbles-outline" size={52} color={COLORS.sub} />
-              <AppText style={styles.emptyText}>
-                {(tab === 'Chats' || tab === 'Groups')
-                  ? `No ${tab.toLowerCase()} yet`
-                  : `Nothing in "${currentLabelTitle}" yet`}
-              </AppText>
-              {isOnCustomLabel && (
-                <AppText style={[styles.emptySubText, { color: COLORS.sub }]}>
-                  Tap "Manage the Label" below to add contacts or groups.
+            chatsLoading || !namesReady ? null : (
+              <View style={styles.emptyWrap}>
+                <AppIcon name="chatbubbles-outline" size={52} color={COLORS.sub} />
+                <AppText style={styles.emptyText}>
+                  {(tab === 'Chats' || tab === 'Groups')
+                    ? `No ${tab.toLowerCase()} yet`
+                    : `Nothing in "${currentLabelTitle}" yet`}
                 </AppText>
-              )}
-            </View>
+                {isOnCustomLabel && (
+                  <AppText style={[styles.emptySubText, { color: COLORS.sub }]}>
+                    Tap "Manage the Label" below to add contacts or groups.
+                  </AppText>
+                )}
+              </View>
+            )
           }
           ListFooterComponent={
             isOnCustomLabel ? (
@@ -3008,6 +3064,7 @@ const styles = StyleSheet.create({
   },
   confirmText: { fontSize: 14, fontWeight: '700', color: '#fff' },
 
+  loadingRow: { alignItems: 'center', paddingVertical: 14 },
   emptyWrap: { alignItems: 'center', paddingTop: 80, gap: 12, paddingHorizontal: 30 },
   emptyText: { fontSize: 15, color: COLORS.sub, textAlign: 'center' },
   emptySubText: { fontSize: 13, color: COLORS.sub, textAlign: 'center', marginTop: -4 },

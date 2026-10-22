@@ -7,7 +7,7 @@
 // the NativeEventEmitter throws. Deferring the require() to first-use avoids
 // this — by then the bridge is always ready.
 
-import { Platform } from 'react-native';
+import { Platform, NativeModules } from 'react-native';
 
 // ─── Web mocks ───────────────────────────────────────────────────────────────
 class MockRTCPeerConnection {
@@ -53,7 +53,7 @@ function getNative() {
   if (!_webrtc) {
     // require() is deferred to first call — by then the native bridge
     // is fully initialised and WebRTCModule is non-null.
-    _webrtc = require('react-native-webrtc');
+    _webrtc = require('@livekit/react-native-webrtc');
   }
   return _webrtc;
 }
@@ -80,6 +80,51 @@ export function getMediaDevices() {
 
 export function getMediaStream() {
   return Platform.OS === 'web' ? MockMediaStream : getNative().MediaStream;
+}
+
+// ─── One-time WebRTC initialization ─────────────────────────────────────────
+// Calls registerGlobals() from @livekit/react-native-webrtc. This is REQUIRED
+// for audio: it installs the WebRTC globals AND wires up the native audio
+// device module's lifecycle listeners (audioDeviceModuleEvents.setupListeners).
+// Without it, a call can connect and even deliver video (RTCView pulls the
+// video track directly), but the remote AUDIO output device is never managed —
+// so you hear nothing. Safe to call multiple times; it's idempotent.
+let _globalsRegistered = false;
+export function initializeWebRTC(): void {
+  if (Platform.OS === 'web' || _globalsRegistered) return;
+  try {
+    getNative().registerGlobals();
+    _globalsRegistered = true;
+    console.log('[webrtc-platform] registerGlobals() called — audio device module wired up');
+  } catch (err) {
+    console.warn('[webrtc-platform] registerGlobals() failed:', err);
+  }
+}
+
+// ─── In-call audio output routing (loudspeaker vs earpiece) ─────────────────
+// Routes the LIVE call audio to the loudspeaker or back to the default route
+// (earpiece on iOS voiceChat/videoChat; handset on Android) via a small native
+// module (ios/.../AudioRouteModule, android/.../AudioRouteModule).
+//
+// We deliberately do NOT use expo-audio's setAudioModeAsync for this: that
+// reconfigures the shared AVAudioSession category/mode and silences the live
+// WebRTC call. The native module only changes the OUTPUT ROUTE:
+//   • iOS    → RTCAudioSession.overrideOutputAudioPort(speaker | none)
+//   • Android → AudioManager.setSpeakerphoneOn in MODE_IN_COMMUNICATION
+// neither of which disturbs WebRTC's audio engine.
+export async function setSpeakerphoneOn(enabled: boolean): Promise<void> {
+  if (Platform.OS === 'web') return;
+  try {
+    const AudioRouteModule = NativeModules.AudioRouteModule;
+    if (!AudioRouteModule?.setSpeakerphoneOn) {
+      console.warn('[webrtc-platform] AudioRouteModule not available — rebuild the native app');
+      return;
+    }
+    await AudioRouteModule.setSpeakerphoneOn(enabled);
+    console.log('[webrtc-platform] Speakerphone set to', enabled);
+  } catch (err) {
+    console.warn('[webrtc-platform] setSpeakerphoneOn failed:', err);
+  }
 }
 
 // Legacy named exports for any existing code that imports them directly.

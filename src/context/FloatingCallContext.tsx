@@ -11,7 +11,7 @@
 //     maximises the call and the VideoCallScreen re-attaches its streams.
 
 import React, {
-  createContext, useContext, useState, useCallback, useEffect, useRef,
+  createContext, useContext, useState, useCallback, useEffect, useRef, useMemo,
 } from 'react';
 import { AppState, AppStateStatus } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -155,10 +155,15 @@ export function FloatingCallProvider({ children }: { children: React.ReactNode }
     setFloatingCall((prev) => prev ? { ...prev, duration } : null);
   }, []);
 
+  // Memoize so the value identity only changes with the call itself, not on
+  // every render of this provider.
+  const value = useMemo(
+    () => ({ floatingCall, minimizeCall, maximizeCall, endFloatingCall, updateDuration }),
+    [floatingCall, minimizeCall, maximizeCall, endFloatingCall, updateDuration],
+  );
+
   return (
-    <FloatingCallContext.Provider
-      value={{ floatingCall, minimizeCall, maximizeCall, endFloatingCall, updateDuration }}
-    >
+    <FloatingCallContext.Provider value={value}>
       {children}
     </FloatingCallContext.Provider>
   );

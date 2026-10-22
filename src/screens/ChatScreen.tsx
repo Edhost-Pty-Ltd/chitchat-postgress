@@ -586,7 +586,10 @@ export default function ChatScreen() {
   const [activeCatalogCol,    setActiveCatalogCol]    = useState<string | null>(null); // 'all' | colId
 
   // ── Messages — real-time Firestore stream ───────────────────────
-  const { messages, loading, sendMessage, clearMessages, deleteMessage, addOptimisticMessage } = useMessages(chatId, userId);
+  const {
+    messages, loading, sendMessage, clearMessages, deleteMessage, addOptimisticMessage,
+    loadOlder, hasMore, loadingMore,
+  } = useMessages(chatId, userId);
 
   // ── Filter out blocked messages for recipient ───────────────────
   // If I receive a message that was sent while I was blocked, don't show it
@@ -788,6 +791,9 @@ export default function ChatScreen() {
   // Show the scroll-to-bottom button whenever the user is more than 150px
   // away from the newest message. Animate it in/out smoothly.
   const SCROLL_THRESHOLD = 150;
+  // When the user scrolls within this many px of the top, pull the next (older)
+  // page. The list is not inverted, so "older" is toward the top.
+  const LOAD_OLDER_THRESHOLD = 400;
   const handleScroll = useCallback((e: any) => {
     const { contentSize, layoutMeasurement, contentOffset } = e.nativeEvent;
     const dist = contentSize.height - layoutMeasurement.height - contentOffset.y;
@@ -803,7 +809,12 @@ export default function ChatScreen() {
       }
       return shouldShow;
     });
-  }, [scrollBtnOpacity]);
+    // Approaching the top → fetch older messages. loadOlder self-guards against
+    // overlapping calls and no-ops when there's nothing older.
+    if (contentOffset.y <= LOAD_OLDER_THRESHOLD && hasMore && !loadingMore) {
+      void loadOlder();
+    }
+  }, [scrollBtnOpacity, hasMore, loadingMore, loadOlder]);
 
   const scrollToBottom = useCallback(() => {
     listRef.current?.scrollToEnd({ animated: true });
@@ -1384,7 +1395,11 @@ export default function ChatScreen() {
         },
       );
 
-      await sendVoiceMessage(chatId, userId, uploadResult.downloadUrl, result.durationMs);
+      // Pass the object key (storagePath), NOT downloadUrl. Both currently hold
+      // the same key, but storagePath is the explicitly-named key field;
+      // sendVoiceMessage re-uploads anything that looks like a URI, so handing
+      // it a key avoids any chance of a double upload if this ever returns a URL.
+      await sendVoiceMessage(chatId, userId, uploadResult.storagePath, result.durationMs);
 
       setIsUploading(false);
       setUploadProgress(0);
@@ -3194,6 +3209,19 @@ export default function ChatScreen() {
               updateCellsBatchingPeriod={50}
               windowSize={10}
               removeClippedSubviews={true}
+              // Keep the viewport anchored when older messages are prepended at
+              // the top, so paging-in history doesn't make the list jump.
+              maintainVisibleContentPosition={{ minIndexForVisible: 1 }}
+              // Spinner at the top while the next older page is loading.
+              ListHeaderComponent={
+                loadingMore
+                  ? (
+                    <View style={{ paddingVertical: 12 }}>
+                      <ActivityIndicator size="small" color={COLORS.blue} />
+                    </View>
+                  )
+                  : null
+              }
               ListFooterComponent={
                 typingNames.length > 0
                   ? <TypingIndicator names={typingNames} />
@@ -3751,62 +3779,64 @@ export default function ChatScreen() {
       {cameraOpen && Platform.OS !== 'web' && (
         <Modal visible animationType="slide" onRequestClose={() => setCameraOpen(false)}>
           <View style={{ flex: 1, backgroundColor: '#000' }}>
-            <CameraView ref={cameraRef} style={{ flex: 1 }} facing={cameraFacing}>
-              {/* Close (X) — top-right corner */}
-              <TouchableOpacity
-                onPress={() => setCameraOpen(false)}
-                style={styles.cameraTopCloseBtn}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              >
-                <AppIcon name="close" size={26} color="#fff" fixedColor />
-              </TouchableOpacity>
+            {/* CameraView fills the container — no children so native touch handling is clean */}
+            <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing={cameraFacing} />
 
-              {/* Recent photos strip — tap one to caption & send (WhatsApp-style) */}
-              {recentPhotos.length > 0 && (
-                <View style={styles.cameraRollStrip}>
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    contentContainerStyle={styles.cameraRollContent}
-                  >
-                    {recentPhotos.map((p) => (
-                      <TouchableOpacity
-                        key={p.id}
-                        activeOpacity={0.85}
-                        style={styles.cameraRollThumbWrap}
-                        onPress={() => {
-                          setCameraOpen(false);
-                          setMediaCaption('');
-                          const isVid = p.isVideo ?? /\.(mp4|mov|m4v|3gp|avi)$/i.test(p.uri);
-                          setPendingMedia([{ uri: p.uri, kind: isVid ? 'video' : 'image' }]);
-                          setPendingMediaIndex(0);
-                        }}
-                      >
-                        <Image source={{ uri: p.uri }} style={styles.cameraRollThumb} resizeMode="cover" />
-                      </TouchableOpacity>
-                    ))}
-                  </ScrollView>
-                </View>
-              )}
-              <View style={styles.cameraControls}>
-                {/* Gallery — opens the photo/video picker */}
-                <TouchableOpacity
-                  onPress={() => { setCameraOpen(false); setTimeout(() => openGallery(), 350); }}
-                  style={styles.cameraCloseBtn}
+            {/* Close (X) — top-right, safe-area aware so it clears the Dynamic Island */}
+            <TouchableOpacity
+              onPress={() => setCameraOpen(false)}
+              style={[styles.cameraTopCloseBtn, { top: insets.top + 12 }]}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <AppIcon name="close" size={26} color="#fff" fixedColor />
+            </TouchableOpacity>
+
+            {/* Recent photos strip — tap one to caption & send (WhatsApp-style) */}
+            {recentPhotos.length > 0 && (
+              <View style={styles.cameraRollStrip}>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.cameraRollContent}
                 >
-                  <AppIcon name="images-outline" size={26} color="#fff" fixedColor />
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.cameraShutterBtn} onPress={takePicture}>
-                  <View style={styles.cameraShutter} />
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => setCameraFacing((f) => (f === 'back' ? 'front' : 'back'))}
-                  style={styles.cameraFlipBtn}
-                >
-                  <AppIcon name="camera-reverse-outline" size={28} color="#fff" fixedColor />
-                </TouchableOpacity>
+                  {recentPhotos.map((p) => (
+                    <TouchableOpacity
+                      key={p.id}
+                      activeOpacity={0.85}
+                      style={styles.cameraRollThumbWrap}
+                      onPress={() => {
+                        setCameraOpen(false);
+                        setMediaCaption('');
+                        const isVid = p.isVideo ?? /\.(mp4|mov|m4v|3gp|avi)$/i.test(p.uri);
+                        setPendingMedia([{ uri: p.uri, kind: isVid ? 'video' : 'image' }]);
+                        setPendingMediaIndex(0);
+                      }}
+                    >
+                      <Image source={{ uri: p.uri }} style={styles.cameraRollThumb} resizeMode="cover" />
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
               </View>
-            </CameraView>
+            )}
+
+            {/* Bottom controls: gallery shortcut | shutter | flip */}
+            <View style={[styles.cameraControls, { paddingBottom: insets.bottom + 12 }]}>
+              <TouchableOpacity
+                onPress={() => { setCameraOpen(false); setTimeout(() => openGallery(), 350); }}
+                style={styles.cameraCloseBtn}
+              >
+                <AppIcon name="images-outline" size={26} color="#fff" fixedColor />
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.cameraShutterBtn} onPress={takePicture}>
+                <View style={styles.cameraShutter} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => setCameraFacing((f) => (f === 'back' ? 'front' : 'back'))}
+                style={styles.cameraFlipBtn}
+              >
+                <AppIcon name="camera-reverse-outline" size={28} color="#fff" fixedColor />
+              </TouchableOpacity>
+            </View>
           </View>
         </Modal>
       )}
@@ -6126,13 +6156,14 @@ const styles = StyleSheet.create({
 
   // Camera UI
   cameraControls: {
-    position: 'absolute', bottom: 40, left: 0, right: 0,
+    position: 'absolute', bottom: 0, left: 0, right: 0,
     flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center',
+    paddingTop: 16,
   },
   cameraCloseBtn: { width: 52, height: 52, borderRadius: 26, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
   cameraFlipBtn: { width: 52, height: 52, borderRadius: 26, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
   cameraTopCloseBtn: {
-    position: 'absolute', top: 52, right: 18, zIndex: 10,
+    position: 'absolute', right: 18, zIndex: 10,
     width: 44, height: 44, borderRadius: 22,
     backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center',
   },

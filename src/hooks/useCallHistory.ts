@@ -6,7 +6,7 @@ import { socketClient } from '../realtime/socket';
 
 export function useCallHistory(userId: string | null) {
   const [callHistory, setCallHistory] = useState<CallHistoryItem[]>([]);
-  const [loading,     setLoading]     = useState(true);
+  const [loading,     setLoading]     = useState(false);
   const [error,       setError]       = useState<string | null>(null);
 
   useEffect(() => {

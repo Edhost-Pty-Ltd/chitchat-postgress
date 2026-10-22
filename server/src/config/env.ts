@@ -47,6 +47,13 @@ const schema = z.object({
 
   EXPO_PUSH_URL: z.string().default('https://exp.host/--/api/v2/push/send'),
 
+  // How long (seconds) a verified Firebase token's decoded identity is cached
+  // in memory to avoid a network round-trip to Firebase on every request. A
+  // revoked/removed token can remain accepted for at most this long on the HTTP
+  // path; the socket handshake always does a fresh checkRevoked verification.
+  // Set to 0 to disable caching entirely.
+  AUTH_TOKEN_CACHE_TTL_SEC: z.coerce.number().int().min(0).default(60),
+
   // AI meeting minutes (old summarizeMeetingRecording Cloud Function). Optional:
   // without a key the summarize endpoints answer 503 and everything else works.
   GEMINI_API_KEY: z.string().optional(),

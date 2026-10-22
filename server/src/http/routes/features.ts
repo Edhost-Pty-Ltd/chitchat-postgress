@@ -5,6 +5,7 @@ import { Errors } from '../errors.js';
 import { getAdminAuth } from '../../auth/firebaseAdmin.js';
 import { getUserById } from '../../db/repositories/users.js';
 import { isMember } from '../../db/repositories/chats.js';
+import { isBlocked } from '../../db/repositories/blocks.js';
 import { emitToUser } from '../../realtime/emitter.js';
 import {
   muteSchema,
@@ -82,7 +83,18 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
   app.post('/profile-views', { preHandler: requireAuth }, async (request) => {
     const viewerId = request.identity!.userId;
     const { viewedUid } = parse(recordProfileViewSchema, request.body);
-    await recordProfileView(viewedUid, viewerId);
+    // Don't let a blocked viewer bump (or a user arbitrarily inflate) another
+    // user's profile-view counters. recordProfileView already ignores
+    // self-views; here we additionally drop the view when either party has
+    // blocked the other. (This is a soft counter, so we no-op silently rather
+    // than error.)
+    const [iBlocked, blockedMe] = await Promise.all([
+      isBlocked(viewerId, viewedUid),
+      isBlocked(viewedUid, viewerId),
+    ]);
+    if (!iBlocked && !blockedMe) {
+      await recordProfileView(viewedUid, viewerId);
+    }
     return { ok: true };
   });
 
