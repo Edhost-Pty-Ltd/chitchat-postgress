@@ -1,6 +1,7 @@
 ﻿// ─── Screen: Status ──────────────────────────────────────────────────────────
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, FlatList, TouchableOpacity, StyleSheet, Platform, ActivityIndicator, Image } from 'react-native';
+import { View, FlatList, TouchableOpacity, StyleSheet, Platform, ActivityIndicator } from 'react-native';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect } from '@react-navigation/native';
 import { UserAvatar, StatusViewer, CreateStatusModal, BottomNav } from '../components';
@@ -88,16 +89,21 @@ export default function StatusScreen() {
       ...contactStatuses.flatMap((g) => g.statuses),
     ];
     allStatuses.forEach((s) => {
-      // Prefetch the main media URL for images, and the thumbnail for videos
+      // Warm the expo-image cache so the viewer renders instantly:
+      //  - image: full media URL + its thumbnail (blurred placeholder)
+      //  - video: thumbnail (blurred poster shown while the video buffers)
+      //  - avatar for the header
       const urls = [
         s.mediaType === 'image'  ? s.mediaUrl       : null,
+        s.mediaType === 'image'  ? s.thumbnailUrl   : null,
         s.mediaType === 'video'  ? s.thumbnailUrl   : null,
         s.photoURL,                                          // avatar
       ].filter((u): u is string => !!u && !prefetchedRef.current.has(u));
 
       urls.forEach((url) => {
         prefetchedRef.current.add(url);
-        Image.prefetch(url).catch(() => {}); // silent — cache is best-effort
+        // expo-image prefetch → fills the same memory-disk cache the viewer reads.
+        Image.prefetch(url, { cachePolicy: 'memory-disk' }).catch(() => {});
       });
     });
   }, [myStatuses, contactStatuses]);
@@ -323,7 +329,7 @@ export default function StatusScreen() {
           <AppText style={[styles.myCardTitle, { color: FG.primary }]}>My Status</AppText>
           <AppText style={[styles.myCardSub, { color: FG.secondary }]}>
             {myStatuses.length > 0
-              ? `${formatTimeAgo(myStatuses[0].createdAt)} • Tap to view`
+              ? `${formatTimeAgo(myStatuses.reduce((latest, s) => (s.createdAt > latest ? s.createdAt : latest), myStatuses[0].createdAt))} • Tap to view`
               : 'Tap to add status update'}
           </AppText>
         </View>

@@ -17,7 +17,21 @@ const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
   DATABASE_URL: z.string().min(1),
+  // Postgres TLS. Managed providers (AWS RDS, etc.) require TLS in production.
+  //   disable  — no TLS (local dev / docker-compose). Default.
+  //   require  — TLS on, but the server certificate chain is NOT verified
+  //              (use with RDS when you don't ship the RDS CA bundle).
+  //   verify   — TLS on and the certificate chain IS verified against the
+  //              system CAs plus any PEM in DATABASE_CA_CERT.
+  DATABASE_SSL: z.enum(['disable', 'require', 'verify']).default('disable'),
+  // Optional PEM (the RDS/global bundle) used when DATABASE_SSL=verify. Either
+  // the certificate contents inline, or a path to a .pem file.
+  DATABASE_CA_CERT: z.string().optional(),
+
   REDIS_URL: z.string().min(1),
+  // Enable TLS for Redis (ElastiCache in-transit encryption). When the
+  // REDIS_URL scheme is `rediss://` this is implied; set true to force it.
+  REDIS_TLS: booleanish.default(false),
 
   S3_ENDPOINT: z.string().min(1),
   S3_REGION: z.string().min(1).default('us-east-1'),

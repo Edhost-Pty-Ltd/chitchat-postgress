@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import runner from 'node-pg-migrate';
 import { getEnv } from '../config/env.js';
 import { logger } from '../config/logger.js';
+import { sslConfig } from './pool.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // migrations/ lives at the server root, two levels up from src/db/.
@@ -16,7 +17,9 @@ const MIGRATIONS_DIR = join(__dirname, '..', '..', 'migrations');
 export async function runMigrations(direction: 'up' | 'down' = 'up'): Promise<string[]> {
   const env = getEnv();
   const migrated = await runner({
-    databaseUrl: env.DATABASE_URL,
+    // Pass a ClientConfig so migrations honour DATABASE_SSL (e.g. RDS TLS),
+    // the same way the runtime pool does.
+    databaseUrl: { connectionString: env.DATABASE_URL, ssl: sslConfig() },
     dir: MIGRATIONS_DIR,
     direction,
     migrationsTable: 'pgmigrations',

@@ -138,8 +138,10 @@ async function attachViews(statusIds: string[]): Promise<Map<string, string[]>> 
 
 /** The authenticated user's own unexpired statuses. */
 export async function listOwnStatuses(userId: string): Promise<StatusRecord[]> {
+  // Oldest → newest so the viewer plays statuses first-to-recent, matching the
+  // order a viewer sees them in (WhatsApp-style story order).
   const res = await query<StatusDbRow>(
-    `SELECT * FROM statuses WHERE user_id = $1 AND expires_at > now() ORDER BY created_at DESC`,
+    `SELECT * FROM statuses WHERE user_id = $1 AND expires_at > now() ORDER BY created_at ASC`,
     [userId],
   );
   const views = await attachViews(res.rows.map((r) => r.id));
@@ -175,7 +177,9 @@ export async function listVisibleStatuses(viewerId: string): Promise<StatusRecor
                 SELECT 1 FROM status_visibility_users v
                 WHERE v.status_id = s.id AND v.mode = 'only' AND v.user_id = $1))
         )
-      ORDER BY s.created_at DESC`,
+      -- Oldest → newest so each contact's statuses play first-to-recent in the
+      -- viewer (WhatsApp-style story order).
+      ORDER BY s.created_at ASC`,
     [viewerId],
   );
   const views = await attachViews(res.rows.map((r) => r.id));

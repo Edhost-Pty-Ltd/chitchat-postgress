@@ -1,12 +1,39 @@
-import { Pool, type PoolClient, type QueryResultRow } from 'pg';
+import { readFileSync } from 'node:fs';
+import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from 'pg';
 import { getEnv } from '../config/env.js';
 
 let pool: Pool | null = null;
 
+/**
+ * Build the pg SSL option from DATABASE_SSL (Req 12.1 — encrypt in transit).
+ *   disable → no TLS (local dev).
+ *   require → TLS on, certificate chain NOT verified (RDS without a CA bundle).
+ *   verify  → TLS on, chain verified against system CAs + DATABASE_CA_CERT.
+ * Returns undefined for `disable` so behaviour is unchanged locally.
+ */
+export function sslConfig(): PoolConfig['ssl'] {
+  const env = getEnv();
+  switch (env.DATABASE_SSL) {
+    case 'disable':
+      return undefined;
+    case 'require':
+      return { rejectUnauthorized: false };
+    case 'verify': {
+      const ca = env.DATABASE_CA_CERT;
+      // Accept either inline PEM or a path to a .pem file.
+      const caPem = ca && !ca.includes('BEGIN CERTIFICATE') ? readFileSync(ca, 'utf8') : ca;
+      return { rejectUnauthorized: true, ca: caPem };
+    }
+  }
+}
+
 /** Lazily create the shared pg Pool. */
 export function getPool(): Pool {
   if (!pool) {
-    pool = new Pool({ connectionString: getEnv().DATABASE_URL });
+    pool = new Pool({
+      connectionString: getEnv().DATABASE_URL,
+      ssl: sslConfig(),
+    });
   }
   return pool;
 }

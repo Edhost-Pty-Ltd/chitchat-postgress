@@ -84,6 +84,8 @@ export function useStatus(currentUserId: string | null, isCompanion = false) {
       const res = await endpoints.listStatuses();
       if (!active) return;
       if (res.ok) {
+        // Refetches (focus, socket events) are silent — we already have data on
+        // screen, so never flip back to the full-screen "Loading..." spinner.
         const mine   = res.data.myStatuses.map(backendToFireStatus);
         const others = res.data.contactStatuses.map((g) => {
           const statuses = g.statuses.map(backendToFireStatus);
