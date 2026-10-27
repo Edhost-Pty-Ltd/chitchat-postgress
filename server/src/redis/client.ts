@@ -1,5 +1,6 @@
 import { Redis, type RedisOptions } from 'ioredis';
 import { getEnv } from '../config/env.js';
+import { logger } from '../config/logger.js';
 
 let general: Redis | null = null;
 let pub: Redis | null = null;
@@ -21,19 +22,31 @@ function redisOptions(): RedisOptions {
 
 /** Shared Redis connection for presence, typing, rate limits, buffers. */
 export function getRedis(): Redis {
-  if (!general) general = new Redis(getEnv().REDIS_URL, redisOptions());
+  if (!general) {
+    general = new Redis(getEnv().REDIS_URL, redisOptions());
+    // Without an 'error' listener ioredis emits a generic "missing 'error'
+    // handler" warning and hides the real connection error. Log it so
+    // ECONNREFUSED/ETIMEDOUT/TLS failures are visible in the logs.
+    general.on('error', (err) => logger.error({ err }, 'Redis client error'));
+  }
   return general;
 }
 
 /** Dedicated publisher connection for the Socket.IO Redis adapter (Req 5.16). */
 export function getPubClient(): Redis {
-  if (!pub) pub = new Redis(getEnv().REDIS_URL, redisOptions());
+  if (!pub) {
+    pub = new Redis(getEnv().REDIS_URL, redisOptions());
+    pub.on('error', (err) => logger.error({ err }, 'Redis pub client error'));
+  }
   return pub;
 }
 
 /** Dedicated subscriber connection for the Socket.IO Redis adapter (Req 5.16). */
 export function getSubClient(): Redis {
-  if (!sub) sub = getPubClient().duplicate();
+  if (!sub) {
+    sub = getPubClient().duplicate();
+    sub.on('error', (err) => logger.error({ err }, 'Redis sub client error'));
+  }
   return sub;
 }
 
@@ -60,7 +73,8 @@ export async function pingRedis(): Promise<boolean> {
   try {
     const res = await getRedis().ping();
     return res === 'PONG';
-  } catch {
+  } catch (err) {
+    logger.error({ err }, 'Redis health ping failed');
     return false;
   }
 }

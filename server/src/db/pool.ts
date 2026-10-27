@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from 'pg';
 import { getEnv } from '../config/env.js';
+import { logger } from '../config/logger.js';
 
 let pool: Pool | null = null;
 
@@ -71,7 +72,11 @@ export async function pingPostgres(): Promise<boolean> {
   try {
     await getPool().query('SELECT 1');
     return true;
-  } catch {
+  } catch (err) {
+    // Surface the real reason (ETIMEDOUT = SG/network, ECONNREFUSED = wrong
+    // host/port, auth/SSL errors) instead of swallowing it, so /health 503s
+    // are diagnosable from the logs.
+    logger.error({ err }, 'Postgres health ping failed');
     return false;
   }
 }
