@@ -8,7 +8,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View, ScrollView, StyleSheet, TouchableOpacity, Image,
-  ActivityIndicator, RefreshControl, Dimensions, Animated, Easing,
+  RefreshControl, Dimensions, Animated, Easing,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -121,7 +121,6 @@ export default function DashboardScreen() {
   const { bevel }                 = useGlass();
 
   const [profile,    setProfile]    = useState<UserProfile | null>(null);
-  const [loading,    setLoading]    = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   // ── Message analytics (server-computed) ───────────────────────────────────
@@ -133,7 +132,7 @@ export default function DashboardScreen() {
   // address, workSchedule; `about` is the business description). Profile-view
   // counters come from /me/profile-views.
   const loadProfile = useCallback(async () => {
-    if (!userId) { setLoading(false); return; }
+    if (!userId) { return; }
     try {
       const [meRes, viewsRes] = await Promise.all([
         endpoints.getMe(),
@@ -160,8 +159,6 @@ export default function DashboardScreen() {
       }
     } catch (err) {
       console.warn('[Dashboard] profile load error:', err);
-    } finally {
-      setLoading(false);
     }
   }, [userId]);
 
@@ -280,22 +277,17 @@ export default function DashboardScreen() {
         </TouchableOpacity>
       </View>
 
-      {loading ? (
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color={COLORS.blue} />
-        </View>
-      ) : (
-        <ScrollView
-          contentContainerStyle={[styles.scroll, { paddingBottom: insets.bottom + 170 }]}
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={COLORS.blue}
-            />
-          }
-        >
+      <ScrollView
+        contentContainerStyle={[styles.scroll, { paddingBottom: insets.bottom + 170 }]}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={COLORS.blue}
+          />
+        }
+      >
           {/* ── Business card ── */}
           <FadeSlideIn delay={0}>
             <View style={[styles.bizCard, bevel]}>
@@ -532,7 +524,7 @@ export default function DashboardScreen() {
               <ActionRow
                 icon="storefront-outline"
                 label="Manage catalog"
-                onPress={() => navigation.navigate('Profile')}
+                onPress={() => navigation.navigate('Profile', { scrollTo: 'catalog' } as never)}
                 textColor={textColor}
                 fgSecondary={FG.secondary}
               />
@@ -560,7 +552,6 @@ export default function DashboardScreen() {
             </AppText>
           </FadeSlideIn>
         </ScrollView>
-      )}
 
       <BottomNav active="dashboard" />
     </View>

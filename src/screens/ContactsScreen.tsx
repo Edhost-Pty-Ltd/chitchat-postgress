@@ -231,6 +231,10 @@ export default function ContactsScreen() {
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.listContent}
           ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+          removeClippedSubviews
+          maxToRenderPerBatch={15}
+          windowSize={10}
+          initialNumToRender={15}
           ListEmptyComponent={
             <View style={styles.emptyWrap}>
               <AppIcon name="people-outline" size={48} color={COLORS.sub} />

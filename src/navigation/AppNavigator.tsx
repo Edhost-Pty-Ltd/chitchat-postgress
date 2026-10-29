@@ -1,6 +1,6 @@
 // ─── Navigation ──────────────────────────────────────────────────────────────
 import React, { useState, useEffect, useCallback, lazy, Suspense } from 'react';
-import { View, ActivityIndicator, StyleSheet, Text, TouchableOpacity, InteractionManager } from 'react-native';
+import { View, StyleSheet, Text, TouchableOpacity, InteractionManager } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../types';
 import { useAuth } from '../context/AuthContext';
@@ -189,23 +189,22 @@ export default function AppNavigator() {
     }
   }, [isSignedIn, profileExists, profileCheckError, phone, isCompanion]);
 
+  // While auth hydrates from AsyncStorage, show the app background only.
+  // The spinner is intentionally omitted — on fast devices AsyncStorage resolves
+  // in <50ms and users never see a blank screen; on slow ones the themed
+  // background is more comfortable than a spinner.
   if (loading) {
     return (
       <View style={styles.splash}>
         <AppBg />
-        <ActivityIndicator size="large" color={COLORS.blue} />
       </View>
     );
   }
 
-  if (isSignedIn && profileExists === null && !profileCheckError) {
-    return (
-      <View style={styles.splash}>
-        <AppBg />
-        <ActivityIndicator size="large" color={COLORS.blue} />
-      </View>
-    );
-  }
+  // Profile check is running in background — treat the user as authenticated
+  // optimistically so the navigator renders immediately. checkProfileExists will
+  // sign them out if the profile genuinely doesn't exist (404 from the server).
+  // This collapses the two sequential loading phases into one.
 
   if (isSignedIn && profileCheckError) {
     return (
@@ -228,7 +227,10 @@ export default function AppNavigator() {
     );
   }
 
-  const authenticated = isSignedIn && profileExists;
+  // profileExists===null means the check is still running: treat it as true
+  // so the navigator renders the main app immediately. If the check concludes
+  // the profile doesn't exist, the useEffect above will sign the user out.
+  const authenticated = isSignedIn && (profileExists !== false);
 
   return (
     <>

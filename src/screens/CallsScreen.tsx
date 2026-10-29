@@ -609,6 +609,10 @@ export default function CallsScreen() {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.listContent}
         ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+        removeClippedSubviews
+        maxToRenderPerBatch={10}
+        windowSize={8}
+        initialNumToRender={12}
         ListHeaderComponent={
           loading ? (
             <View style={styles.loadingRow}>

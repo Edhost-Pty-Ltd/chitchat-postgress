@@ -1,6 +1,6 @@
 ﻿// ─── Screen: Status ──────────────────────────────────────────────────────────
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, FlatList, TouchableOpacity, StyleSheet, Platform, ActivityIndicator } from 'react-native';
+import { View, FlatList, TouchableOpacity, StyleSheet, Platform } from 'react-native';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect } from '@react-navigation/native';
@@ -345,12 +345,7 @@ export default function StatusScreen() {
       </TouchableOpacity>
 
       {/* Loading / Error / Empty states */}
-      {loading ? (
-        <View style={styles.centerContainer}>
-          <ActivityIndicator size="large" color={COLORS.blue} />
-          <AppText style={[styles.emptyText, { color: FG.secondary }]}>Loading statuses...</AppText>
-        </View>
-      ) : error ? (
+      {loading && visibleContactStatuses.length === 0 && !error ? null : error ? (
         <View style={styles.centerContainer}>
           <AppIcon name="alert-circle-outline" size={52} color={COLORS.sub} />
           <AppText style={[styles.emptyText, { color: FG.secondary }]}>{error}</AppText>
@@ -381,6 +376,10 @@ export default function StatusScreen() {
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.listContent}
             ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+            removeClippedSubviews
+            maxToRenderPerBatch={10}
+            windowSize={8}
+            initialNumToRender={10}
           />
         </>
       )}

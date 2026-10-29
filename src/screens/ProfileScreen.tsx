@@ -18,7 +18,7 @@ import {
 } from 'react-native';
 import DateTimePickerModal from 'react-native-modal-datetime-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import {
@@ -283,6 +283,84 @@ function resolveBusinessProfile(me: MeResponse): {
   };
 }
 
+// ─── EditableField ────────────────────────────────────────────────────────────
+// Defined OUTSIDE ProfileScreen so React never treats it as a new component
+// type on re-render. Previously it was a const inside the function body, which
+// caused the TextInput to unmount/remount on every keystroke (keyboard bounce).
+interface EditableFieldProps {
+  field: string;
+  label: string;
+  icon: string;
+  value: string;
+  placeholder: string;
+  keyboardType?: any;
+  isMultiline?: boolean;
+  readOnly?: boolean;
+  editingField: string | null;
+  draftValue: string;
+  onDraftChange: (text: string) => void;
+  onStartEdit: (field: string, currentValue: string) => void;
+  onSave: (field: string, value: string) => void;
+  textColor: string;
+  fontFamily: string;
+  fieldInputRef: React.RefObject<TextInput>;
+}
+
+function EditableField({
+  field, label, icon, value, placeholder, keyboardType, isMultiline, readOnly,
+  editingField, draftValue, onDraftChange, onStartEdit, onSave,
+  textColor, fontFamily, fieldInputRef,
+}: EditableFieldProps) {
+  return (
+    <TouchableOpacity
+      style={styles.infoCard}
+      activeOpacity={readOnly ? 1 : 0.8}
+      onPress={() => { if (!readOnly) onStartEdit(field, value); }}
+      disabled={readOnly}
+    >
+      <View style={styles.iconCircle}>
+        <AppIcon name={icon as any} size={18} color={COLORS.blue} fixedColor />
+      </View>
+      <View style={styles.infoContent}>
+        <AppText style={[styles.infoLabel, { fontFamily }]}>{label}</AppText>
+        {editingField === field && !readOnly ? (
+          <TextInput
+            ref={fieldInputRef}
+            multiline={isMultiline}
+            style={[styles.infoInput, { color: textColor, fontFamily }]}
+            value={draftValue}
+            onChangeText={onDraftChange}
+            placeholder={placeholder}
+            placeholderTextColor={COLORS.textFaint}
+            returnKeyType="done"
+            keyboardType={keyboardType}
+            autoCapitalize="none"
+            onSubmitEditing={() => onSave(field, draftValue)}
+            onBlur={() => onSave(field, draftValue)}
+            autoFocus
+          />
+        ) : (
+          <AppText
+            style={[styles.infoValue, { color: value ? textColor : COLORS.textFaint, fontFamily }]}
+            numberOfLines={isMultiline ? 3 : 1}
+          >
+            {value || placeholder}
+          </AppText>
+        )}
+      </View>
+      {!readOnly && (
+        editingField === field ? (
+          <TouchableOpacity onPress={() => onSave(field, draftValue)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <AppIcon name="checkmark-circle" size={22} fixedColor color={COLORS.blue} />
+          </TouchableOpacity>
+        ) : (
+          <AppIcon name="create-outline" size={16} color={COLORS.sub} />
+        )
+      )}
+    </TouchableOpacity>
+  );
+}
+
 export default function ProfileScreen() {
   const navigation = useNavigation();
 
@@ -306,6 +384,19 @@ export default function ProfileScreen() {
   const [editingName, setEditingName] = useState(false);
   const [draftName,   setDraftName]   = useState(displayName || 'Demo Business');
   const nameInputRef = useRef<TextInput>(null);
+  const scrollViewRef = useRef<ScrollView>(null);
+  const catalogSectionY = useRef<number>(0);
+
+  // If navigated with { scrollTo: 'catalog' }, scroll down once the layout is ready.
+  const route = useRoute();
+  const scrollToCatalog = (route.params as any)?.scrollTo === 'catalog';
+  useEffect(() => {
+    if (!scrollToCatalog) return;
+    const timer = setTimeout(() => {
+      scrollViewRef.current?.scrollTo({ y: catalogSectionY.current, animated: true });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [scrollToCatalog]);
 
   // Business fields
   const [email,   setEmail]   = useState('');
@@ -879,55 +970,6 @@ export default function ProfileScreen() {
 
   const initials = shownName.split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
 
-  // ── Editable field card component ──────────────────────────────────────────
-  const EditableField = ({ field, label, icon, value, placeholder, keyboardType ,isMultiline, readOnly}: {
-    field: string; label: string; icon: string; value: string; placeholder: string; keyboardType?: any;isMultiline?:boolean; readOnly?: boolean;
-  }) => (
-    <TouchableOpacity
-      style={styles.infoCard}
-      activeOpacity={readOnly ? 1 : 0.8}
-      onPress={() => { if (!readOnly) startEditField(field, value); }}
-      disabled={readOnly}
-    >
-      <View style={styles.iconCircle}>
-        <AppIcon name={icon as any} size={18} color={COLORS.blue} fixedColor />
-      </View>
-      <View style={styles.infoContent}>
-        <AppText style={[styles.infoLabel, { fontFamily }]}>{label}</AppText>
-        {editingField === field && !readOnly ? (
-          <TextInput
-            ref={fieldInputRef}
-            multiline={isMultiline}
-            style={[styles.infoInput, { color: textColor, fontFamily }]}
-            value={draftValue}
-            onChangeText={setDraftValue}
-            placeholder={placeholder}
-            placeholderTextColor={COLORS.textFaint}
-            returnKeyType="done"
-            keyboardType={keyboardType}
-            autoCapitalize="none"
-            onSubmitEditing={() => saveField(field, draftValue)}
-            onBlur={() => saveField(field, draftValue)}
-            autoFocus
-          />
-        ) : (
-          <AppText style={[styles.infoValue, { color: value ? textColor : COLORS.textFaint, fontFamily }]} numberOfLines={isMultiline ? 3 : 1}>
-            {value || placeholder}
-          </AppText>
-        )}
-      </View>
-      {!readOnly && (
-        editingField === field ? (
-          <TouchableOpacity onPress={() => saveField(field, draftValue)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <AppIcon name="checkmark-circle" size={22} fixedColor color={COLORS.blue} />
-          </TouchableOpacity>
-        ) : (
-          <AppIcon name="create-outline" size={16} color={COLORS.sub} />
-        )
-      )}
-    </TouchableOpacity>
-  );
-
   const showAutoResponderEditor = autoResponderEnabled || autoResponderPending;
 
   return (
@@ -944,6 +986,7 @@ export default function ProfileScreen() {
       </View>
 
       <ScrollView
+        ref={scrollViewRef}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.scroll}
         keyboardShouldPersistTaps="handled"
@@ -1076,6 +1119,14 @@ export default function ProfileScreen() {
             placeholder="Add email address"
             keyboardType="email-address"
             readOnly={isCompanion}
+            editingField={editingField}
+            draftValue={draftValue}
+            onDraftChange={setDraftValue}
+            onStartEdit={startEditField}
+            onSave={saveField}
+            textColor={textColor}
+            fontFamily={fontFamily}
+            fieldInputRef={fieldInputRef}
           />
 
           {/* Website */}
@@ -1087,6 +1138,14 @@ export default function ProfileScreen() {
             placeholder="Add website URL"
             keyboardType="url"
             readOnly={isCompanion}
+            editingField={editingField}
+            draftValue={draftValue}
+            onDraftChange={setDraftValue}
+            onStartEdit={startEditField}
+            onSave={saveField}
+            textColor={textColor}
+            fontFamily={fontFamily}
+            fieldInputRef={fieldInputRef}
           />
 
           {/* Industry */}
@@ -1124,6 +1183,14 @@ export default function ProfileScreen() {
             placeholder="Tell customers what your business does…"
             isMultiline
             readOnly={isCompanion}
+            editingField={editingField}
+            draftValue={draftValue}
+            onDraftChange={setDraftValue}
+            onStartEdit={startEditField}
+            onSave={saveField}
+            textColor={textColor}
+            fontFamily={fontFamily}
+            fieldInputRef={fieldInputRef}
           />
 
           {/* Work Hours */}
@@ -1264,7 +1331,6 @@ export default function ProfileScreen() {
                   multiline
                   numberOfLines={4}
                   textAlignVertical="top"
-                  autoFocus
                 />
               ) : (
                 <EditableField
@@ -1276,6 +1342,14 @@ export default function ProfileScreen() {
                   placeholder="No message set"
                   keyboardType="default"
                   readOnly={isCompanion}
+                  editingField={editingField}
+                  draftValue={draftValue}
+                  onDraftChange={setDraftValue}
+                  onStartEdit={startEditField}
+                  onSave={saveField}
+                  textColor={textColor}
+                  fontFamily={fontFamily}
+                  fieldInputRef={fieldInputRef}
                 />
               )}
 
@@ -1308,7 +1382,7 @@ export default function ProfileScreen() {
         </View>
 
         {/* ── Catalog ── */}
-        <View style={styles.section}>
+        <View style={styles.section} onLayout={(e) => { catalogSectionY.current = e.nativeEvent.layout.y; }}>
           <View style={styles.sectionHeader}>
             <AppText style={[styles.sectionTitle, { color: COLORS.sub, fontFamily }]}>CATALOG</AppText>
             {/* Hide add buttons on companion */}
