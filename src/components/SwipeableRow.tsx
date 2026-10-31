@@ -10,7 +10,7 @@
 
 import React, { useRef, useState, useImperativeHandle, forwardRef, useEffect, useCallback } from 'react';
 import {
-  View, Animated, PanResponder, StyleSheet, TouchableOpacity, Text,
+  View, Animated, PanResponder, StyleSheet, TouchableOpacity, Text, Alert,
 } from 'react-native';
 import { AppIcon } from '../context/ThemeContext';
 
@@ -19,6 +19,8 @@ export interface SwipeAction {
   label: string;
   icon: string;
   color: string;        // background colour of the button
+  /** Optional one-line explanation shown on long-press. */
+  hint?: string;
   onPress: () => void;
 }
 
@@ -134,6 +136,8 @@ export const SwipeableRow = forwardRef<SwipeableRowHandle, Props>(function Swipe
               style={[styles.actionBtn, { width: actionWidth, backgroundColor: a.color }]}
               activeOpacity={0.8}
               onPress={() => { close(); a.onPress(); }}
+              onLongPress={() => a.hint && Alert.alert(a.label, a.hint)}
+              delayLongPress={300}
             >
               <AppIcon name={a.icon as any} size={20} color="#fff" fixedColor />
               <Text style={styles.actionLabel} numberOfLines={1}>{a.label}</Text>

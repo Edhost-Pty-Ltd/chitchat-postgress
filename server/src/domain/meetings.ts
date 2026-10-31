@@ -9,7 +9,10 @@ import {
   setRecordingStatus,
   setMeetingMinutes,
   addMeetingMessage,
+  type MeetingType,
+  type MeetingLocation,
 } from '../db/repositories/meetings.js';
+import { getEnv } from '../config/env.js';
 import { emitToUser, emitToMeeting } from '../realtime/emitter.js';
 import { summarizeRecordingObject } from '../ai/summarizeRecording.js';
 import { fanOutMessage } from './messaging.js';
@@ -30,23 +33,54 @@ export async function broadcastMeetingUpdate(meetingId: string, reason: string):
 }
 
 /**
- * Invite people the way the old app did: a system message from the organizer
- * in each invitee's direct chat, which also triggers their push notification.
+ * Build the public web link that opens the meeting room in a browser.
+ */
+export function meetingJoinUrl(meetingId: string): string {
+  const base = getEnv().MEET_URL_BASE.replace(/\/+$/, '');
+  return `${base}/meet/${meetingId}`;
+}
+
+export interface MeetingInviteInfo {
+  id: string;
+  title: string;
+  startsAt: string;
+  endsAt: string;
+  type: MeetingType;
+  location: MeetingLocation | null;
+}
+
+/**
+ * Invite people with a rich meeting card in each invitee's direct chat (also
+ * triggers their push notification). The card carries the join link and venue
+ * details so the client can render a "Join" button instead of plain text.
  */
 export async function sendMeetingInvites(
   organizerId: string,
   organizerName: string,
-  title: string,
+  meeting: MeetingInviteInfo,
   inviteeIds: string[],
 ): Promise<void> {
+  const joinUrl = meetingJoinUrl(meeting.id);
+  const card = {
+    meetingId: meeting.id,
+    title: meeting.title,
+    startsAt: meeting.startsAt,
+    endsAt: meeting.endsAt,
+    venue: meeting.type,
+    joinUrl,
+    organizerName,
+    location: meeting.type === 'in-person' ? meeting.location : null,
+  };
   for (const inviteeId of inviteeIds) {
     if (inviteeId === organizerId) continue;
     try {
       const chatId = await getOrCreateDirectChat(organizerId, inviteeId);
       const { message, created } = await sendMessage(chatId, organizerId, {
-        type: 'system',
-        subtype: 'meeting_invite',
-        text: `You're invited to the meeting "${title}" by ${organizerName}.`,
+        type: 'meeting',
+        // Fallback text keeps chat-list previews, pushes and any older client
+        // readable even though the card is the real content.
+        text: `📅 You're invited to "${meeting.title}" by ${organizerName}.`,
+        meeting: card,
       });
       if (created) await fanOutMessage(message, organizerName);
     } catch (err) {

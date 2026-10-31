@@ -9,7 +9,12 @@ export function generateFileName(extension: string): string {
 }
 
 export function getFileExtension(uri: string): string {
-  return uri.split('.').pop()?.toLowerCase() || 'jpg';
+  // Strip a URL's query/fragment first. Presigned URLs contain many dots and
+  // long query parameters; treating that suffix as an extension makes the
+  // server reject upload metadata (ext is capped at 10 characters).
+  const path = uri.split(/[?#]/, 1)[0];
+  const match = /\.([a-z0-9]{1,10})$/i.exec(path);
+  return match?.[1].toLowerCase() ?? 'jpg';
 }
 
 export function getMimeType(uri: string): string {

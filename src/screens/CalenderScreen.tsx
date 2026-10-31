@@ -3,7 +3,7 @@ import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react'
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet, TextInput, Modal,
   Pressable, ScrollView, Animated, Platform, ActivityIndicator,
-  Alert, Image, Easing, Share,
+  Alert, Image, Easing, Share, Linking,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -26,6 +26,8 @@ import { useContacts, AppContact } from '../hooks/useContacts';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
+import { LocationSearchModal, type SelectedPlace } from '../components/LocationSearchModal';
+import { meetingJoinUrl } from '../config/env';
 
 const HOUR_HEIGHT = 70; // Height per hour in the timeline
 
@@ -43,6 +45,7 @@ interface Meeting {
   participants: string[];
   organizerId: string;
   type: 'online' | 'in-person';
+  location: { name: string | null; address: string | null; lat: number | null; lng: number | null } | null;
   reminders: number[];
   minutes: string | null;
   hasRecordings: boolean;
@@ -151,6 +154,7 @@ const toMeeting = (m: MeetingListItem): Meeting => {
     participants: m.participants ?? [],
     organizerId: m.organizerId ?? '',
     type: m.type ?? 'online',
+    location: m.location ?? null,
     reminders: m.reminders ?? [],
     minutes: m.minutes ?? null,
     hasRecordings: !!m.hasRecordings,
@@ -355,6 +359,11 @@ function NewMeetingSheet({
   const { textColor } = useTypography();
   const duration = useMemo(() => calcDuration(startTime, endTime), [startTime, endTime]);
 
+  // ── Venue: virtual (web meeting link) or in-person (real searched place) ──
+  const [venue, setVenue] = useState<'online' | 'in-person'>('online');
+  const [venueLocation, setVenueLocation] = useState<SelectedPlace | null>(null);
+  const [locationModalOpen, setLocationModalOpen] = useState(false);
+
   const [phoneCount, setPhoneCount] = useState(0);
   useEffect(() => {
     (async () => {
@@ -386,7 +395,17 @@ function NewMeetingSheet({
         participants: allParticipants,
         startsAt: startTime.toISOString(),
         endsAt: endTime.toISOString(),
-        type: 'online',
+        type: venue,
+        location:
+          venue === 'in-person' && venueLocation
+            ? {
+                name: venueLocation.name,
+                address: venueLocation.address,
+                lat: venueLocation.lat,
+                lng: venueLocation.lng,
+                placeId: venueLocation.placeId,
+              }
+            : null,
         reminders: REMINDER_MILESTONES,
         organizerName: (displayName || '').trim().slice(0, 200) || null,
       });
@@ -460,6 +479,42 @@ function NewMeetingSheet({
         console.warn('[handleCreate] Failed to schedule meeting reminders:', notifErr);
       }
 
+      // For an online meeting, surface the shareable web link immediately so the
+      // organiser can copy / share / open it. In-person meetings use a venue,
+      // not a web room, so they skip this.
+      if (venue !== 'in-person') {
+        const link = meetingJoinUrl(meetingId);
+        Alert.alert(
+          'Meeting created',
+          `Share this link so anyone can join from a browser:\n\n${link}`,
+          [
+            {
+              text: 'Copy link',
+              onPress: async () => {
+                try {
+                  const { Clipboard } = await import('react-native');
+                  Clipboard.setString(link);
+                  Alert.alert('Copied', 'Meeting link copied to clipboard.');
+                } catch { /* ignore */ }
+              },
+            },
+            {
+              text: 'Share',
+              onPress: () => { Share.share({ message: link, url: link }).catch(() => {}); },
+            },
+            {
+              text: 'Open',
+              onPress: () => {
+                Linking.openURL(link).catch(() =>
+                  Alert.alert('Cannot open link', 'Unable to open the meeting link.'),
+                );
+              },
+            },
+            { text: 'Done', style: 'cancel' },
+          ],
+        );
+      }
+
       onDone();
     } catch (e) {
       console.error('Error creating meeting: ', e);
@@ -524,9 +579,80 @@ function NewMeetingSheet({
           </View>
         </View>
 
+        {/* ── Venue: virtual (a web meeting link) or in-person (a real place) ── */}
+        <AppText style={styles.inputLabel}>Venue</AppText>
+        <View style={{ flexDirection: 'row', gap: 10 }}>
+          {([
+            ['online', 'Virtual', 'videocam-outline'],
+            ['in-person', 'In person', 'location-outline'],
+          ] as const).map(([val, label, icon]) => {
+            const active = venue === val;
+            return (
+              <TouchableOpacity key={val} activeOpacity={0.85} style={{ flex: 1 }} onPress={() => setVenue(val)}>
+                {active ? (
+                  <LinearGradient colors={GRADIENTS.primary} style={styles.venuePill}>
+                    <AppIcon name={icon} size={16} color="#fff" fixedColor />
+                    <AppText fixedColor style={styles.venuePillTextActive}>{label}</AppText>
+                  </LinearGradient>
+                ) : (
+                  <View style={[styles.venuePill, bevel]}>
+                    <AppIcon name={icon} size={16} color={COLORS.sub} />
+                    <AppText style={[styles.venuePillText, { color: textColor }]}>{label}</AppText>
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        {venue === 'online' ? (
+          <View style={[styles.autoReminderInfo, bevel, { marginTop: 10 }]}>
+            <AppIcon name="link-outline" size={18} color={COLORS.blue} />
+            <View style={{ flex: 1 }}>
+              <AppText style={[styles.autoReminderTitle, { color: textColor }]}>A meeting link is created</AppText>
+              <AppText style={styles.autoReminderSub}>
+                Invitees get a card with a Join button that opens the meeting in their browser.
+              </AppText>
+            </View>
+          </View>
+        ) : (
+          <>
+            <TouchableOpacity
+              style={[styles.glassInput, bevel, { minHeight: 48, marginTop: 10 }]}
+              activeOpacity={0.75}
+              onPress={() => setLocationModalOpen(true)}
+            >
+              <AppIcon name="location-outline" size={18} color={COLORS.blue} />
+              {venueLocation ? (
+                <View style={{ flex: 1 }}>
+                  <AppText style={[styles.inputField, { color: textColor }]} numberOfLines={1}>
+                    {venueLocation.name}
+                  </AppText>
+                  {!!venueLocation.address && (
+                    <AppText style={styles.autoReminderSub} numberOfLines={1}>{venueLocation.address}</AppText>
+                  )}
+                </View>
+              ) : (
+                <AppText style={[styles.inputField, { color: COLORS.sub }]}>Search for a place…</AppText>
+              )}
+              <AppIcon name={venueLocation ? 'create-outline' : 'search-outline'} size={16} color={COLORS.sub} />
+            </TouchableOpacity>
+
+            <View style={[styles.autoReminderInfo, bevel, { marginTop: 10 }]}>
+              <AppIcon name="videocam-outline" size={18} color={COLORS.blue} />
+              <View style={{ flex: 1 }}>
+                <AppText style={[styles.autoReminderTitle, { color: textColor }]}>A live link is included too</AppText>
+                <AppText style={styles.autoReminderSub}>
+                  Invitees also get a Join-online button, so anyone who can't attend in person can join live.
+                </AppText>
+              </View>
+            </View>
+          </>
+        )}
+
         <AppText style={styles.inputLabel}>Participants</AppText>
         <TouchableOpacity
-          style={[styles.glassInput, bevel, { minHeight: 48 }]}
+          style={[styles.glassInput, bevel, { minHeight: 52, alignItems: 'center' }]}
           onPress={onOpenParticipantPicker}
           activeOpacity={0.75}
         >
@@ -536,17 +662,17 @@ function NewMeetingSheet({
               Tap to pick from your contacts
             </AppText>
           ) : (
-            <View style={{ flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+            <View style={{ flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingVertical: 2 }}>
               {selectedContacts.slice(0, 4).map(c => (
                 <View key={c.userId} style={styles.participantChip}>
-                  <ContactAvatar contact={c} size={18} />
+                  <ContactAvatar contact={c} size={22} />
                   <AppText style={[styles.chipText, { color: textColor }]} numberOfLines={1}>
                     {c.displayName.split(' ')[0]}
                   </AppText>
                 </View>
               ))}
               {selectedContacts.length > 4 && (
-                <View style={styles.participantChip}>
+                <View style={[styles.participantChip, { paddingLeft: 11 }]}>
                   <AppText style={[styles.chipText, { color: COLORS.blue }]}>
                     +{selectedContacts.length - 4} more
                   </AppText>
@@ -571,6 +697,12 @@ function NewMeetingSheet({
           </View>
         </View>
       </ScrollView>
+
+      <LocationSearchModal
+        visible={locationModalOpen}
+        onClose={() => setLocationModalOpen(false)}
+        onSelect={(place) => { setVenueLocation(place); setLocationModalOpen(false); }}
+      />
     </>
   );
 }
@@ -1118,13 +1250,37 @@ function MeetingDetailSheet({
                 style={styles.joinBtnWrap}
               >
                 <LinearGradient
-                  colors={isActive ? ['#22c55e', '#16a34a'] : GRADIENTS.primary}
+                  colors={meeting.type === 'in-person' ? GRADIENTS.primary : isActive ? ['#22c55e', '#16a34a'] : GRADIENTS.primary}
                   style={[styles.joinBtn, styles.actionBtnFull]}
                 >
-                  <AppIcon name="videocam" size={18} color="#fff" fixedColor />
+                  <AppIcon name={meeting.type === 'in-person' ? 'navigate' : 'videocam'} size={18} color="#fff" fixedColor />
                   <AppText fixedColor style={[styles.joinBtnText, { fontSize: 15 }]}>
-                    {isActive ? 'Join Now — Meeting is Live' : 'Join Meeting'}
+                    {meeting.type === 'in-person'
+                      ? 'Get Directions'
+                      : isActive
+                      ? 'Join Now — Meeting is Live'
+                      : 'Join Meeting'}
                   </AppText>
+                </LinearGradient>
+              </TouchableOpacity>
+            )}
+
+            {/* In-person meetings still get a live link so anyone who can't
+                attend physically can join the meeting online. */}
+            {(isUpcoming || isActive) && meeting.type === 'in-person' && (
+              <TouchableOpacity
+                onPress={() => {
+                  onClose();
+                  Linking.openURL(meetingJoinUrl(meeting.id)).catch(() =>
+                    Alert.alert('Cannot open link', 'Unable to open the meeting link.'),
+                  );
+                }}
+                activeOpacity={0.85}
+                style={styles.joinBtnWrap}
+              >
+                <LinearGradient colors={['#22c55e', '#16a34a']} style={[styles.joinBtn, styles.actionBtnFull]}>
+                  <AppIcon name="videocam" size={18} color="#fff" fixedColor />
+                  <AppText fixedColor style={[styles.joinBtnText, { fontSize: 15 }]}>Join Online Instead</AppText>
                 </LinearGradient>
               </TouchableOpacity>
             )}
@@ -1316,24 +1472,33 @@ export default function CalendarScreen() {
 
   const handleJoinMeeting = useCallback((meeting: Meeting) => {
     if (!user?.uid) return;
+    // In-person meetings open directions to the venue; virtual meetings open the
+    // web meeting room in the browser (chitchatbusiness.com/meet/<id>).
     try {
-      const firstParticipant = meeting.participants.find(p => p !== user.uid) || meeting.participants[0];
-      (navigation as any).navigate('VideoCall', {
-        callId: meeting.id,
-        isOutgoing: meeting.organizerId === user.uid,
-        otherParty: {
-          userId: firstParticipant,
-          displayName: meeting.title,
-          photoUrl: null,
-        },
-        meetingId: meeting.id,
-        meetingTitle: meeting.title,
-      });
+      if (meeting.type === 'in-person') {
+        const loc = meeting.location;
+        const mapsUrl =
+          loc?.lat != null && loc?.lng != null
+            ? `https://www.google.com/maps/search/?api=1&query=${loc.lat},${loc.lng}`
+            : loc?.address
+            ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc.address)}`
+            : null;
+        if (!mapsUrl) {
+          Alert.alert('No venue', 'This in-person meeting has no location set.');
+          return;
+        }
+        Linking.openURL(mapsUrl).catch(() => Alert.alert('Cannot open maps', 'Unable to open the location.'));
+        return;
+      }
+      const url = meetingJoinUrl(meeting.id);
+      Linking.openURL(url).catch(() =>
+        Alert.alert('Cannot open link', 'Unable to open the meeting link.'),
+      );
     } catch (err) {
-      console.error('[Calendar] Failed to join meeting:', err);
-      Alert.alert('Cannot Join', 'Meeting room is not available yet.');
+      console.error('[Calendar] Failed to open meeting:', err);
+      Alert.alert('Cannot Join', 'Unable to open this meeting.');
     }
-  }, [navigation, user?.uid]);
+  }, [user?.uid]);
 
   const renderMeetingRow = useCallback(({ item }: { item: Meeting }) => {
     const active = isMeetingActive(item, nowDate);
@@ -1821,8 +1986,11 @@ const styles = StyleSheet.create({
   autoReminderTitle: { fontSize: 13, fontWeight: '700' },
   autoReminderSub: { fontSize: 11, color: COLORS.sub, marginTop: 2 },
   phoneHint: { fontSize: 11, color: COLORS.sub, marginLeft: 6, marginTop: 6 },
-  participantChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(9,178,238,0.10)', borderRadius: RADIUS.full, paddingHorizontal: 8, paddingVertical: 3 },
-  chipText: { fontSize: 12, fontWeight: '600', maxWidth: 70 },
+  participantChip: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(9,178,238,0.10)', borderWidth: 1, borderColor: 'rgba(9,178,238,0.18)', borderRadius: RADIUS.full, paddingLeft: 4, paddingRight: 11, paddingVertical: 4 },
+  chipText: { fontSize: 13, fontWeight: '600', maxWidth: 96 },
+  venuePill: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 11, borderRadius: RADIUS.full },
+  venuePillText: { fontSize: 13.5, fontWeight: '600' },
+  venuePillTextActive: { fontSize: 13.5, fontWeight: '700', color: '#fff' },
 
   emptyWrap: { alignItems: 'center', gap: 12, flex: 1, justifyContent: 'center', paddingBottom: 80 },
   emptyText: { fontSize: 15, color: COLORS.sub },

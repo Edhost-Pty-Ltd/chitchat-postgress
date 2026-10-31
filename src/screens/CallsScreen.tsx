@@ -4,7 +4,7 @@ import {
   View, FlatList, TouchableOpacity, StyleSheet,
   Modal, Pressable, ScrollView, Alert, ActivityIndicator, TextInput,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Avatar, BottomNav } from '../components';
@@ -20,6 +20,8 @@ import { useContacts } from '../hooks/useContacts';
 import { usePhoneBook } from '../hooks/usePhoneBook';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
 import { fetchUserPrivacySettings } from '../hooks/usePrivacySettings';
+import { notifyCallsSeen } from '../hooks/useMissedCalls';
+import { endpoints } from '../api/endpoints';
 
 type CallTab = 'All' | 'Missed';
 type NavProp = NativeStackNavigationProp<RootStackParamList>;
@@ -96,7 +98,11 @@ function CallInfoSheet({
   if (!call) return null;
 
   const isMissed = call.status === 'missed';
-  const statusText = isMissed ? 'Missed call' : `${call.direction === 'outgoing' ? 'Outgoing' : 'Incoming'} ${call.type}`;
+  const statusText = isMissed
+    ? 'Missed call'
+    : call.status === 'no_answer'
+    ? `Outgoing ${call.type} • No answer`
+    : `${call.direction === 'outgoing' ? 'Outgoing' : 'Incoming'} ${call.type}`;
   const statusColor = isMissed ? COLORS.missed : FG.primary;
 
   return (
@@ -300,6 +306,20 @@ export default function CallsScreen() {
   const { bevel } = useGlass();
   const insets = useSafeAreaInsets();
 
+  // Opening the Calls screen clears the missed-call badge: mark every history
+  // entry seen on the server, then nudge the badge to re-fetch (it drops to 0).
+  // The entries themselves stay in the list — this only clears the unseen count.
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      void (async () => {
+        const res = await endpoints.markCallsSeen();
+        if (!cancelled && res.ok) notifyCallsSeen();
+      })();
+      return () => { cancelled = true; };
+    }, []),
+  );
+
   // Build a userId → phone map from device contacts so we can resolve names
   // for call-history entries using the phone-book rule (saved name > phone number).
   const userIdToPhone = useMemo(() => {
@@ -475,6 +495,7 @@ export default function CallsScreen() {
     const statusLabel = item.status === 'completed' && item.duration
       ? formatDuration(item.duration)
       : item.status === 'missed' ? 'Missed'
+      : item.status === 'no_answer' ? 'No answer'
       : item.status === 'rejected' ? 'Rejected'
       : item.status === 'busy' ? 'Busy'
       : 'Failed';
@@ -608,6 +629,7 @@ export default function CallsScreen() {
         </View>
       ) : (
         <FlatList
+        style={{flex: 1 }}
           data={filtered}
           keyExtractor={(item) => item.callId}
           renderItem={renderCall}
@@ -701,11 +723,11 @@ const styles = StyleSheet.create({
   callRight:      { alignItems: 'flex-end', gap: 6 },
   callTime:       { fontSize: 12, color: COLORS.sub },
 
-  centerWrap: { alignItems: 'center', paddingTop: 80, gap: 12 },
+  centerWrap: { alignItems: 'center', paddingTop: 80, gap: 12,flex: 1  },
   centerText: { fontSize: 15, color: COLORS.sub },
   errorText:  { fontSize: 13, color: COLORS.missed, textAlign: 'center', paddingHorizontal: 40 },
   
-  emptyWrap: { alignItems: 'center', paddingTop: 80, gap: 12 },
+  emptyWrap: { alignItems: 'center', paddingTop: 80, gap: 12,flex: 1  },
   emptyText: { fontSize: 15, color: COLORS.sub, fontWeight: '600' },
   emptyHint: { fontSize: 13, color: COLORS.sub },
 

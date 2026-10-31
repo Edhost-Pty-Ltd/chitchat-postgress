@@ -63,6 +63,13 @@ export interface MeResponse extends BusinessProfileDTO {
   accountType: string;
   autoResponderEnabled: boolean;
   autoResponderMessage: string | null;
+  /** True when this user has been reported and must verify before using the app. */
+  requiresVerification: boolean;
+  /** Canonical identity state, changed only by the backend. */
+  identityVerified: boolean;
+  identityVerifiedAt: string | null;
+  /** Owner-only generation used to bind a face proof to the current report. */
+  verificationGeneration: string | null;
 }
 
 export interface PublicUserProfile extends BusinessProfileDTO {
@@ -76,6 +83,8 @@ export interface PublicUserProfile extends BusinessProfileDTO {
   email: string | null;
   website: string | null;
   operationalHours: string | null;
+  /** Safe public status only; report details remain private. */
+  identityVerified: boolean;
   /** The target's privacy choices the app needs (group adds, photo, last seen). */
   privacy: { groups: Visibility; profilePhoto: Visibility; lastSeen: Visibility };
   /** The viewer has blocked this user. */
@@ -135,6 +144,18 @@ export function createEndpoints(client: ApiClient = apiClient) {
   return {
     health: (): Promise<ApiResult<HealthResponse>> => client.get('/health'),
 
+    // ── Account registration ──
+    /**
+     * The only endpoint that creates a self-registered user row. `receipt` is
+     * Django's signed proof that FaceAISDK enrollment + live verification
+     * passed; the phone comes from the verified Firebase token, not this body.
+     */
+    registerSelf: (
+      receipt: string,
+      profile: Pick<ProfilePatch, 'displayName' | 'email' | 'website' | 'about'>,
+    ): Promise<ApiResult<MeResponse & { alreadyRegistered: boolean }>> =>
+      client.post('/me/register', { receipt, profile }),
+
     // ── Profile (Req 4.2, 4.3, 4.6) ──
     getMe: (): Promise<ApiResult<MeResponse>> => client.get('/me'),
     updateMe: (patch: ProfilePatch): Promise<ApiResult<MeResponse>> => client.patch('/me', patch),
@@ -142,6 +163,23 @@ export function createEndpoints(client: ApiClient = apiClient) {
       client.put('/me/phone', { phoneNumber }),
     getUser: (userId: string): Promise<ApiResult<PublicUserProfile>> =>
       client.get(`/users/${encodeURIComponent(userId)}`),
+
+    // ── Moderation: report a user / verify self ──
+    /** Report a user — they must verify before using the app again. */
+    reportUser: (userId: string): Promise<ApiResult<{
+      ok: true;
+      identityVerified: false;
+      alreadyReported: boolean;
+    }>> => client.post('/reports', { userId }),
+    /** Finalize only with Django's signed liveness + stored-face-match receipt. */
+    verifySelf: (receipt: string): Promise<ApiResult<{
+      ok: true;
+      verified: true;
+      identityVerified: true;
+      identityStatus: 'verified';
+      verifiedAt: string | null;
+      userId: string;
+    }>> => client.post('/me/verify', { receipt }),
 
     // ── Privacy (Req 4.9, 4.10) ──
     getPrivacy: (): Promise<ApiResult<PrivacySettings>> => client.get('/me/privacy'),
@@ -233,6 +271,8 @@ export function createEndpoints(client: ApiClient = apiClient) {
     ): Promise<ApiResult<{ items: CallHistoryDTO[]; nextCursor: string | null }>> =>
       client.get('/calls/history', { query: opts }),
     clearCallHistory: (): Promise<ApiResult<{ ok: true }>> => client.delete('/calls/history'),
+    /** Mark call history as seen so the Calls tab badge clears. */
+    markCallsSeen: (): Promise<ApiResult<{ ok: true }>> => client.post('/calls/history/seen'),
     /** Schedule a meeting; invitees get a chat invitation + push. */
     createMeeting: (input: CreateMeetingInput): Promise<ApiResult<{ meetingId: string; state: MeetingStateDTO }>> =>
       client.post('/meetings', input),
@@ -240,6 +280,17 @@ export function createEndpoints(client: ApiClient = apiClient) {
       client.get(`/meetings/${meetingId}`),
     listMeetings: (): Promise<ApiResult<{ meetings: MeetingListItem[] }>> =>
       client.get('/meetings'),
+    // ── Venue search (in-person meetings) ──
+    placesAutocomplete: (
+      q: string,
+      sessionToken?: string,
+    ): Promise<ApiResult<{ results: PlaceResult[] }>> =>
+      client.get('/places/autocomplete', { query: { q, sessionToken } }),
+    placeDetails: (
+      placeId: string,
+      sessionToken?: string,
+    ): Promise<ApiResult<{ place: PlaceResult | null }>> =>
+      client.get('/places/details', { query: { placeId, sessionToken } }),
     addMeetingParticipants: (
       meetingId: string,
       userIds: string[],
@@ -320,8 +371,12 @@ export function createEndpoints(client: ApiClient = apiClient) {
 
     // ── Chat mute ──
     listMutedChats: (): Promise<ApiResult<{ chatIds: string[] }>> => client.get('/me/muted-chats'),
-    setChatMuted: (chatId: string, muted: boolean): Promise<ApiResult<{ chatId: string; muted: boolean }>> =>
-      client.put(`/chats/${chatId}/mute`, { muted }),
+    setChatMuted: (
+      chatId: string,
+      muted: boolean,
+      mutedUntil?: string | null,
+    ): Promise<ApiResult<{ chatId: string; muted: boolean; mutedUntil: string | null }>> =>
+      client.put(`/chats/${chatId}/mute`, { muted, mutedUntil: mutedUntil ?? null }),
 
     // ── Profile views ──
     recordProfileView: (viewedUid: string): Promise<ApiResult<{ ok: true }>> =>
@@ -364,20 +419,19 @@ export function createEndpoints(client: ApiClient = apiClient) {
     removeOtherDevices: (keep: string): Promise<ApiResult<{ ok: true }>> =>
       client.delete('/me/devices', { query: { keep } }),
 
-    // ── Multi-agent / business ──
-    listBusinesses: (): Promise<ApiResult<{ businesses: BusinessDTO[] }>> => client.get('/businesses'),
-    createBusiness: (input: {
-      name: string;
-      plan?: 'free' | 'pro' | 'enterprise';
-      agents?: string[];
-      autoAssign?: boolean;
-      routingStrategy?: 'round-robin' | 'least-active' | 'manual';
-    }): Promise<ApiResult<{ business: BusinessDTO }>> => client.post('/businesses', input),
+  // ─── Multi-agent / business ──
+  listBusinesses: (): Promise<ApiResult<{ businesses: BusinessDTO[] }>> => client.get('/businesses'),
+  createBusiness: (input: {
+    name: string;
+    plan?: 'free' | 'pro' | 'enterprise';
+    autoAssign?: boolean;
+    routingStrategy?: 'round-robin' | 'least-active' | 'manual';
+  }): Promise<ApiResult<{ business: BusinessDTO }>> => client.post('/businesses', input),
     getBusiness: (id: string): Promise<ApiResult<{ business: BusinessDTO }>> =>
       client.get(`/businesses/${encodeURIComponent(id)}`),
     updateBusiness: (
       id: string,
-      patch: Partial<{ name: string; plan: 'free' | 'pro' | 'enterprise'; agents: string[]; autoAssign: boolean; routingStrategy: 'round-robin' | 'least-active' | 'manual' }>,
+      patch: Partial<{ name: string; plan: 'free' | 'pro' | 'enterprise'; autoAssign: boolean; routingStrategy: 'round-robin' | 'least-active' | 'manual' }>,
     ): Promise<ApiResult<{ business: BusinessDTO | null }>> =>
       client.patch(`/businesses/${encodeURIComponent(id)}`, patch),
     getAgentInfo: (): Promise<ApiResult<{ role: 'customer' | 'agent' | 'admin'; agentStatus: 'available' | 'busy' | 'away' | null }>> =>
@@ -447,6 +501,8 @@ export interface CreateMeetingInput {
   reminders?: number[];
   /** Shown in the invitation ("You're invited … by {organizerName}"). */
   organizerName?: string | null;
+  /** In-person venue (a real searched place). Ignored when type is 'online'. */
+  location?: MeetingLocationDTO | null;
 }
 
 export interface MeetingStateDTO {
@@ -460,6 +516,7 @@ export interface MeetingStateDTO {
   startsAt: string;
   endsAt: string;
   type: 'online' | 'in-person';
+  location: MeetingLocationDTO | null;
   reminders: number[];
   minutes: string | null;
   minutesGeneratedAt: string | null;
@@ -549,6 +606,7 @@ export interface CallHistoryDTO {
   status: string;
   durationSec: number | null;
   timestamp: string;
+  seen: boolean;
 }
 
 export interface PresenceResponse {
@@ -584,7 +642,37 @@ export type BackendMessageType =
   | 'catalog'
   | 'poll'
   | 'order'
-  | 'contact';
+  | 'contact'
+  | 'meeting';
+
+export interface MeetingLocationDTO {
+  name: string | null;
+  address: string | null;
+  lat: number | null;
+  lng: number | null;
+  placeId?: string | null;
+}
+
+/** Rich meeting-invite card payload embedded in a 'meeting' message. */
+export interface MeetingCardPayload {
+  meetingId: string;
+  title: string;
+  startsAt: string;
+  endsAt: string;
+  venue: 'online' | 'in-person';
+  joinUrl: string;
+  organizerName?: string | null;
+  location?: MeetingLocationDTO | null;
+}
+
+/** A real place returned by the venue search proxy (Google or OSM). */
+export interface PlaceResult {
+  placeId: string;
+  name: string;
+  address: string;
+  lat: number | null;
+  lng: number | null;
+}
 
 export interface PollPayload {
   question: string;
@@ -631,6 +719,7 @@ export interface BackendMessage {
   poll: PollPayload | null;
   order: OrderPayload | null;
   contact: ContactPayload | null;
+  meeting: MeetingCardPayload | null;
   createdAt: string;
   expiresAt: string;
   deletedForEveryone: boolean;
@@ -657,6 +746,7 @@ export interface SendMessageInput {
   poll?: PollPayload;
   order?: OrderPayload;
   contact?: ContactPayload;
+  meeting?: MeetingCardPayload;
 }
 
 export interface LinkedDeviceDTO {

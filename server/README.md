@@ -52,6 +52,52 @@ the failing dependency otherwise.
 
 Backend variables are documented in [`.env.example`](./.env.example).
 
+## Face-gated self registration
+
+A phone OTP creates only a Firebase authentication session. It does **not**
+create a Postgres account. Production token verification never inserts a user
+row; it only backfills the phone number of an existing row.
+
+New-account flow:
+
+1. `CreateAccountScreen` collects the business profile and verifies the Firebase
+   phone OTP.
+2. `FaceEnrollmentScreen` calls FaceAISDK camera enrollment, then immediately
+   calls its 1:1 verification with motion + silent liveness.
+3. Django stores the encrypted 1024-character reference and returns a
+   short-lived HMAC receipt with purpose `self_registration_face_enrollment`.
+4. `POST /me/register` verifies the receipt, binds it to the Firebase UID and
+   takes the phone number from the verified Firebase token. Only then does it
+   insert the `users` row.
+5. The optional business logo uploads after that transaction, because media
+   routes are unavailable to unregistered sessions.
+
+An OTP-authenticated UID with no `users` row may call only `GET /me` (which
+returns 404) and `POST /me/register`; other REST calls return `403
+REGISTRATION_REQUIRED`, and Socket.IO rejects its handshake. Existing user rows
+are unaffected and are not forced through enrollment again.
+
+The screen's 468-point mesh is a fixed, animated presentation guide. It is not
+tracked landmarks and has no security authority; the SDK result code controls
+registration.
+
+## Reported-account verification
+
+`FACE_VERIFICATION_RECEIPT_SECRET` is shared only with the standalone Django
+face service. Django signs a short-lived receipt once the on-device FaceAISDK
+confirms a live match against the user's stored encrypted reference; Node
+verifies the receipt before changing a reported account from
+`verification_required` back to `verified`. Never expose this secret through
+an `EXPO_PUBLIC_*` variable. The server rejects the development fallback when
+`NODE_ENV=production`.
+
+Reported identity status is enforced server-side, not only by the mobile
+overlay. Normal authenticated REST routes return `423
+IDENTITY_VERIFICATION_REQUIRED`; only `GET /me` and `POST /me/verify` remain
+available for recovery. Socket.IO reconnects the account in a personal-room-only
+mode with chat, presence, call, and meeting handlers withheld. Once the signed
+proof is accepted, sockets reconnect with normal authorization.
+
 The **app** reads two public variables (set in the repo-root `.env`):
 
 | Variable | Purpose |
@@ -62,6 +108,36 @@ The **app** reads two public variables (set in the repo-root `.env`):
 Per-feature backend flags (default off during migration) can be overridden with
 `EXPO_PUBLIC_BACKEND_<FEATURE>=true` for `USERS`, `MESSAGING`, `PRESENCE`,
 `CALLS`, `STATUS`, `MEDIA`.
+
+## Multi-agent businesses
+
+`GET /businesses/dashboard` is the mobile dashboard read model. It
+idempotently bootstraps a default business for an existing standalone owner,
+while an agent receives the business they were provisioned into. Company details
+are always read from the owner profile; they are not copied onto agents.
+
+- **Owners/admins** see roster counts, every active/provisioned member, phone
+  numbers needed for management, enrollment state, an agent detail dashboard,
+  and **Add agent**.
+- **Agents** see only their own agent record, own availability, and inherited
+  company details. They receive no peer names, UIDs, enrollment state, phone
+  numbers, team counts, or management controls—even through the raw API.
+- `POST /businesses/:id/agents` requires a primary device plus an active
+  business owner/admin membership. It provisions a separate Firebase phone user
+  (or resolves an existing phone identity), records consent, and returns the
+  one-time Django face-enrollment grant.
+- The agent signs in later on their own device using the ordinary Firebase SMS
+  OTP for their assigned number. A membership becomes `active` only after Node
+  accepts Django’s enrollment completion receipt.
+
+An individual may have only one active/provisioned business context, whether
+owner, admin, or agent. Both a Postgres partial unique index and a per-user
+transaction lock enforce that invariant; a manager cannot attach a reported or
+unverified account to the no-liveness enrollment flow.
+
+`AGENT_FACE_ENROLLMENT_SECRET` is a separate server-only secret shared with the
+Django face service. Node issues the manager/business/agent-bound grant; Django
+returns the completion receipt. Never place either value in `EXPO_PUBLIC_*`.
 
 ## Deployment note
 

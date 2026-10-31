@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Django
+*.log
+db.sqlite3
+/staticfiles/
+/media/
+
+# Secrets — never commit
+.env
+*.pem
+firebase-service-account.json
+
+# InsightFace downloads its model packs here on first run
+.insightface/
+~/.insightface/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+.pytest_cache/
+.env.example
+

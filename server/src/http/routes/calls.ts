@@ -8,6 +8,7 @@ import {
   getCall,
   listCallHistory,
   clearCallHistory,
+  markCallsSeen,
   updateCallStatus,
 } from '../../db/repositories/calls.js';
 import { isBlocked } from '../../db/repositories/blocks.js';
@@ -62,6 +63,13 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
   // DELETE /calls/history — clear the user's history (Req 8.12).
   app.delete('/calls/history', { preHandler: requireAuth }, async (request) => {
     await clearCallHistory(request.identity!.userId);
+    return { ok: true };
+  });
+
+  // POST /calls/history/seen — mark the user's call history as seen so the
+  // Calls tab badge clears when they open the Calls screen. History is retained.
+  app.post('/calls/history/seen', { preHandler: requireAuth }, async (request) => {
+    await markCallsSeen(request.identity!.userId);
     return { ok: true };
   });
 

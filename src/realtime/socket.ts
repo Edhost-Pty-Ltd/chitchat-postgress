@@ -29,6 +29,13 @@ export class SocketClient {
   private activeCallId: string | null = null;
   private activeMeetingId: string | null = null;
   private presenceTimer: ReturnType<typeof setInterval> | null = null;
+  // In-flight connect() promise so concurrent callers share one connection
+  // attempt instead of each opening a separate socket.
+  private connecting: Promise<void> | null = null;
+  // Manual retry after an auth-rejected handshake (socket.io does not
+  // auto-reconnect those). Capped exponential backoff.
+  private authRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private authRetryDelay = 500;
   // Handlers kept so re-created sockets re-bind them. Includes the synthetic
   // local event 'client:reconnect' that hooks can subscribe to (Req 5.18).
   private readonly handlers = new Map<string, Set<Handler>>();
@@ -40,45 +47,92 @@ export class SocketClient {
 
   /** Open the connection with a fresh token in the handshake (Req 2.7). */
   async connect(): Promise<void> {
-    if (this.socket) return;
-    const token = await getFreshIdToken(this.tokenSource);
-
-    const socket = io(this.url, {
-      transports: ['websocket'],
-      auth: { token },
-      reconnection: true,
-      reconnectionDelay: 500,
-      reconnectionDelayMax: 10000, // exponential backoff ceiling (Req 3.6)
-      randomizationFactor: 0.5,
-      autoConnect: true,
-    });
-
-    // Refresh the token before each (re)connection attempt (Req 2.9).
-    socket.io.on('reconnect_attempt', () => {
-      void this.refreshAuth(socket);
-    });
-
-    socket.on('connect', () => {
-      this.rejoinRooms();
-      this.startPresenceHeartbeat();
-      // Notify local subscribers so per-chat hooks can refetch missed messages.
-      this.emitLocal('client:reconnect', undefined);
-    });
-
-    // On an auth error, refresh the token and let reconnection retry (Req 2.9).
-    socket.on('connect_error', (err: Error & { data?: { code?: string } }) => {
-      if (err?.data?.code?.startsWith('AUTH_')) {
-        void this.refreshAuth(socket);
+    if (this.socket) {
+      if (!this.socket.connected) {
+        await this.refreshAuth(this.socket);
+        this.socket.connect();
       }
-    });
-
-    // Re-bind existing (non-synthetic) subscriptions to the live socket.
-    for (const [event, set] of this.handlers) {
-      if (event.startsWith('client:')) continue;
-      for (const handler of set) socket.on(event, handler as (p: unknown) => void);
+      return;
     }
+    // Several hooks (useChats, useNotificationSync, usePresence) call connect()
+    // on mount at once. Without deduping, each would open its own socket — the
+    // user would then join the room multiple times and receive every event
+    // (messages, notifications) duplicated. Share a single in-flight attempt.
+    if (this.connecting) return this.connecting;
+    this.connecting = this.openSocket().finally(() => {
+      this.connecting = null;
+    });
+    return this.connecting;
+  }
 
-    this.socket = socket;
+  private async openSocket(): Promise<void> {
+  const socket = io(this.url, {
+    // Try WS first, fall back to polling. Do NOT force WS-only.
+    transports: ['websocket', 'polling'],
+    // Called before EVERY handshake (initial + reconnect) — async-safe.
+    auth: (cb) => {
+      getFreshIdToken(this.tokenSource)
+        .then((token) => cb({ token }))
+        .catch((err) => {
+          console.warn('[socket] token fetch failed:', err);
+          cb({ token: '' });
+        });
+    },
+    reconnection: true,
+    reconnectionDelay: 500,
+    reconnectionDelayMax: 10000,
+    randomizationFactor: 0.5,
+    autoConnect: true,
+    timeout: 10000,
+  });
+
+  // Assign FIRST so connect/rejoin/presence handlers see the live socket.
+  this.socket = socket;
+
+  socket.on('connect', () => {
+    console.log('[socket] connected', socket.id);
+    this.authRetryDelay = 500;
+    this.rejoinRooms();
+    this.startPresenceHeartbeat();
+    this.emitLocal('client:reconnect', undefined);
+  });
+
+  socket.on('connect_error', (err: any) => {
+    console.warn('[socket] connect_error:', err?.message, err?.data ?? '');
+    void this.refreshAuth(socket);
+    if (err?.data?.code?.startsWith('AUTH_')) this.scheduleAuthReconnect(socket);
+  });
+
+  socket.on('disconnect', (reason) => {
+    console.log('[socket] disconnected:', reason);
+    this.stopPresenceHeartbeat();
+    if (reason !== 'io server disconnect') return;
+    setTimeout(() => {
+      if (this.socket !== socket || socket.connected) return;
+      void this.refreshAuth(socket).finally(() => socket.connect());
+    }, 250);
+  });
+
+  for (const [event, set] of this.handlers) {
+    if (event.startsWith('client:')) continue;
+    for (const handler of set) socket.on(event, handler as (p: unknown) => void);
+  }
+}
+
+  /**
+   * Refresh the token and manually re-open a socket the server rejected for an
+   * auth reason. Backs off (capped) so a persistently-bad token can't hot-loop.
+   */
+  private scheduleAuthReconnect(socket: Socket): void {
+    if (this.authRetryTimer) return; // a retry is already pending
+    this.authRetryTimer = setTimeout(async () => {
+      this.authRetryTimer = null;
+      // Skip if this socket was replaced/disconnected, or already recovered.
+      if (this.socket !== socket || socket.connected) return;
+      await this.refreshAuth(socket);
+      this.authRetryDelay = Math.min(this.authRetryDelay * 2, 10000);
+      socket.connect();
+    }, this.authRetryDelay);
   }
 
   private async refreshAuth(socket: Socket): Promise<void> {
@@ -122,8 +176,8 @@ export class SocketClient {
     };
   }
 
-  /** Dispatch a synthetic local event to subscribers (e.g. reconnect). */
-  private emitLocal(event: string, payload: unknown): void {
+  /** Dispatch a synthetic local event to subscribers (e.g. reconnect, read). */
+  emitLocal(event: string, payload: unknown): void {
     const set = this.handlers.get(event);
     if (set) for (const h of set) h(payload);
   }
@@ -168,6 +222,12 @@ export class SocketClient {
   /** Disconnect and clear cached state on sign-out (Req 2.10). */
   disconnect(): void {
     this.stopPresenceHeartbeat();
+    if (this.authRetryTimer) {
+      clearTimeout(this.authRetryTimer);
+      this.authRetryTimer = null;
+    }
+    this.authRetryDelay = 500;
+    this.connecting = null;
     this.socket?.removeAllListeners();
     this.socket?.disconnect();
     this.socket = null;

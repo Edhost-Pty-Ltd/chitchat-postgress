@@ -10,16 +10,13 @@ export function useOutgoingCall() {
   const { 
     setActiveCallId, setCallStatus, resetCallState, setIsCaller,
     localStream, remoteStream, streamVersion, connectionState, networkQuality,
-    initializePeerConnection, createOffer, setRemoteAnswer, addIceCandidate,
-    toggleMute, toggleVideo, startNetworkMonitoring, stopNetworkMonitoring, cleanup
+    toggleMute, toggleVideo, cleanup
   } = useCallContext();
   
   const [isInitiating, setIsInitiating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const callIdRef = useRef<string | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
-  const answerProcessedRef = useRef<boolean>(false); // Track if answer has been processed
-  const iceCandidatesProcessedRef = useRef<Set<string>>(new Set()); // Track processed ICE candidates
 
   // Mark this hook as caller when initialized
   useEffect(() => {
@@ -37,6 +34,12 @@ export function useOutgoingCall() {
   }, []);
 
   // ── Initiate call ──────────────────────────────────────────────────────────
+  // Only creates the backend call record (which notifies the callee) and
+  // returns the callId. The WebRTC peer connection, offer/answer and ICE
+  // exchange are owned entirely by AudioCallScreen / VideoCallScreen, so there
+  // is a SINGLE peer connection per call (previously this hook created one and
+  // the call screen created a second, conflicting one — the call never
+  // connected).
   const initiateCall = useCallback(
     async (
       callerId: string,
@@ -47,15 +50,8 @@ export function useOutgoingCall() {
     ): Promise<string | null> => {
       setIsInitiating(true);
       setError(null);
-      
-      // Reset processing flags for new call
-      answerProcessedRef.current = false;
-      iceCandidatesProcessedRef.current.clear();
 
       try {
-        console.log('[useOutgoingCall] Creating call document...', 'Type:', callType);
-        
-        // Step 1: Create the call via the signaling backend
         const callId = await SignalingService.createCall(
           callerId,
           calleeId,
@@ -63,109 +59,10 @@ export function useOutgoingCall() {
           calleeInfo,
           callType
         );
-        
+
         callIdRef.current = callId;
         setActiveCallId(callId);
         setCallStatus('ringing');
-
-        // Step 2: Initialize WebRTC peer connection
-        const isVideo = callType === 'video';
-        console.log('[useOutgoingCall] Initializing peer connection... Video:', isVideo);
-        await initializePeerConnection(isVideo);
-
-        // Step 3: Create WebRTC offer
-        console.log('[useOutgoingCall] Creating offer... Video:', isVideo);
-        const offer = await createOffer(isVideo);
-
-        // Step 4: Send the offer through the signaling backend
-        console.log('[useOutgoingCall] Sending offer via signaling...');
-        await SignalingService.saveOffer(callId, offer);
-
-        // Step 5: Listen for answer from callee and status changes
-        console.log('[useOutgoingCall] Listening for answer and status changes...');
-        unsubscribeRef.current = SignalingService.onCallUpdated(callId, async (call) => {
-          if (!call) return;
-
-          console.log('[useOutgoingCall] Signaling update - status:', call.status, 'hasAnswer:', !!call.answer, 'answerProcessed:', answerProcessedRef.current);
-
-          // Handle call rejected/missed/ended FIRST before processing answer - IMMEDIATE cleanup
-          if (call.status === 'rejected') {
-            console.log('[useOutgoingCall] Call rejected - immediate cleanup');
-            cleanup(); // Cleanup FIRST
-            setCallStatus('rejected');
-            setError('Call rejected');
-            if (unsubscribeRef.current) {
-              unsubscribeRef.current();
-              unsubscribeRef.current = null;
-            }
-            return; // Stop processing
-          } else if (call.status === 'missed') {
-            console.log('[useOutgoingCall] Call missed - immediate cleanup');
-            cleanup(); // Cleanup FIRST
-            setCallStatus('missed');
-            setError('Call not answered');
-            if (unsubscribeRef.current) {
-              unsubscribeRef.current();
-              unsubscribeRef.current = null;
-            }
-            return; // Stop processing
-          } else if (call.status === 'ended') {
-            console.log('[useOutgoingCall] Call ended by remote party - immediate cleanup');
-            
-            // Cleanup WebRTC FIRST to stop audio immediately
-            cleanup();
-            
-            // Then update status
-            setCallStatus('ended');
-            
-            // Unsubscribe from further updates
-            if (unsubscribeRef.current) {
-              unsubscribeRef.current();
-              unsubscribeRef.current = null;
-            }
-            return; // Stop processing
-          }
-
-          // When callee answers (only process if not already processed)
-          if (call.answer && call.status === 'accepted') {
-            if (answerProcessedRef.current) {
-              console.log('[useOutgoingCall] Answer already processed, skipping...');
-              // Don't process answer again, but continue to ICE candidates
-            } else {
-              console.log('[useOutgoingCall] Answer received, setting remote description...');
-              
-              // Mark as processed immediately to prevent duplicate processing
-              answerProcessedRef.current = true;
-              
-              try {
-                await setRemoteAnswer(call.answer);
-                setCallStatus('connected');
-                console.log('[useOutgoingCall] Call connected!');
-              } catch (err) {
-                console.error('[useOutgoingCall] Failed to set remote answer:', err);
-                setError('Failed to establish connection');
-                setCallStatus('failed');
-                // Reset flag on error so it can be retried
-                answerProcessedRef.current = false;
-              }
-            }
-          }
-
-          // Add ICE candidates from callee (only new ones)
-          if (call.calleeIceCandidates.length > 0) {
-            for (const candidate of call.calleeIceCandidates) {
-              // Create a unique key for this candidate
-              const candidateKey = `${candidate.candidate}-${candidate.sdpMLineIndex}-${candidate.sdpMid}`;
-              
-              if (!iceCandidatesProcessedRef.current.has(candidateKey)) {
-                iceCandidatesProcessedRef.current.add(candidateKey);
-                console.log('[useOutgoingCall] Adding ICE candidate');
-                await addIceCandidate(candidate);
-              }
-            }
-          }
-        });
-
         setIsInitiating(false);
         return callId;
       } catch (err) {
@@ -176,7 +73,7 @@ export function useOutgoingCall() {
         return null;
       }
     },
-    [initializePeerConnection, createOffer, setRemoteAnswer, addIceCandidate, setActiveCallId, setCallStatus]
+    [setActiveCallId, setCallStatus]
   );
 
   // ── End call ───────────────────────────────────────────────────────────────

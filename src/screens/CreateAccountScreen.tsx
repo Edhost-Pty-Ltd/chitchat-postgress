@@ -1,6 +1,8 @@
 // ─── Screen: Create Account ──────────────────────────────────────────────────
-// Mobile only. Collects business details (name, phone, email, website)
-// + optional logo → OTP → biometric check.
+// Mobile only. Collects business details + optional logo → phone OTP →
+// mandatory FaceAISDK enrollment and anti-spoofing. No Node user row is
+// created on this screen; FaceEnrollment completes registration after it gets
+// Django's signed face receipt.
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import {
   View,
@@ -22,28 +24,10 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 
-// Platform-specific import for native-only modules
-let LocalAuthentication: any = null;
-if (Platform.OS !== 'web') {
-  try {
-    LocalAuthentication = require('expo-local-authentication');
-  } catch (err) {
-    console.warn('[CreateAccountScreen] expo-local-authentication not available:', err);
-  }
-} else {
-  LocalAuthentication = {
-    authenticateAsync: () => Promise.resolve({ success: false }),
-    hasHardwareAsync: () => Promise.resolve(false),
-    isEnrolledAsync: () => Promise.resolve(false),
-    supportedAuthenticationTypesAsync: () => Promise.resolve([]),
-    AuthenticationType: { FACIAL_RECOGNITION: 1, FINGERPRINT: 2 },
-  };
-}
-
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useAuth } from '../context/AuthContext';
 import { useRegistration } from '../hooks/useRegistration';
-import { setBiometricEnabled } from '../utils/biometrics';
+import { useAuth } from '../context/AuthContext';
+import { endpoints } from '../api/endpoints';
 import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import {
@@ -57,41 +41,7 @@ import { AvatarPreview } from '../components/AvatarPreview';
 import { AppBg, AppText, AppIcon, useForeground, useGlass } from '../context/ThemeContext';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'CreateAccount'>;
-type Step = 'details' | 'otp' | 'biometric';
-
-// ─── Biometric helper ─────────────────────────────────────────────────────────
-async function runBiometric(): Promise<{ success: boolean; message: string }> {
-  try {
-    if (!LocalAuthentication) {
-      return { success: true, message: 'no_module' };
-    }
-    const hasHardware = await LocalAuthentication.hasHardwareAsync();
-    if (!hasHardware) return { success: true, message: 'no_hardware' };
-
-    const enrolled = await LocalAuthentication.isEnrolledAsync();
-    if (!enrolled) return { success: true, message: 'not_enrolled' }; // skip gracefully
-
-    const types =
-      (await LocalAuthentication.supportedAuthenticationTypesAsync?.()) ?? [];
-    const isFace =
-      LocalAuthentication.AuthenticationType &&
-      types.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION);
-
-    const promptMsg = isFace ? 'Confirm with Face ID' : 'Confirm with fingerprint';
-
-    const result = await LocalAuthentication.authenticateAsync({
-      promptMessage: promptMsg,
-      fallbackLabel: 'Use PIN',
-      cancelLabel: 'Cancel',
-      disableDeviceFallback: false,
-    });
-
-    return { success: result.success, message: result.success ? 'ok' : 'failed' };
-  } catch (err) {
-    console.warn('[runBiometric] unexpected error:', err);
-    return { success: true, message: 'error_skip' }; // don't block on unexpected errors
-  }
-}
+type Step = 'details' | 'otp';
 
 // ─── Country Picker ───────────────────────────────────────────────────────────
 function CountryPicker({
@@ -194,7 +144,6 @@ function CountryPicker({
 
 export default function CreateAccountScreen() {
   const navigation = useNavigation<NavProp>();
-  const { signIn, setDisplayName, setAvatarUri } = useAuth();
   const {
     registrationStep,
     error: hookError,
@@ -204,10 +153,8 @@ export default function CreateAccountScreen() {
     resendOTP,
     resendCount,
     canResend,
-    createProfile,
-    retryProfileCreation,
-    proceedWithoutPhoto,
   } = useRegistration();
+  const auth = useAuth();
   const { bevel } = useGlass();
   const { FG } = useForeground();
 
@@ -218,7 +165,6 @@ export default function CreateAccountScreen() {
   const [avatarUri, setLocalAvatar] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
-  const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [nameError, setNameError] = useState('');
   const [resendTimer, setResendTimer] = useState(0);
@@ -263,31 +209,6 @@ export default function CreateAccountScreen() {
       setStep('otp');
       startResendTimer();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [registrationStep]);
-
-  // When profile creation completes successfully, sign in and let AppNavigator
-  // reactively switch to the authenticated stack.
-  useEffect(() => {
-    if (registrationStep !== 'done') return;
-    let cancelled = false;
-    (async () => {
-      try {
-        await signIn(fullNumber);
-        await setDisplayName(name.trim());
-        if (avatarUri) await setAvatarUri(avatarUri);
-      } catch (err: any) {
-        console.error('[CreateAccount] post-registration sign-in failed:', err);
-        if (!cancelled) {
-          setErrorMsg(
-            err?.message ?? 'Signed in, but profile setup failed. Please restart the app.',
-          );
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registrationStep]);
 
@@ -353,9 +274,8 @@ export default function CreateAccountScreen() {
     }
   };
 
-  // ── Step 2: Verify OTP → biometric ──────────────────────────────────────
-  const handleVerify = async () => {
-    const code = otp.join('');
+  // ── Step 2: Verify OTP → mandatory face registration ──────────────────────
+  const verifyCode = async (code: string) => {
     if (code.length < 6) {
       setErrorMsg('Enter all 6 digits.');
       return;
@@ -364,9 +284,40 @@ export default function CreateAccountScreen() {
     try {
       const ok = await verifyOTP(code);
       if (ok) {
-        // verifyOTP only confirms the code — profile creation happens in the
-        // biometric step so the Firestore write happens exactly once.
-        setStep('biometric');
+        // OTP just proved the caller owns this number. If an account already
+        // exists for it, skip the mandatory new-user face step and sign them
+        // straight in — a returning user who tapped "Create account" by
+        // mistake. This check runs AFTER OTP on purpose: a pre-OTP lookup would
+        // leak whether a number is registered to anyone who asked.
+        try {
+          const existing = await endpoints.getMe();
+          if (existing.ok) {
+            Alert.alert(
+              'You already have an account',
+              'This number is already registered. Signing you in instead.',
+              [{ text: 'Continue', onPress: () => { void auth.signIn(fullNumber); } }],
+            );
+            return;
+          }
+          // Any non-OK result (404 = genuinely new, or offline/timeout) falls
+          // through to enrollment; POST /me/register still refuses a true
+          // duplicate, so this is only a UX shortcut, never the security gate.
+        } catch {
+          // Network hiccup — proceed to enrollment; the backend is the backstop.
+        }
+
+        // New number: Firebase auth exists now, but the Node users row does not.
+        // Only FaceEnrollment can create it with Django's signed face receipt.
+        navigation.replace('FaceEnrollment', {
+          mode: 'registration',
+          profile: {
+            phoneNumber: fullNumber,
+            displayName: name.trim(),
+            email: email.trim() || null,
+            website: website.trim() || null,
+            avatarUri,
+          },
+        });
       } else if (!hookError) {
         setErrorMsg('Incorrect code. Please try again.');
         setOtp(['', '', '', '', '', '']);
@@ -381,33 +332,7 @@ export default function CreateAccountScreen() {
     }
   };
 
-  // ── Step 3: Biometric → create profile ─────────────────────────────────
-  const handleBiometric = async () => {
-    setLoading(true);
-    try {
-      const { success, message } = await runBiometric();
-      if (success) {
-        if (message === 'ok') {
-          await setBiometricEnabled(true);
-        }
-        await createProfile();
-      } else {
-        Alert.alert(
-          'Authentication failed',
-          'Biometric check did not pass. Please try again.',
-          [
-            { text: 'Try Again', onPress: handleBiometric },
-            { text: 'Cancel', style: 'cancel' },
-          ],
-        );
-      }
-    } catch (err: any) {
-      console.error('[CreateAccount] handleBiometric error:', err);
-      setErrorMsg(err?.message ?? 'Something went wrong. Please try again.');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const handleVerify = () => verifyCode(otp.join(''));
 
   // ── OTP helpers ───────────────────────────────────────────────────────────
   const handleOtpChange = (text: string, i: number) => {
@@ -423,8 +348,9 @@ export default function CreateAccountScreen() {
       otpRefs.current[Math.max(0, lastFilled)]?.focus();
       if (digits.length >= 6) {
         otpRefs.current[5]?.blur();
-        // Auto-verify once the full code is present
-        setTimeout(() => handleVerify(), 100);
+        // Use the pasted/autofilled value directly. Waiting for React state and
+        // then reading the old closure could otherwise verify an incomplete OTP.
+        setTimeout(() => { void verifyCode(digits.slice(0, 6)); }, 100);
       }
       return;
     }
@@ -797,135 +723,7 @@ export default function CreateAccountScreen() {
                     </AppText>
                   )}
                 </>
-              ) : (
-                /* Biometric step */
-                <View style={styles.biometricWrap}>
-                  {registrationStep === 'creating' ? (
-                    <>
-                      <ActivityIndicator
-                        size="large"
-                        color={COLORS.blue}
-                        style={{ marginBottom: 20 }}
-                      />
-                      <AppText style={styles.cardTitle}>
-                        Creating your profile...
-                      </AppText>
-                      <AppText style={styles.cardSub}>
-                        Please wait while we set up your account.
-                      </AppText>
-                    </>
-                  ) : registrationStep === 'error' ? (
-                    <>
-                      <View style={styles.biometricIcon}>
-                        <AppIcon
-                          name="alert-circle-outline"
-                          size={70}
-                          color={COLORS.missed}
-                          fixedColor
-                        />
-                      </View>
-                      <AppText style={styles.cardTitle}>
-                        Profile Creation Failed
-                      </AppText>
-                      <AppText
-                        style={[
-                          styles.cardSub,
-                          { textAlign: 'center', marginBottom: 16 },
-                        ]}
-                      >
-                        {hookError ?? 'Something went wrong. Please try again.'}
-                      </AppText>
-
-                      <TouchableOpacity
-                        onPress={retryProfileCreation}
-                        activeOpacity={0.85}
-                      >
-                        <LinearGradient
-                          colors={GRADIENTS.primary}
-                          style={styles.primaryBtn}
-                        >
-                          <AppText style={styles.primaryBtnText} fixedColor>
-                            Retry
-                          </AppText>
-                        </LinearGradient>
-                      </TouchableOpacity>
-
-                      {hookError &&
-                        (hookError.toLowerCase().includes('upload') ||
-                          hookError.toLowerCase().includes('photo') ||
-                          hookError.toLowerCase().includes('storage')) && (
-                          <TouchableOpacity
-                            onPress={proceedWithoutPhoto}
-                            activeOpacity={0.85}
-                            style={{ marginTop: 12 }}
-                          >
-                            <View style={styles.secondaryBtn}>
-                              <AppText style={styles.secondaryBtnText}>
-                                Continue without photo
-                              </AppText>
-                            </View>
-                          </TouchableOpacity>
-                        )}
-
-                      <TouchableOpacity
-                        onPress={() => {
-                          setStep('details');
-                          setErrorMsg('');
-                        }}
-                        activeOpacity={0.85}
-                        style={{ marginTop: 12 }}
-                      >
-                        <View style={styles.secondaryBtn}>
-                          <AppText style={styles.secondaryBtnText}>
-                            Change Phone Number
-                          </AppText>
-                        </View>
-                      </TouchableOpacity>
-                    </>
-                  ) : (
-                    <>
-                      <View style={styles.biometricIcon}>
-                        <AppIcon
-                          name="finger-print"
-                          size={70}
-                          color={COLORS.blue}
-                          fixedColor
-                        />
-                      </View>
-                      <AppText style={styles.cardTitle}>
-                        Two-Factor Verification
-                      </AppText>
-                      <AppText style={styles.cardSub}>
-                        For your security, please verify your identity using{'\n'}
-                        your device's biometrics.
-                      </AppText>
-
-                      {errorMsg ? (
-                        <AppText style={styles.error}>{errorMsg}</AppText>
-                      ) : null}
-
-                      <TouchableOpacity
-                        onPress={handleBiometric}
-                        activeOpacity={0.85}
-                        disabled={loading}
-                      >
-                        <LinearGradient
-                          colors={GRADIENTS.primary}
-                          style={styles.primaryBtn}
-                        >
-                          {loading ? (
-                            <ActivityIndicator color="#fff" />
-                          ) : (
-                            <AppText style={styles.primaryBtnText} fixedColor>
-                              Verify with Biometrics
-                            </AppText>
-                          )}
-                        </LinearGradient>
-                      </TouchableOpacity>
-                    </>
-                  )}
-                </View>
-              )}
+              ) : null}
             </View>
           </ScrollView>
         </KeyboardAvoidingView>
@@ -1120,21 +918,6 @@ const styles = StyleSheet.create({
     color: COLORS.missed,
     textAlign: 'center',
     marginTop: 8,
-  },
-
-  // Biometric step
-  biometricWrap: { alignItems: 'center', paddingVertical: 10 },
-  biometricIcon: {
-    width: 110,
-    height: 110,
-    borderRadius: 55,
-    backgroundColor: 'rgba(9,178,238,0.12)',
-    borderWidth: 1.5,
-    borderColor: 'rgba(255,255,255,0.45)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 24,
-    ...SHADOW.glow,
   },
 });
 

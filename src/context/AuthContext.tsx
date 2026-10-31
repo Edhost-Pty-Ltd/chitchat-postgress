@@ -365,9 +365,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     scheduleWebExpiry(WEB_SESSION_TIMEOUT_MS);
   }, [isSignedIn, isCompanion, scheduleWebExpiry]);
 
-  // On both primary and companion, auth.uid === ownerUid now.
-  const authUid  = user?.uid ?? null;
-  const ownerUid = isCompanion ? companionOwnerUid : (user?.uid ?? null);
+  // A Firebase user exists immediately after OTP. Do not expose it as the app
+  // owner until `signIn` runs after POST /me/register succeeds; otherwise push,
+  // socket and device hooks fire during the mandatory face step.
+  const authUid = user?.uid ?? null;
+  const ownerUid = isSignedIn
+    ? (isCompanion ? companionOwnerUid : (user?.uid ?? null))
+    : null;
 
   const value = useMemo<AuthContextValue>(() => ({
     isSignedIn, phone, displayName, setDisplayName,

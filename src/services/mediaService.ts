@@ -4,10 +4,9 @@
 // store (never through the backend, Req 10.8), and stores the object key.
 // Downloads resolve an object key to a short-lived presigned GET URL.
 //
-// Native uploads use `expo-file-system/legacy` `uploadAsync` with a PUT and
-// BINARY_CONTENT body — verified against the installed expo-file-system@57 API
-// per AGENTS.md (the top-level uploadAsync is deprecated/throws in SDK 57; the
-// `/legacy` entry is the supported path). Web uploads use fetch + Blob.
+// Native uploads use `expo-file-system/legacy` `createUploadTask` with a PUT
+// BINARY_CONTENT body so SDK 57 can report real bytes sent/remaining. Web uses
+// XMLHttpRequest because fetch does not expose upload progress.
 
 import { Platform } from 'react-native';
 import { apiClient, type ApiClient } from '../api/client';
@@ -38,6 +37,15 @@ export interface UploadParams {
   ext?: string;
 }
 
+export interface MediaUploadProgress {
+  bytesSent: number;
+  totalBytes: number;
+  remainingBytes: number;
+  percentage: number;
+}
+
+export type MediaUploadProgressCallback = (progress: MediaUploadProgress) => void;
+
 export class MediaService {
   constructor(private readonly client: ApiClient = apiClient) {}
 
@@ -58,31 +66,70 @@ export class MediaService {
 
   /**
    * Upload a local file to the object store via a presigned PUT and return the
-   * stored object key (Req 10.8).
+   * stored object key (Req 10.8). Native uses SDK 57's progress-capable legacy
+   * UploadTask; web uses XHR because fetch does not expose upload progress.
    */
-  async upload(localUri: string, category: MediaCategory, params: UploadParams): Promise<string> {
+  async upload(
+    localUri: string,
+    category: MediaCategory,
+    params: UploadParams,
+    onProgress?: MediaUploadProgressCallback,
+  ): Promise<string> {
     const contentType = params.contentType ?? getMimeType(localUri);
     const target = await this.getUploadUrl(category, localUri, { ...params, contentType });
 
+    const report = (bytesSent: number, expectedBytes: number) => {
+      const totalBytes = expectedBytes > 0 ? expectedBytes : Math.max(0, params.sizeBytes);
+      const safeSent = Math.max(0, Math.min(bytesSent, totalBytes || bytesSent));
+      const percentage = totalBytes > 0 ? Math.round((safeSent / totalBytes) * 100) : 0;
+      onProgress?.({
+        bytesSent: safeSent,
+        totalBytes,
+        remainingBytes: Math.max(0, totalBytes - safeSent),
+        percentage: Math.max(0, Math.min(100, percentage)),
+      });
+    };
+
+    report(0, params.sizeBytes);
+
     if (Platform.OS === 'web') {
       const blob = await (await fetch(localUri)).blob();
-      const put = await fetch(target.uploadUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': contentType },
-        body: blob,
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', target.uploadUrl);
+        xhr.setRequestHeader('Content-Type', contentType);
+        xhr.upload.onprogress = (event) => {
+          report(event.loaded, event.lengthComputable ? event.total : blob.size || params.sizeBytes);
+        };
+        xhr.onerror = () => reject(new Error('Upload failed: network error'));
+        xhr.onabort = () => reject(new Error('Upload cancelled'));
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error(`Upload failed: HTTP ${xhr.status}`));
+        };
+        xhr.send(blob);
       });
-      if (!put.ok) throw new Error(`Upload failed: HTTP ${put.status}`);
+      report(blob.size, blob.size || params.sizeBytes);
     } else {
-      // expo-file-system@57: use the supported /legacy uploadAsync.
-      const { uploadAsync, FileSystemUploadType } = await import('expo-file-system/legacy');
-      const result = await uploadAsync(target.uploadUrl, localUri, {
-        httpMethod: 'PUT',
-        uploadType: FileSystemUploadType.BINARY_CONTENT,
-        headers: { 'Content-Type': contentType },
-      });
+      const { createUploadTask, FileSystemUploadType } = await import('expo-file-system/legacy');
+      const task = createUploadTask(
+        target.uploadUrl,
+        localUri,
+        {
+          httpMethod: 'PUT',
+          uploadType: FileSystemUploadType.BINARY_CONTENT,
+          headers: { 'Content-Type': contentType },
+        },
+        ({ totalBytesSent, totalBytesExpectedToSend }) => {
+          report(totalBytesSent, totalBytesExpectedToSend || params.sizeBytes);
+        },
+      );
+      const result = await task.uploadAsync();
+      if (!result) throw new Error('Upload cancelled');
       if (result.status < 200 || result.status >= 300) {
         throw new Error(`Upload failed: HTTP ${result.status}`);
       }
+      report(params.sizeBytes, params.sizeBytes);
     }
 
     return target.objectKey;

@@ -27,6 +27,15 @@ export function emitToUser(userId: string, event: string, payload: unknown): voi
   io?.to(rooms.user(userId)).emit(event, payload);
 }
 
+/**
+ * Reconnect a user's sockets so the gateway re-evaluates identity status.
+ * The client reconnects automatically; an unverified user then receives only
+ * personal status events, while a newly verified user gets full handlers.
+ */
+export function refreshUserSocketAuthorization(userId: string): void {
+  io?.in(rooms.user(userId)).disconnectSockets(true);
+}
+
 /** Emit an event to everyone in a chat room. */
 export function emitToChat(chatId: string, event: string, payload: unknown): void {
   io?.to(rooms.chat(chatId)).emit(event, payload);

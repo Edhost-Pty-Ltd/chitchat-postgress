@@ -12,6 +12,11 @@ const booleanish = z
   .union([z.boolean(), z.string()])
   .transform((v) => (typeof v === 'boolean' ? v : v.trim().toLowerCase() === 'true'));
 
+const DEV_FACE_RECEIPT_SECRET =
+  'dev-insecure-face-verification-receipt-secret-change-me';
+const DEV_AGENT_FACE_ENROLLMENT_SECRET =
+  'dev-insecure-agent-face-enrollment-secret-change-me';
+
 const schema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -51,6 +56,38 @@ const schema = z.object({
   // without a key the summarize endpoints answer 503 and everything else works.
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_MODEL: z.string().min(1).default('gemini-3.8-flash'),
+
+  // Public web app that hosts the meeting room. Meeting invite cards link to
+  // `${MEET_URL_BASE}/meet/<meetingId>`.
+  MEET_URL_BASE: z.string().min(1).default('https://chitchatbusiness.com'),
+
+  // Secret used to sign short-lived guest tokens for browser participants who
+  // join a meeting via its public link. Falls back to a dev-only default; set a
+  // strong random value in production. Guests can only ever act on the single
+  // meeting their token is scoped to.
+  MEET_GUEST_SECRET: z.string().min(1).default('dev-insecure-meet-guest-secret-change-me'),
+
+  // Google Places API key for the in-person venue search (server-side proxy so
+  // the key never ships in the app). Optional: without it the /places routes
+  // fall back to OpenStreetMap Nominatim, which also returns real places.
+  GOOGLE_PLACES_API_KEY: z.string().optional(),
+
+  // Shared ONLY with the standalone Django face service. Django signs
+  // purpose-separated short-lived receipts for (a) new-account face-gated
+  // registration and (b) reported-account re-verification. This API verifies
+  // them before creating/unlocking an account. Never expose to the mobile app.
+  FACE_VERIFICATION_RECEIPT_SECRET: z
+    .string()
+    .min(32)
+    .default(DEV_FACE_RECEIPT_SECRET),
+
+  // Separate capability for owner/admin-assisted agent enrollment. Node issues
+  // a grant; Django consumes it and returns a completion receipt. Keeping this
+  // distinct from report verification prevents cross-purpose token reuse.
+  AGENT_FACE_ENROLLMENT_SECRET: z
+    .string()
+    .min(32)
+    .default(DEV_AGENT_FACE_ENROLLMENT_SECRET),
 });
 
 export type Env = z.infer<typeof schema>;
@@ -90,6 +127,25 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     throw new EnvError(
       `Missing Firebase credentials: set one of ${names.join(' or ')}`,
       names,
+    );
+  }
+
+  if (
+    env.NODE_ENV === 'production' &&
+    env.FACE_VERIFICATION_RECEIPT_SECRET === DEV_FACE_RECEIPT_SECRET
+  ) {
+    throw new EnvError(
+      'FACE_VERIFICATION_RECEIPT_SECRET must be set to a private random value in production',
+      ['FACE_VERIFICATION_RECEIPT_SECRET'],
+    );
+  }
+  if (
+    env.NODE_ENV === 'production' &&
+    env.AGENT_FACE_ENROLLMENT_SECRET === DEV_AGENT_FACE_ENROLLMENT_SECRET
+  ) {
+    throw new EnvError(
+      'AGENT_FACE_ENROLLMENT_SECRET must be set to a private random value in production',
+      ['AGENT_FACE_ENROLLMENT_SECRET'],
     );
   }
 

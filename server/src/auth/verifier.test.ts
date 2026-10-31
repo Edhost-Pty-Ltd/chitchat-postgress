@@ -21,9 +21,9 @@ describe('parseBearer', () => {
 describe('verifyToken', () => {
   const upsert = vi.fn(async () => {});
 
-  it('resolves identity from the token and upserts on first contact', async () => {
+  it('resolves identity from the token and syncs the phone of an existing row', async () => {
     const verify = vi.fn(async () => ({ uid: 'user-123', phone_number: '+15550001' }));
-    const id = await verifyToken('valid', { verify, upsert });
+    const id = await verifyToken('valid', { verify, syncPhone: upsert });
     expect(id).toEqual({
       userId: 'user-123',
       firebaseUid: 'user-123',
@@ -37,7 +37,7 @@ describe('verifyToken', () => {
 
   it('ignores any user id a caller might supply elsewhere — identity comes only from the token', async () => {
     const verify = vi.fn(async () => ({ uid: 'real-user', phone_number: null }));
-    const id = await verifyToken('valid', { verify, upsert });
+    const id = await verifyToken('valid', { verify, syncPhone: upsert });
     // Even though a malicious body could claim userId "attacker", the resolved
     // identity is strictly the token's uid.
     expect(id.userId).toBe('real-user');
@@ -45,17 +45,17 @@ describe('verifyToken', () => {
   });
 
   it('rejects a missing token with AUTH_TOKEN_MISSING', async () => {
-    await expect(verifyToken('', { upsert })).rejects.toMatchObject({
+    await expect(verifyToken('', { syncPhone: upsert })).rejects.toMatchObject({
       code: 'AUTH_TOKEN_MISSING',
     });
-    await expect(verifyToken(undefined, { upsert })).rejects.toBeInstanceOf(AuthError);
+    await expect(verifyToken(undefined, { syncPhone: upsert })).rejects.toBeInstanceOf(AuthError);
   });
 
   it('maps expired tokens to AUTH_TOKEN_EXPIRED', async () => {
     const verify = vi.fn(async () => {
       throw { code: 'auth/id-token-expired' };
     });
-    await expect(verifyToken('x', { verify, upsert })).rejects.toMatchObject({
+    await expect(verifyToken('x', { verify, syncPhone: upsert })).rejects.toMatchObject({
       code: 'AUTH_TOKEN_EXPIRED',
     });
   });
@@ -64,7 +64,7 @@ describe('verifyToken', () => {
     const verify = vi.fn(async () => {
       throw { code: 'auth/id-token-revoked' };
     });
-    await expect(verifyToken('x', { verify, upsert })).rejects.toMatchObject({
+    await expect(verifyToken('x', { verify, syncPhone: upsert })).rejects.toMatchObject({
       code: 'AUTH_TOKEN_REVOKED',
     });
   });
@@ -73,7 +73,7 @@ describe('verifyToken', () => {
     const verify = vi.fn(async () => {
       throw new Error('bad signature');
     });
-    await expect(verifyToken('x', { verify, upsert })).rejects.toMatchObject({
+    await expect(verifyToken('x', { verify, syncPhone: upsert })).rejects.toMatchObject({
       code: 'AUTH_TOKEN_INVALID',
     });
   });

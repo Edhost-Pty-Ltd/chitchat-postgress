@@ -1,0 +1,969 @@
+diff --git a/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/FaceSDKCameraView.swift b/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/FaceSDKCameraView.swift
+index ddee571..8883b29 100755
+--- a/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/FaceSDKCameraView.swift
++++ b/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/FaceSDKCameraView.swift
+@@ -2,6 +2,7 @@
+ 
+ import AVFoundation
+ import SwiftUI
++import UIKit
+ 
+ /// Hosts an AVCaptureSession preview in SwiftUI.
+ /// 在 SwiftUI 中承载 AVCaptureSession 相机预览。
+@@ -15,27 +16,61 @@ public struct FaceSDKCameraView: UIViewControllerRepresentable {
+     }
+ 
+     public func makeUIViewController(context: Context) -> UIViewController {
+-        let viewController = UIViewController()
++        let controller = FaceSDKPreviewController()
++        controller.previewView.session = session
++        return controller
++    }
+ 
+-        let previewLayer = AVCaptureVideoPreviewLayer(session: session)
++    public func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
++        guard let controller = uiViewController as? FaceSDKPreviewController else { return }
++        if controller.previewView.session !== session {
++            controller.previewView.session = session
++        }
++    }
++}
+ 
+-        // Keeps the preview square and center-cropped. 保持方形预览并居中裁剪。
+-        previewLayer.videoGravity = .resizeAspectFill
+-        previewLayer.frame = CGRect(x: 0, y: 0, width: cameraSize, height: cameraSize)
++/// ChitChat theming patch: the preview layer is the view's own backing layer,
++/// so UIKit keeps it exactly the size of the frame SwiftUI gives the view (the
++/// face oval), centered and filled, with no implicit layer animations.
++///
++/// The original code added the preview as a sublayer with a fixed
++/// cameraSize x cameraSize frame anchored at (0, 0). In a frame of any other
++/// shape that left the picture off-center with an empty band, and resizing a
++/// sublayer by hand animates the change, so the picture visibly slid and
++/// zoomed whenever the screen updated.
++final class FaceSDKPreviewView: UIView {
++    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
+ 
+-        viewController.view.layer.addSublayer(previewLayer)
+-        viewController.view.clipsToBounds = true
++    var previewLayer: AVCaptureVideoPreviewLayer {
++        // Guaranteed by layerClass.
++        layer as! AVCaptureVideoPreviewLayer
++    }
+ 
+-        return viewController
++    var session: AVCaptureSession? {
++        get { previewLayer.session }
++        set { previewLayer.session = newValue }
+     }
+ 
+-    public func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+-        // Synchronizes the preview layer after layout changes. 布局变化后同步预览图层尺寸。
+-        if let previewLayer = uiViewController.view.layer.sublayers?.first
+-            as? AVCaptureVideoPreviewLayer
+-        {
+-            previewLayer.frame = CGRect(x: 0, y: 0, width: cameraSize, height: cameraSize)
+-        }
++    override init(frame: CGRect) {
++        super.init(frame: frame)
++        configure()
+     }
+ 
++    required init?(coder: NSCoder) {
++        super.init(coder: coder)
++        configure()
++    }
++
++    private func configure() {
++        previewLayer.videoGravity = .resizeAspectFill
++        clipsToBounds = true
++    }
++}
++
++final class FaceSDKPreviewController: UIViewController {
++    let previewView = FaceSDKPreviewView()
++
++    override func loadView() {
++        view = previewView
++    }
+ }
+diff --git a/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/LiveFaceOverlay.swift b/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/LiveFaceOverlay.swift
+new file mode 100644
+index 0000000..bb93a4c
+--- /dev/null
++++ b/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/LiveFaceOverlay.swift
+@@ -0,0 +1,518 @@
++// ChitChat theming patch (see /patches at the repo root).
++// Real-time, on-device face-landmark overlay drawn OVER the FaceAISDK camera
++// preview. Purely cosmetic: it runs Apple's Vision framework on a SECOND
++// AVCaptureVideoDataOutput attached to the capture session FaceAISDK_Core
++// exposes as `viewModel.captureSession`. It never reads from or writes to
++// FaceAISDK_Core's own detector and never influences the liveness/match
++// decision; that remains FaceAISDK_Core's own tipsCode / resultCode. If
++// anything here fails (an iOS version without multiple video outputs, a
++// permission race), it draws nothing and the SDK flow is unaffected.
++//
++// Set `LiveFaceLandmarkTracker.isEnabled` to false to turn the overlay off.
++
++import AVFoundation
++import QuartzCore
++import SwiftUI
++import Vision
++
++/// One tracked frame's landmark points, grouped by facial feature, in
++/// normalized display coordinates (0...1, top-left origin) of the camera
++/// frame the overlay covers.
++struct FaceMeshFrame {
++    var contour: [CGPoint] = []
++    var leftEyebrow: [CGPoint] = []
++    var rightEyebrow: [CGPoint] = []
++    var leftEye: [CGPoint] = []
++    var rightEye: [CGPoint] = []
++    var nose: [CGPoint] = []
++    var noseCrest: [CGPoint] = []
++    var outerLips: [CGPoint] = []
++    var innerLips: [CGPoint] = []
++    var pupils: [CGPoint] = []
++
++    /// Move every point `alpha` of the way toward `next` (0 keeps this frame,
++    /// 1 jumps to `next`). A region whose point count changed takes the new
++    /// points as-is.
++    func blended(toward next: FaceMeshFrame, alpha: CGFloat) -> FaceMeshFrame {
++        func mix(_ from: [CGPoint], _ to: [CGPoint]) -> [CGPoint] {
++            guard from.count == to.count, !from.isEmpty else { return to }
++            return zip(from, to).map { a, b in
++                CGPoint(x: a.x + (b.x - a.x) * alpha, y: a.y + (b.y - a.y) * alpha)
++            }
++        }
++        var result = FaceMeshFrame()
++        result.contour = mix(contour, next.contour)
++        result.leftEyebrow = mix(leftEyebrow, next.leftEyebrow)
++        result.rightEyebrow = mix(rightEyebrow, next.rightEyebrow)
++        result.leftEye = mix(leftEye, next.leftEye)
++        result.rightEye = mix(rightEye, next.rightEye)
++        result.nose = mix(nose, next.nose)
++        result.noseCrest = mix(noseCrest, next.noseCrest)
++        result.outerLips = mix(outerLips, next.outerLips)
++        result.innerLips = mix(innerLips, next.innerLips)
++        result.pupils = mix(pupils, next.pupils)
++        return result
++    }
++
++    /// Average distance the jawline moved, in normalized display units.
++    /// Returns 1 (treat as a big move) when the frames can't be compared.
++    func movement(to next: FaceMeshFrame) -> CGFloat {
++        guard contour.count == next.contour.count, !contour.isEmpty else { return 1 }
++        let total = zip(contour, next.contour).reduce(CGFloat(0)) { sum, pair in
++            sum + hypot(pair.0.x - pair.1.x, pair.0.y - pair.1.y)
++        }
++        return total / CGFloat(contour.count)
++    }
++}
++
++/// What the overlay draws. Kept separate from the tracker: the camera screens
++/// own the tracker as a @StateObject, and if the tracker itself published each
++/// frame, the whole camera screen (preview, instruction pill, animations)
++/// would re-render at camera frame rate. Only the overlay observes this.
++final class LiveFaceMeshModel: ObservableObject {
++    /// The last tracked face. Kept after tracking stops so it can fade out.
++    @Published fileprivate(set) var frame: FaceMeshFrame?
++    @Published fileprivate(set) var isTracking = false
++}
++
++/// Attaches a lightweight Vision face-landmark pass to an existing capture
++/// session and publishes smoothed points for `LiveFaceMeshOverlay`.
++final class LiveFaceLandmarkTracker: NSObject, ObservableObject {
++    /// Turn the overlay off everywhere without touching the camera screens.
++    static let isEnabled = true
++
++    /// Observed by the overlay only. This class publishes nothing itself.
++    let mesh = LiveFaceMeshModel()
++
++    private let output = AVCaptureVideoDataOutput()
++    private let queue = DispatchQueue(label: "chitchat.face.landmarks", qos: .userInitiated)
++    private let sequenceHandler = VNSequenceRequestHandler()
++
++    // Main-thread state.
++    private var isActive = false
++    private var isAttached = false
++    private var startObserver: NSObjectProtocol?
++    private var watchdog: Timer?
++    private var lastPublished: CFTimeInterval = 0
++
++    // Processing-queue state.
++    private var displayAspect: CGFloat = 1
++    private var usesFrontCamera = true
++    private var lastProcessed: CFTimeInterval = 0
++    private var smoothed: FaceMeshFrame?
++    private var missedFrames = 0
++
++    /// Vision runs on at most this many frames per second, because
++    /// FaceAISDK_Core is processing the same camera at the same time.
++    private let minFrameInterval: CFTimeInterval = 1.0 / 15.0
++    /// Consecutive frames without a face before the overlay fades out. Brief
++    /// misses (motion blur, a blink, a head turn) keep the last face on screen
++    /// instead of making the overlay flicker.
++    private let missesBeforeHiding = 4
++    /// Fade out if no frame has arrived for this long (the camera stopped).
++    private let staleAfter: CFTimeInterval = 0.6
++
++    /// Start the overlay for the SDK's session. `displayAspect` is the
++    /// width / height of the camera frame on screen (the face oval).
++    ///
++    /// The output is added only once FaceAISDK_Core has started its session,
++    /// and with a single `addOutput` call rather than an explicit
++    /// beginConfiguration()/commitConfiguration() pair. Core configures,
++    /// starts and stops this session on its own queue; if its startRunning()
++    /// or stopRunning() lands inside an explicit configuration block, AVFoundation
++    /// throws "may not be called between calls to beginConfiguration and
++    /// commitConfiguration" and the app crashes.
++    func attach(to session: AVCaptureSession, displayAspect: CGFloat = 1.0) {
++        guard Self.isEnabled, !isActive else { return }
++        isActive = true
++        let aspect = displayAspect > 0 ? displayAspect : 1
++        queue.async { self.displayAspect = aspect }
++        output.alwaysDiscardsLateVideoFrames = true
++        output.setSampleBufferDelegate(self, queue: queue)
++        startWatchdog()
++
++        // Observe first, then check, so a start that happens in between
++        // can't be missed. addOutput(to:) ignores repeat calls.
++        startObserver = NotificationCenter.default.addObserver(
++            forName: AVCaptureSession.didStartRunningNotification,
++            object: session,
++            queue: .main
++        ) { [weak self, weak session] _ in
++            guard let self, let session else { return }
++            self.addOutput(to: session)
++        }
++        if session.isRunning {
++            DispatchQueue.main.async { [weak self, weak session] in
++                guard let self, let session else { return }
++                self.addOutput(to: session)
++            }
++        }
++    }
++
++    /// Stop the overlay WITHOUT touching the session's input/output graph.
++    /// FaceAISDK_Core's stopAddFace() / stopFaceVerify() tear the session down
++    /// on their own queue at this moment (SwiftUI's .onDisappear); changing the
++    /// graph here raced with that teardown and crashed. Clearing the delegate
++    /// is enough: no more frames are processed, and the idle output is
++    /// released with the session.
++    func detach() {
++        isActive = false
++        removeStartObserver()
++        watchdog?.invalidate()
++        watchdog = nil
++        output.setSampleBufferDelegate(nil, queue: nil)
++        queue.async {
++            self.smoothed = nil
++            self.missedFrames = 0
++        }
++        mesh.isTracking = false
++        mesh.frame = nil
++    }
++
++    deinit {
++        watchdog?.invalidate()
++        if let startObserver {
++            NotificationCenter.default.removeObserver(startObserver)
++        }
++    }
++
++    private func addOutput(to session: AVCaptureSession) {
++        removeStartObserver()
++        guard isActive, !isAttached, session.canAddOutput(output) else { return }
++        session.addOutput(output)
++        isAttached = true
++        let front = session.inputs
++            .compactMap { ($0 as? AVCaptureDeviceInput)?.device.position }
++            .first != .back
++        queue.async { self.usesFrontCamera = front }
++    }
++
++    private func removeStartObserver() {
++        if let startObserver {
++            NotificationCenter.default.removeObserver(startObserver)
++        }
++        startObserver = nil
++    }
++
++    private func startWatchdog() {
++        watchdog?.invalidate()
++        watchdog = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
++            guard let self, self.mesh.isTracking else { return }
++            if CACurrentMediaTime() - self.lastPublished > self.staleAfter {
++                self.mesh.isTracking = false
++            }
++        }
++    }
++
++    /// The part of the upright camera image that `.resizeAspectFill` shows in a
++    /// frame of `displayAspect`, as a normalized rect of the full image.
++    private func visibleCropRect(uprightSize: CGSize) -> CGRect {
++        let imageAspect = uprightSize.width / uprightSize.height
++        if imageAspect > displayAspect {
++            // The image is relatively wider than the frame: the sides are cut off.
++            let fraction = displayAspect / imageAspect
++            return CGRect(x: (1 - fraction) / 2, y: 0, width: fraction, height: 1)
++        } else {
++            // The image is relatively taller: the top and bottom are cut off.
++            let fraction = imageAspect / displayAspect
++            return CGRect(x: 0, y: (1 - fraction) / 2, width: 1, height: fraction)
++        }
++    }
++
++    /// Vision's normalized image point (bottom-left origin) to a normalized
++    /// display point (top-left origin) inside the visible crop.
++    private func project(_ point: CGPoint, crop: CGRect) -> CGPoint {
++        let x = (point.x - crop.minX) / crop.width
++        let y = (point.y - crop.minY) / crop.height
++        return CGPoint(x: x, y: 1 - y)
++    }
++
++    private func regionPoints(
++        _ region: VNFaceLandmarkRegion2D?,
++        box: CGRect,
++        crop: CGRect
++    ) -> [CGPoint] {
++        guard let region else { return [] }
++        // Landmark points are normalized to the face bounding box.
++        return region.normalizedPoints.map { point in
++            project(
++                CGPoint(x: box.minX + point.x * box.width, y: box.minY + point.y * box.height),
++                crop: crop
++            )
++        }
++    }
++}
++
++extension LiveFaceLandmarkTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
++    // Called serially on `queue`.
++    func captureOutput(
++        _ output: AVCaptureOutput,
++        didOutput sampleBuffer: CMSampleBuffer,
++        from connection: AVCaptureConnection
++    ) {
++        let now = CACurrentMediaTime()
++        guard now - lastProcessed >= minFrameInterval else { return }
++        lastProcessed = now
++        process(sampleBuffer)
++    }
++
++    private func process(_ sampleBuffer: CMSampleBuffer) {
++        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
++        let width = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
++        let height = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
++        guard width > 0, height > 0 else { return }
++
++        // Orientation handling follows Apple's "Tracking the User's Face in Real
++        // Time" sample: the connection is left at its defaults, buffers arrive
++        // in the sensor's landscape orientation, and a phone held in portrait
++        // needs .leftMirrored for the front camera (.right for the back). Vision
++        // then reports points relative to the upright image exactly as the
++        // preview layer shows it, front-camera mirroring included. If a buffer
++        // ever arrives already upright, only the mirroring is applied.
++        let orientation: CGImagePropertyOrientation
++        let uprightSize: CGSize
++        if width > height {
++            orientation = usesFrontCamera ? .leftMirrored : .right
++            uprightSize = CGSize(width: height, height: width)
++        } else {
++            orientation = usesFrontCamera ? .upMirrored : .up
++            uprightSize = CGSize(width: width, height: height)
++        }
++
++        let request = VNDetectFaceLandmarksRequest()
++        do {
++            try sequenceHandler.perform([request], on: pixelBuffer, orientation: orientation)
++        } catch {
++            return
++        }
++
++        // The largest face is the person in front of the camera.
++        let faces = request.results ?? []
++        guard let face = faces.max(by: {
++            $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height
++        }), let landmarks = face.landmarks else {
++            faceMissed()
++            return
++        }
++
++        let crop = visibleCropRect(uprightSize: uprightSize)
++        let box = face.boundingBox
++        var next = FaceMeshFrame()
++        next.contour = regionPoints(landmarks.faceContour, box: box, crop: crop)
++        next.leftEyebrow = regionPoints(landmarks.leftEyebrow, box: box, crop: crop)
++        next.rightEyebrow = regionPoints(landmarks.rightEyebrow, box: box, crop: crop)
++        next.leftEye = regionPoints(landmarks.leftEye, box: box, crop: crop)
++        next.rightEye = regionPoints(landmarks.rightEye, box: box, crop: crop)
++        next.nose = regionPoints(landmarks.nose, box: box, crop: crop)
++        next.noseCrest = regionPoints(landmarks.noseCrest, box: box, crop: crop)
++        next.outerLips = regionPoints(landmarks.outerLips, box: box, crop: crop)
++        next.innerLips = regionPoints(landmarks.innerLips, box: box, crop: crop)
++        next.pupils = Array(regionPoints(landmarks.leftPupil, box: box, crop: crop).prefix(1))
++            + Array(regionPoints(landmarks.rightPupil, box: box, crop: crop).prefix(1))
++
++        // Smooth out Vision's frame-to-frame jitter. Small movements are
++        // averaged heavily; real head movement (the SDK asks the user to turn
++        // and nod) follows almost immediately so the mesh never trails the face.
++        missedFrames = 0
++        let result: FaceMeshFrame
++        if let previous = smoothed {
++            let alpha = min(1, 0.35 + previous.movement(to: next) * 8)
++            result = previous.blended(toward: next, alpha: alpha)
++        } else {
++            result = next
++        }
++        smoothed = result
++
++        DispatchQueue.main.async { [weak self] in
++            guard let self, self.isActive else { return }
++            self.lastPublished = CACurrentMediaTime()
++            self.mesh.frame = result
++            if !self.mesh.isTracking {
++                self.mesh.isTracking = true
++            }
++        }
++    }
++
++    private func faceMissed() {
++        missedFrames += 1
++        guard missedFrames == missesBeforeHiding else { return }
++        smoothed = nil
++        DispatchQueue.main.async { [weak self] in
++            self?.mesh.isTracking = false
++        }
++    }
++}
++
++// MARK: - Drawing helpers
++
++/// Builds a smooth curve through a handful of landmark points using a
++/// Catmull-Rom spline converted to cubic Bezier segments, so sparse tracked
++/// points read as a soft, organic shape instead of a jagged polygon.
++private func smoothPath(_ points: [CGPoint], closed: Bool) -> Path {
++    var path = Path()
++    guard points.count >= 2 else { return path }
++    guard points.count > 2 else {
++        path.move(to: points[0])
++        path.addLine(to: points[1])
++        if closed { path.closeSubpath() }
++        return path
++    }
++    let n = points.count
++    path.move(to: points[0])
++    let steps = closed ? n : n - 1
++    for i in 0..<steps {
++        let p0 = points[closed ? (i - 1 + n) % n : max(i - 1, 0)]
++        let p1 = points[closed ? i % n : i]
++        let p2 = points[closed ? (i + 1) % n : min(i + 1, n - 1)]
++        let p3 = points[closed ? (i + 2) % n : min(i + 2, n - 1)]
++        let c1 = CGPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6)
++        let c2 = CGPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6)
++        path.addCurve(to: p2, control1: c1, control2: c2)
++    }
++    if closed { path.closeSubpath() }
++    return path
++}
++
++/// Closed outline of the whole face. Vision's face contour is only the
++/// jawline (an open curve from one cheek over the chin to the other), so a
++/// forehead dome is added above the brows, using the usual proportion that
++/// hairline-to-brow is about half of brow-to-chin. Returns nil when the
++/// jawline is too short to build a shape from.
++private func faceOutline(jaw: [CGPoint], brows: [CGPoint]) -> [CGPoint]? {
++    guard jaw.count >= 5, let first = jaw.first, let last = jaw.last else { return nil }
++    let chinY = jaw.map(\.y).max() ?? first.y
++    let browTop = brows.map(\.y).min() ?? min(first.y, last.y)
++    let crown = browTop - 0.5 * max(chinY - browTop, 0)
++    let lift = max((first.y + last.y) / 2 - crown, 0)
++    var outline = jaw
++    let steps = 9
++    for i in 1..<steps {
++        let s = CGFloat(i) / CGFloat(steps)
++        outline.append(CGPoint(
++            x: last.x + (first.x - last.x) * s,
++            y: last.y + (first.y - last.y) * s - lift * sin(CGFloat.pi * s)
++        ))
++    }
++    return outline
++}
++
++/// Draws the tracked landmarks as a soft, filled face graphic over the live
++/// preview: a light whole-face wash, smooth brows and nose, filled eyes and
++/// lips, and glowing pupils. Fades in when a face is found and out when it is
++/// lost. Never blocks touches.
++struct LiveFaceMeshOverlay: View {
++    @ObservedObject private var mesh: LiveFaceMeshModel
++    private let width: CGFloat
++    private let height: CGFloat
++    private let tint: Color
++
++    init(
++        tracker: LiveFaceLandmarkTracker,
++        width: CGFloat,
++        height: CGFloat,
++        tint: Color = .faceMain
++    ) {
++        _mesh = ObservedObject(wrappedValue: tracker.mesh)
++        self.width = width
++        self.height = height
++        self.tint = tint
++    }
++
++    var body: some View {
++        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !mesh.isTracking)) { timeline in
++            Canvas { context, size in
++                guard let frame = mesh.frame else { return }
++                draw(
++                    frame,
++                    in: &context,
++                    size: size,
++                    time: timeline.date.timeIntervalSinceReferenceDate
++                )
++            }
++        }
++        .frame(width: width, height: height)
++        .opacity(mesh.isTracking ? 1 : 0)
++        .animation(.easeInOut(duration: 0.25), value: mesh.isTracking)
++        .allowsHitTesting(false)
++    }
++
++    private func draw(
++        _ frame: FaceMeshFrame,
++        in context: inout GraphicsContext,
++        size: CGSize,
++        time: TimeInterval
++    ) {
++        let pulse = CGFloat((sin(time * 3.4) + 1) / 2) // slow 0...1 breathing
++        func scaled(_ points: [CGPoint]) -> [CGPoint] {
++            points.map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) }
++        }
++
++        // 1) Whole-face wash and outline (jawline plus forehead dome).
++        let jaw = scaled(frame.contour)
++        if let outline = faceOutline(jaw: jaw, brows: scaled(frame.leftEyebrow + frame.rightEyebrow)) {
++            let path = smoothPath(outline, closed: true)
++            context.fill(path, with: .color(tint.opacity(0.06 + 0.03 * pulse)))
++            context.stroke(path, with: .color(tint.opacity(0.45)), lineWidth: 1.5)
++        } else if jaw.count > 1 {
++            context.stroke(smoothPath(jaw, closed: false), with: .color(tint.opacity(0.45)), lineWidth: 1.5)
++        }
++
++        // 2) Eyebrows: open curves.
++        for brow in [frame.leftEyebrow, frame.rightEyebrow] where brow.count > 1 {
++            context.stroke(
++                smoothPath(scaled(brow), closed: false),
++                with: .color(tint.opacity(0.75)),
++                style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round)
++            )
++        }
++
++        // 3) Eyes: filled closed shapes, plus glowing pupils.
++        for eye in [frame.leftEye, frame.rightEye] where eye.count > 2 {
++            let path = smoothPath(scaled(eye), closed: true)
++            context.fill(path, with: .color(tint.opacity(0.22)))
++            context.stroke(path, with: .color(tint.opacity(0.85)), lineWidth: 1.3)
++        }
++        for pupil in scaled(frame.pupils) {
++            let halo: CGFloat = 5 + pulse * 1.5
++            context.fill(
++                Path(ellipseIn: CGRect(x: pupil.x - halo, y: pupil.y - halo, width: halo * 2, height: halo * 2)),
++                with: .color(tint.opacity(0.22))
++            )
++            let dot: CGFloat = 2.6
++            context.fill(
++                Path(ellipseIn: CGRect(x: pupil.x - dot, y: pupil.y - dot, width: dot * 2, height: dot * 2)),
++                with: .color(.white.opacity(0.95))
++            )
++        }
++
++        // 4) Nose: the bridge is an open line, the base a closed shape.
++        if frame.noseCrest.count > 1 {
++            context.stroke(
++                smoothPath(scaled(frame.noseCrest), closed: false),
++                with: .color(tint.opacity(0.5)),
++                style: StrokeStyle(lineWidth: 1.4, lineCap: .round)
++            )
++        }
++        if frame.nose.count > 2 {
++            context.stroke(
++                smoothPath(scaled(frame.nose), closed: true),
++                with: .color(tint.opacity(0.55)),
++                style: StrokeStyle(lineWidth: 1.3, lineJoin: .round)
++            )
++        }
++
++        // 5) Lips: outer filled, inner outlined so the mouth opening stays clear.
++        if frame.outerLips.count > 2 {
++            let path = smoothPath(scaled(frame.outerLips), closed: true)
++            context.fill(path, with: .color(tint.opacity(0.24)))
++            context.stroke(path, with: .color(tint.opacity(0.8)), lineWidth: 1.3)
++        }
++        if frame.innerLips.count > 2 {
++            context.stroke(
++                smoothPath(scaled(frame.innerLips), closed: true),
++                with: .color(tint.opacity(0.5)),
++                lineWidth: 1.0
++            )
++        }
++    }
++}
+diff --git a/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/LivenessDetectView.swift b/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/LivenessDetectView.swift
+index 0067354..787c210 100755
+--- a/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/LivenessDetectView.swift
++++ b/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/LivenessDetectView.swift
+@@ -12,6 +12,9 @@ struct LivenessDetectView: View {
+     @State private var showLightHighDialog = false
+     @State private var showFailureDialog = false
+     @State private var isTipAppeared = false
++    // ChitChat theming patch: cosmetic real-time landmark overlay. Purely
++    // visual — see LiveFaceOverlay.swift. Does not affect viewModel at all.
++    @StateObject private var landmarkTracker = LiveFaceLandmarkTracker()
+ 
+     @Environment(\.dismiss) private var dismiss
+ 
+@@ -66,6 +69,12 @@ struct LivenessDetectView: View {
+     }
+ 
+     var body: some View {
++        // ChitChat theming patch: a face-shaped OVAL (taller than wide) reads
++        // as an actual face outline, unlike a perfect circle. The camera
++        // preview itself fills and centers within whatever shape it is given
++        // (see FaceSDKCameraView.swift), so this just changes the frame.
++        let faceWidth = faceCameraSize * 0.80
++        let faceHeight = faceCameraSize * 1.12
+         ZStack {
+             VStack {
+                 HStack {
+@@ -110,11 +119,29 @@ struct LivenessDetectView: View {
+                     .frame(minHeight: 30)
+                     .foregroundColor(Color.faceMain)
+ 
+-                FaceSDKCameraView(session: viewModel.captureSession, cameraSize: faceCameraSize)
+-                    .frame(width: faceCameraSize, height: faceCameraSize)
+-                    .aspectRatio(1.0, contentMode: .fit)
+-                    .padding(.vertical, 8)
+-                    .clipShape(Circle())
++                ZStack {
++                    FaceSDKCameraView(session: viewModel.captureSession, cameraSize: faceCameraSize)
++                    // ChitChat theming patch: real-time landmark overlay,
++                    // drawn over the preview and clipped to the same oval.
++                    LiveFaceMeshOverlay(tracker: landmarkTracker, width: faceWidth, height: faceHeight)
++                }
++                .frame(width: faceWidth, height: faceHeight)
++                .clipShape(Ellipse())
++                .overlay(
++                    Ellipse().stroke(
++                        LinearGradient(
++                            colors: [Color.faceMain, Color.faceMain.opacity(0.4)],
++                            startPoint: .topLeading,
++                            endPoint: .bottomTrailing
++                        ),
++                        lineWidth: 2.5
++                    )
++                )
++                .shadow(color: Color.faceMain.opacity(0.30), radius: 16, x: 0, y: 0)
++                // Spacing goes outside the oval. Padding before clipShape made
++                // the ellipse 16pt taller than the video, leaving gaps at the
++                // top and bottom inside the ring.
++                .padding(.vertical, 8)
+ 
+                 Spacer()
+             }
+@@ -214,6 +241,7 @@ struct LivenessDetectView: View {
+                 motionLiveness: motionLiveness,
+                 motionLivenessTimeOut: motionLivenessTimeOut,
+                 motionLivenessSteps: motionLivenessSteps)
++            landmarkTracker.attach(to: viewModel.captureSession, displayAspect: faceWidth / faceHeight)
+         }
+         .onChange(of: viewModel.sdkInterfaceTips.code) { code in
+             speakTipsIfNeeded(for: code)
+@@ -265,6 +293,7 @@ struct LivenessDetectView: View {
+             }
+ 
+             viewModel.stopFaceVerify()
++            landmarkTracker.detach()
+         }
+     }
+ }
+diff --git a/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/VerifyFaceView.swift b/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/VerifyFaceView.swift
+index 14aa176..fd0a649 100755
+--- a/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/VerifyFaceView.swift
++++ b/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/VerifyFaceView.swift
+@@ -10,6 +10,9 @@ struct VerifyFaceView: View {
+     @Environment(\.dismiss) private var dismiss
+     @State private var showFailureDialog = false
+     @State private var isTipAppeared = false
++    // ChitChat theming patch: cosmetic real-time landmark overlay. Purely
++    // visual — see LiveFaceOverlay.swift. Does not affect viewModel at all.
++    @StateObject private var landmarkTracker = LiveFaceLandmarkTracker()
+ 
+     // Automatically control screen brightness
+     // 自动控制屏幕亮度
+@@ -65,6 +68,12 @@ struct VerifyFaceView: View {
+     }
+ 
+     var body: some View {
++        // ChitChat theming patch: a face-shaped OVAL (taller than wide) reads
++        // as an actual face outline, unlike a perfect circle. The camera
++        // preview itself fills and centers within whatever shape it is given
++        // (see FaceSDKCameraView.swift), so this just changes the frame.
++        let faceWidth = faceCameraSize * 0.80
++        let faceHeight = faceCameraSize * 1.12
+         ZStack {
+             VStack {
+                 HStack {
+@@ -109,20 +118,36 @@ struct VerifyFaceView: View {
+                     .frame(minHeight: 30)
+                     .foregroundColor(Color.faceMain)
+ 
+-                FaceSDKCameraView(session: viewModel.captureSession, cameraSize: faceCameraSize)
+-                    .frame(
+-                        width: faceCameraSize,
+-                        height: faceCameraSize
++                ZStack {
++                    FaceSDKCameraView(session: viewModel.captureSession, cameraSize: faceCameraSize)
++                    // ChitChat theming patch: real-time landmark overlay,
++                    // drawn over the preview and clipped to the same oval.
++                    LiveFaceMeshOverlay(tracker: landmarkTracker, width: faceWidth, height: faceHeight)
++                }
++                .frame(width: faceWidth, height: faceHeight)
++                .clipShape(Ellipse())
++                .overlay(
++                    Ellipse().stroke(
++                        LinearGradient(
++                            colors: [Color.faceMain, Color.faceMain.opacity(0.4)],
++                            startPoint: .topLeading,
++                            endPoint: .bottomTrailing
++                        ),
++                        lineWidth: 2.5
+                     )
+-                    .padding(.vertical, 8)
+-                    .aspectRatio(1.0, contentMode: .fit)
+-                    .clipShape(Circle())
+-                    .overlay(Circle().stroke(Color.gray, lineWidth: 1))
++                )
++                .shadow(color: Color.faceMain.opacity(0.30), radius: 16, x: 0, y: 0)
++                // Spacing goes outside the oval. Padding before clipShape made
++                // the ellipse 16pt taller than the video, leaving gaps at the
++                // top and bottom inside the ring.
++                .padding(.vertical, 8)
+ 
+                 Spacer()
+             }
+             .padding()
+             .frame(maxWidth: .infinity, maxHeight: .infinity)
++            // viewModel.colorFlash is the REAL color-liveness challenge signal —
++            // left untouched; only the circular preview above is restyled.
+             .background(viewModel.colorFlash.ignoresSafeArea())
+             .navigationBarBackButtonHidden(true)
+             .navigationBarHidden(true)
+@@ -246,6 +271,7 @@ struct VerifyFaceView: View {
+                 motionLivenessTimeOut: motionLivenessTimeOut,
+                 motionLivenessSteps: motionLivenessSteps
+             )
++            landmarkTracker.attach(to: viewModel.captureSession, displayAspect: faceWidth / faceHeight)
+         }
+         .onChange(of: viewModel.sdkInterfaceTips.code) { code in
+             speakTipsIfNeeded(for: code)
+@@ -297,6 +323,7 @@ struct VerifyFaceView: View {
+             }
+ 
+             viewModel.stopFaceVerify()
++            landmarkTracker.detach()
+         }
+     }
+ }
+diff --git a/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/addFace/AddFaceByCamera.swift b/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/addFace/AddFaceByCamera.swift
+index f13abea..0ba5dc8 100755
+--- a/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/addFace/AddFaceByCamera.swift
++++ b/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceAISDK/addFace/AddFaceByCamera.swift
+@@ -36,6 +36,9 @@ public struct AddFaceByCamera: View {
+     @Environment(\.dismiss) private var dismiss
+ 
+     @StateObject private var viewModel: AddFaceByCameraModel = AddFaceByCameraModel()
++    // ChitChat theming patch: cosmetic real-time landmark overlay. Purely
++    // visual — see LiveFaceOverlay.swift. Does not affect viewModel at all.
++    @StateObject private var landmarkTracker = LiveFaceLandmarkTracker()
+ 
+     // Resolves localized guidance by status code. 根据状态码获取本地化提示。
+     private func localizedTips(for code: Int) -> String {
+@@ -78,6 +81,12 @@ public struct AddFaceByCamera: View {
+     }
+ 
+     public var body: some View {
++        // ChitChat theming patch: a face-shaped OVAL (taller than wide) reads
++        // as an actual face outline, unlike a perfect circle. The camera
++        // preview itself fills and centers within whatever shape it is given
++        // (see FaceSDKCameraView.swift), so this just changes the frame.
++        let faceWidth = faceCameraSize * 0.80
++        let faceHeight = faceCameraSize * 1.12
+         ZStack {
+             VStack(spacing: 20) {
+                 HStack {
+@@ -115,18 +124,37 @@ public struct AddFaceByCamera: View {
+                 ZStack {
+                     // Live camera preview. 实时相机预览。
+                     FaceSDKCameraView(session: viewModel.captureSession, cameraSize: faceCameraSize)
+-                        .aspectRatio(1.0, contentMode: .fit)
+-                        .clipShape(Circle())
+-                        .background(Circle().fill(Color.white))
+-                        .overlay(Circle().stroke(Color.gray, lineWidth: 1))
++                    // ChitChat theming patch: real-time landmark overlay,
++                    // drawn over the preview and clipped to the same oval.
++                    LiveFaceMeshOverlay(tracker: landmarkTracker, width: faceWidth, height: faceHeight)
+                 }
+-                .frame(width: faceCameraSize, height: faceCameraSize)
++                .frame(width: faceWidth, height: faceHeight)
++                .clipShape(Ellipse())
++                .background(Ellipse().fill(Color.white))
++                .overlay(
++                    Ellipse().stroke(
++                        LinearGradient(
++                            colors: [Color.faceMain, Color.faceMain.opacity(0.4)],
++                            startPoint: .topLeading,
++                            endPoint: .bottomTrailing
++                        ),
++                        lineWidth: 2.5
++                    )
++                )
++                .shadow(color: Color.faceMain.opacity(0.30), radius: 16, x: 0, y: 0)
+ 
+                 Spacer()
+             }
+             .padding()
+             .frame(maxWidth: .infinity, maxHeight: .infinity)
+-            .background(Color.white.ignoresSafeArea())
++            .background(
++                LinearGradient(
++                    colors: [Color.white, Color.faceMain.opacity(0.05)],
++                    startPoint: .top,
++                    endPoint: .bottom
++                )
++                .ignoresSafeArea()
++            )
+             .navigationBarBackButtonHidden(true)
+             .navigationBarHidden(true)
+ 
+@@ -138,6 +166,7 @@ public struct AddFaceByCamera: View {
+                     ScreenBrightnessHelper.shared.maximizeBrightness()
+                 }
+                 viewModel.initAddFace()
++                landmarkTracker.attach(to: viewModel.captureSession, displayAspect: faceWidth / faceHeight)
+             }
+             .onDisappear {
+                 TTSPlayer.shared.stop()
+@@ -146,6 +175,7 @@ public struct AddFaceByCamera: View {
+                     ScreenBrightnessHelper.shared.restoreBrightness()
+                 }
+                 viewModel.stopAddFace()
++                landmarkTracker.detach()
+             }
+             .onChange(of: viewModel.sdkInterfaceTips.code) { newValue in
+                 speakTipsIfNeeded(for: newValue)
+diff --git a/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceColorExtensions.swift b/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceColorExtensions.swift
+index 972a612..4767eda 100644
+--- a/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceColorExtensions.swift
++++ b/node_modules/@faceaisdk/react-native-face-sdk/ios/FaceColorExtensions.swift
+@@ -2,9 +2,14 @@ import Foundation
+ import SwiftUI
+ 
+ // 1. 如果想改变主题颜色
++// ChitChat theming patch: brand cyan (#09B2EE) instead of the SDK's default
++// green, matching COLORS.blue in src/types/theme.ts. This is the SDK's own
++// designated single theming hook — every instruction pill, button and dialog
++// accent across AddFaceByCamera / VerifyFaceView / LivenessDetectView reads
++// this one value. See /patches at the repo root.
+ extension Color {
+-    /// 主题颜色 #347738 ，用AI换算一下
++    /// Brand theme colour (#09B2EE).
+     static var faceMain: Color {
+-        return Color(red: 52 / 255.0, green: 119 / 255.0, blue: 56 / 255.0)
++        return Color(red: 9 / 255.0, green: 178 / 255.0, blue: 238 / 255.0)
+     }
+ }
+diff --git a/node_modules/@faceaisdk/react-native-face-sdk/ios/Resources/en.lproj/Localizable.strings b/node_modules/@faceaisdk/react-native-face-sdk/ios/Resources/en.lproj/Localizable.strings
+index afe7ff2..09dbc50 100644
+--- a/node_modules/@faceaisdk/react-native-face-sdk/ios/Resources/en.lproj/Localizable.strings
++++ b/node_modules/@faceaisdk/react-native-face-sdk/ios/Resources/en.lproj/Localizable.strings
+@@ -10,7 +10,7 @@
+ /* Features & Enrollment */
+ "Enroll Face By Camera" = "Enroll Face By Camera";
+ "Enroll Face From Album" = "Enroll Face From Album";
+-"Ensure face is clear and fully visible" = "Ensure  face is clear and fully visible";
++"Ensure face is clear and fully visible" = "Make sure your face is clear and fully in frame";
+ "Face Verify & Liveness" = "Face Verification & Liveness";
+ "Is Face Feature Exist" = "Is Face Feature Exist";
+ "Liveness Detection Only" = "Liveness Detection Only";
+@@ -19,37 +19,37 @@
+ /* Face SDK Status & Motion Codes */
+ "Face_Tips_Code_-1" = "SDK Version Too Old";
+ "Face_Tips_Code_(code)" = "Unknown Error";
+-"Face_Tips_Code_0" = "Face the Camera";
+-"Face_Tips_Code_1" = "No Face Detected";
+-"Face_Tips_Code_2" = "Too Many Faces Detected";
+-"Face_Tips_Code_3" = "Move Closer";
+-"Face_Tips_Code_4" = "Keep Face Still";
+-"Face_Tips_Code_5" = "Keep  Eyes Open";
+-"Face_Tips_Code_6" = "Turn  Head Right";
+-"Face_Tips_Code_7" = "Turn  Head Left";
+-"Face_Tips_Code_8" = "Do Not Tilt Your Head";
+-"Face_Tips_Code_9" = "Look Up";
+-"Face_Tips_Code_10" = "Look Down";
+-"Face_Tips_Code_11" = "Confirm Face Registration";
++"Face_Tips_Code_0" = "Center your face in the frame";
++"Face_Tips_Code_1" = "We can't see your face";
++"Face_Tips_Code_2" = "Only one face, please";
++"Face_Tips_Code_3" = "Move a little closer";
++"Face_Tips_Code_4" = "Hold still for a moment";
++"Face_Tips_Code_5" = "Keep both eyes open";
++"Face_Tips_Code_6" = "Turn your head slightly right";
++"Face_Tips_Code_7" = "Turn your head slightly left";
++"Face_Tips_Code_8" = "Keep your head level";
++"Face_Tips_Code_9" = "Tilt your head up slightly";
++"Face_Tips_Code_10" = "Tilt your head down slightly";
++"Face_Tips_Code_11" = "Looks good — confirm to continue";
+ "Face_Tips_Code_12" = " ";
+-"Face_Tips_Code_13" = "Face Too Small";
++"Face_Tips_Code_13" = "Move a little closer";
+ "Face_Tips_Code_31" = "Face Image Not Found";
+ "Face_Tips_Code_32" = "Failed to Process Face Image";
+ "Face_Tips_Code_33" = "SDK Error";
+-"Face_Tips_Code_34" = "Motion Liveness Complete";
+-"Face_Tips_Code_35" = "Motion Liveness Timeout";
+-"Face_Tips_Code_38" = "Face Detection Failed Multiple Times";
+-"Face_Tips_Code_41" = "Open Your Mouth";
+-"Face_Tips_Code_42" = "Please Smile";
+-"Face_Tips_Code_43" = "Please Blink";
+-"Face_Tips_Code_44" = "Shake Your Head";
+-"Face_Tips_Code_45" = "Nod Your Head";
+-"Face_Tips_Code_50" = "Move closer. Screen will flash";
+-"Face_Tips_Code_51" = "Color Flash Liveness Successful";
+-"Face_Tips_Code_52" = "Color Flash Liveness Failed";
+-"Face_Tips_Code_53" = "Too bright. Avoid direct light";
+-"Face_Tips_Code_58" = "Too much light. Avoid strong light exposure";
+-"Face_Tips_Code_60" = "Liveness Failed";
+-"Face_Tips_Code_61" = "Liveness Passed";
++"Face_Tips_Code_34" = "Great, that's done";
++"Face_Tips_Code_35" = "That took too long — let's try again";
++"Face_Tips_Code_38" = "Having trouble finding your face";
++"Face_Tips_Code_41" = "Open your mouth";
++"Face_Tips_Code_42" = "Give us a smile";
++"Face_Tips_Code_43" = "Blink both eyes";
++"Face_Tips_Code_44" = "Shake your head";
++"Face_Tips_Code_45" = "Nod your head";
++"Face_Tips_Code_50" = "Move closer — the screen will flash briefly";
++"Face_Tips_Code_51" = "Light check passed";
++"Face_Tips_Code_52" = "Light check didn't pass";
++"Face_Tips_Code_53" = "A little too bright — avoid direct light";
++"Face_Tips_Code_58" = "Too much light — step out of direct light";
++"Face_Tips_Code_60" = "We couldn't confirm you're live";
++"Face_Tips_Code_61" = "You're verified as live";
+ "Face_Tips_Code_62" = "Verified";
+-"Face_Tips_Code_63" = "Unverified";
+\ No newline at end of file
++"Face_Tips_Code_63" = "Not verified";
+\ No newline at end of file

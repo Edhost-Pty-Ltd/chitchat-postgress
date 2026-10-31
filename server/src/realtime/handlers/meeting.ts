@@ -20,19 +20,42 @@ async function emitParticipants(meetingId: string): Promise<void> {
 
 export function registerMeetingHandlers(socket: AuthedSocket): void {
   const userId = socket.identity!.userId;
+  const isGuest = socket.identity!.isGuest === true;
+  const guestMeetingId = socket.identity!.guestMeetingId;
+  const guestName = socket.identity!.displayName ?? 'Guest';
+
+  /**
+   * A caller may act on a meeting if they are an invited participant OR a guest
+   * whose token is scoped to exactly this meeting. Guests have no DB row, so we
+   * never touch meeting_participants for them.
+   */
+  const canAccess = async (meetingId: string): Promise<boolean> => {
+    if (isGuest) return meetingId === guestMeetingId;
+    return isMeetingParticipant(meetingId, userId);
+  };
 
   socket.on('meeting:join', async (payload: { meetingId?: string }, ack?: Ack) => {
     const meetingId = payload?.meetingId;
-    if (!meetingId || !(await isMeetingParticipant(meetingId, userId))) {
+    if (!meetingId || !(await canAccess(meetingId))) {
       ack?.({ ok: false, error: 'FORBIDDEN' });
       return;
     }
     await socket.join(rooms.meeting(meetingId));
-    await setMeetingJoined(meetingId, userId, true);
+    if (!isGuest) {
+      // Only real participants have a DB presence row; guests are room-only.
+      await setMeetingJoined(meetingId, userId, true);
+    }
+    // Tell everyone already in the room about this joiner (so peers can offer).
+    socket.to(rooms.meeting(meetingId)).emit('meeting:peer-joined', {
+      meetingId,
+      userId,
+      isGuest,
+      displayName: isGuest ? guestName : undefined,
+    });
     // Emit the updated participant state to the room (Req 8.15) and refresh
     // everyone's calendar (live badge, attendance).
     await emitParticipants(meetingId);
-    await broadcastMeetingUpdate(meetingId, 'joined');
+    if (!isGuest) await broadcastMeetingUpdate(meetingId, 'joined');
     ack?.({ ok: true });
   });
 
@@ -40,11 +63,24 @@ export function registerMeetingHandlers(socket: AuthedSocket): void {
     const meetingId = payload?.meetingId;
     if (meetingId) {
       void socket.leave(rooms.meeting(meetingId));
-      await setMeetingJoined(meetingId, userId, false);
+      socket.to(rooms.meeting(meetingId)).emit('meeting:peer-left', { meetingId, userId });
+      if (!isGuest) {
+        await setMeetingJoined(meetingId, userId, false);
+        await broadcastMeetingUpdate(meetingId, 'left');
+      }
       await emitParticipants(meetingId);
-      await broadcastMeetingUpdate(meetingId, 'left');
     }
     ack?.({ ok: true });
+  });
+
+  // Browser guests disconnect by closing the tab — tell the room so peers tear
+  // down the connection and the participant tile disappears.
+  socket.on('disconnect', () => {
+    if (!guestMeetingId) return;
+    socket.to(rooms.meeting(guestMeetingId)).emit('meeting:peer-left', {
+      meetingId: guestMeetingId,
+      userId,
+    });
   });
 
   // Organizer controls: mute / unmute / remove (old mutedUsers / kickedUsers).
@@ -113,7 +149,7 @@ export function registerMeetingHandlers(socket: AuthedSocket): void {
       ack?: Ack,
     ) => {
       const { meetingId, text, mediaObjectKey } = payload ?? {};
-      if (!meetingId || !(await isMeetingParticipant(meetingId, userId))) {
+      if (!meetingId || !(await canAccess(meetingId))) {
         ack?.({ ok: false, error: 'FORBIDDEN' });
         return;
       }
@@ -122,26 +158,41 @@ export function registerMeetingHandlers(socket: AuthedSocket): void {
         return;
       }
       const isSystem = payload?.isSystem === true;
-      const senderName =
-        typeof payload?.senderName === 'string'
+      const senderName = isGuest
+        ? guestName
+        : typeof payload?.senderName === 'string'
           ? payload.senderName.slice(0, 200)
           : isSystem
             ? 'Meeting Recap'
             : null;
       try {
-        const saved = await addMeetingMessage(meetingId, userId, text ?? null, mediaObjectKey ?? null, {
-          senderName,
-          isSystem,
-        });
+        // Guests have no users row (FK), so their chat is relayed live only and
+        // not persisted to meeting_messages. Real participants are persisted.
+        let id: string;
+        let createdAt: string;
+        if (isGuest) {
+          id = `g-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          createdAt = new Date().toISOString();
+        } else {
+          const saved = await addMeetingMessage(
+            meetingId,
+            userId,
+            text ?? null,
+            mediaObjectKey ?? null,
+            { senderName, isSystem },
+          );
+          id = saved.id;
+          createdAt = saved.createdAt;
+        }
         getIO()?.to(rooms.meeting(meetingId)).emit('meeting:message', {
           meetingId,
-          id: saved.id,
+          id,
           senderId: userId,
           senderName,
           isSystem,
           text: text ?? null,
           mediaObjectKey: mediaObjectKey ?? null,
-          createdAt: saved.createdAt,
+          createdAt,
         });
         ack?.({ ok: true });
       } catch (err) {
@@ -151,16 +202,24 @@ export function registerMeetingHandlers(socket: AuthedSocket): void {
     },
   );
 
-  // Relay meeting signaling between participants (Req 8.17).
+  // Relay meeting signaling between participants (Req 8.17). For a mesh of many
+  // participants, offers/answers/ICE are targeted at ONE peer via `to`; when
+  // `to` is omitted the signal is broadcast to the whole room (back-compat).
   socket.on(
     'meeting:signal',
-    async (payload: { meetingId?: string; data?: unknown }, ack?: Ack) => {
-      const { meetingId, data } = payload ?? {};
-      if (!meetingId || !(await isMeetingParticipant(meetingId, userId))) {
+    async (payload: { meetingId?: string; to?: string; data?: unknown }, ack?: Ack) => {
+      const { meetingId, to, data } = payload ?? {};
+      if (!meetingId || !(await canAccess(meetingId))) {
         ack?.({ ok: false, error: 'FORBIDDEN' });
         return;
       }
-      socket.to(rooms.meeting(meetingId)).emit('meeting:signal', { meetingId, from: userId, data });
+      const relayed = { meetingId, from: userId, to, data };
+      if (to) {
+        // Targeted: deliver only to the named peer's socket(s) in this room.
+        getIO()?.to(rooms.user(to)).emit('meeting:signal', relayed);
+      } else {
+        socket.to(rooms.meeting(meetingId)).emit('meeting:signal', relayed);
+      }
       ack?.({ ok: true });
     },
   );

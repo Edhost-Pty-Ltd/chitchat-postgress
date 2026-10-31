@@ -49,7 +49,8 @@ const NotificationsScreen        = makeLazy(() => import('../screens/Notificatio
 const LinkedDevicesScreen        = makeLazy(() => import('../screens/LinkedDevicesScreen'));
 const BlockedContactsScreen      = makeLazy(() => import('../screens/BlockedContactsScreen'));
 const BroadcastScreen            = makeLazy(() => import('../screens/BroadcastScreen'));
-const DashboardScreen            = makeLazy(() => import('../screens/DashboardScreen'));
+const DashboardScreen            = makeLazy(() => import('../screens/MultiAgentDashboardScreen'));
+const FaceEnrollmentScreen       = makeLazy(() => import('../screens/FaceEnrollmentScreen'));
 
 import { IncomingCallManager } from '../components';
 
@@ -234,6 +235,8 @@ export default function AppNavigator() {
               <Stack.Screen name="LinkedDevices" component={LinkedDevicesScreen as any} />
               <Stack.Screen name="BlockedContacts" component={BlockedContactsScreen as any} />
               <Stack.Screen name="Broadcast" component={BroadcastScreen as any} />
+
+              {/* Account sub-screens */}
             </>
           ) : (
             <>
@@ -242,6 +245,14 @@ export default function AppNavigator() {
               <Stack.Screen name="CreateAccount" component={CreateAccountScreen} />
             </>
           )}
+
+          {/* Shared route: new users reach this immediately after OTP, before
+              isSignedIn/profileExists; existing users can open it later too. */}
+          <Stack.Screen
+            name="FaceEnrollment"
+            component={FaceEnrollmentScreen as any}
+            options={{ ...modalOptions, gestureEnabled: false }}
+          />
         </Stack.Navigator>
 
       {authenticated && <IncomingCallManager />}

@@ -35,12 +35,19 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    # minio/minio and minio/mc were pulled from Docker Hub entirely (the whole
+    # repo 404s now, not just a tag) — confirmed against multiple unrelated
+    # projects hitting the same "pull access denied ... repository does not
+    # exist" error in late 2025. ghcr.io/coollabsio/minio is a community
+    # rebuild of the same upstream release, published to GHCR instead, and
+    # still ships the `mc` client at /usr/bin/mc so no separate mc image is
+    # needed for the init step below.
+    image: ghcr.io/coollabsio/minio:latest
     container_name: chitchat-minio
     # MinIO (media storage) is optional. It only starts when you opt in:
     #   docker compose --profile media up -d
     # A plain `docker compose up -d` starts just Postgres + Redis and skips this,
-    # so a Docker Hub pull block on the minio/* images can't fail the stack.
+    # so a registry outage on the minio/* images can't fail the stack.
     profiles: ["media"]
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -59,8 +66,9 @@ services:
       retries: 10
 
   # One-shot init: creates the media bucket so the backend works without app code changes.
+  # Reuses the minio image (it bundles `mc`) since minio/mc is unavailable too.
   minio-init:
-    image: minio/mc:latest
+    image: ghcr.io/coollabsio/minio:latest
     profiles: ["media"]
     depends_on:
       minio:

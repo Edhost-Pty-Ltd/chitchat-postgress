@@ -63,12 +63,15 @@ import { FileMessageBubble } from '../components/FileMessageBubble';
 import { OrderBubble } from '../components/OrderBubble';
 import { ContactBubble } from '../components/ContactBubble';
 import { PollBubble } from '../components/PollBubble';
+import { MeetingBubble } from '../components/MeetingBubble';
 import { CreatePollModal } from '../components/CreatePollModal';
+import { MediaUploadOverlay } from '../components/MediaUploadOverlay';
 
 import { VoiceRecordingOverlay } from '../components/VoiceRecordingOverlay';
 import { ForwardModal } from '../components/ForwardModal';
 import { MessageInfoModal } from '../components/MessageInfoModal';
 import { CatalogBubble } from '../components/CatalogBubble';
+import { PaymentSheet, PaymentOrderItem } from '../components/PaymentSheet';
 import { useAuth } from '../hooks/useAuth';
 import { useMessages, FireMessage } from '../hooks/useMessages';
 import { useVoicePlayer } from '../hooks/useVoicePlayer';
@@ -95,6 +98,9 @@ import { useCart } from '../context/CartContext';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 // NEW: profile-view tracking for the live dashboard analytics.
 import { trackProfileView } from '../utils/trackProfileView';
+import { muteStore } from '../state/muteStore';
+import { socketClient } from '../realtime/socket';
+import IdentityVerificationBadge from '../components/IdentityVerificationBadge';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'Chat'>;
 type RoutePropType = RouteProp<RootStackParamList, 'Chat'>;
@@ -119,6 +125,24 @@ interface GroupMember {
   displayName: string;
   photoURL: string | null;
   status: 'online' | 'away' | 'offline';
+}
+
+interface PendingMediaItem {
+  uri: string;
+  kind: 'image' | 'video';
+  width?: number;
+  height?: number;
+  fileSize?: number;
+  mimeType?: string | null;
+}
+
+interface MediaUploadJob extends PendingMediaItem {
+  clientId: string;
+  caption: string | null;
+}
+
+function createMediaClientId(index: number): string {
+  return `media_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 // ── Past Member Interface ──────────────────────────────────────────────────────
@@ -148,6 +172,7 @@ interface BusinessProfileData {
   description:  string;
   industry:     string;
   address:      BusinessAddress | null;
+  identityVerified: boolean;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -332,17 +357,26 @@ async function loadMutedState(chatId: string): Promise<boolean> {
 }
 
 /** Save muted state to AsyncStorage (local UI) and the backend (so push
- *  notifications are skipped for this user on this chat). */
-async function saveMutedState(chatId: string, muted: boolean, ownerUid?: string | null): Promise<void> {
+ *  notifications are skipped for this user on this chat). `mutedUntil` is the
+ *  ISO instant the mute lapses, or null for an indefinite ("Always") mute. */
+async function saveMutedState(
+  chatId: string,
+  muted: boolean,
+  ownerUid?: string | null,
+  mutedUntil: string | null = null,
+): Promise<void> {
   try {
     const key = `${MUTE_STORAGE_KEY_PREFIX}${chatId}`;
     await AsyncStorage.setItem(key, muted.toString());
   } catch (error) {
     console.error('[ChatScreen] Failed to save muted state:', error);
   }
+  // Silence the in-app notification path immediately for this chat.
+  if (muted) muteStore.mute(chatId, mutedUntil);
+  else muteStore.unmute(chatId);
   if (ownerUid) {
     try {
-      await endpoints.setChatMuted(chatId, muted);
+      await endpoints.setChatMuted(chatId, muted, muted ? mutedUntil : null);
     } catch (error) {
       console.warn('[ChatScreen] Failed to sync muted state to backend:', error);
     }
@@ -548,6 +582,33 @@ function AddContactSheet({
   );
 }
 
+/** Paused local video preview used while bytes are still uploading. */
+function LocalVideoBubblePreview({ uri }: { uri: string }) {
+  const player = useVideoPlayer(uri, (instance: any) => {
+    instance.muted = true;
+    instance.loop = false;
+    instance.currentTime = 0.01;
+    instance.pause();
+  });
+
+  if (Platform.OS === 'web') {
+    return (
+      <View style={[styles.videoThumbImage, styles.videoPlaceholder]}>
+        <AppIcon name="videocam" size={34} color="#fff" fixedColor />
+      </View>
+    );
+  }
+
+  return (
+    <VideoView
+      player={player}
+      style={styles.videoThumbImage}
+      contentFit="cover"
+      nativeControls={false}
+    />
+  );
+}
+
 export default function ChatScreen() {
   const navigation = useNavigation<NavProp>();
   const route = useRoute<RoutePropType>();
@@ -570,6 +631,15 @@ export default function ChatScreen() {
   // ── Cart ────────────────────────────────────────────────────────
   const { items: cartItems, totalItems, totalPrice, clearCart } = useCart();
   const [cartSheetVisible, setCartSheetVisible] = useState(false);
+  // ── Payment flow ──
+  const [paymentVisible, setPaymentVisible] = useState(false);
+  const [pendingOrder, setPendingOrder] = useState<{
+    items: PaymentOrderItem[];
+    currency: string;
+    total: string | null;
+    /** Full order-line items for sendOrderMessage (includes imageObjectKey). */
+    orderItems: { id: string; name: string; price: string; imageUri: string | null; imageObjectKey?: string | null; quantity: number }[];
+  } | null>(null);
 
   // ── Seller catalog (loaded on mount for 1-on-1 chats) ──
   const [sellerCatalog,      setSellerCatalog]      = useState<import('../types').CatalogItem[]>([]);
@@ -586,7 +656,16 @@ export default function ChatScreen() {
   const [activeCatalogCol,    setActiveCatalogCol]    = useState<string | null>(null); // 'all' | colId
 
   // ── Messages — real-time Firestore stream ───────────────────────
-  const { messages, loading, sendMessage, clearMessages, deleteMessage, addOptimisticMessage } = useMessages(chatId, userId);
+  const {
+    messages,
+    loading,
+    sendMessage,
+    clearMessages,
+    deleteMessage,
+    addOptimisticMessage,
+    updateOptimisticMessage,
+    reconcileBackendMessage,
+  } = useMessages(chatId, userId);
 
   // ── Filter out blocked messages for recipient ───────────────────
   // If I receive a message that was sent while I was blocked, don't show it
@@ -814,7 +893,13 @@ export default function ChatScreen() {
   // Which way the in-app camera faces. Toggled by the flip button.
   const [cameraFacing, setCameraFacing] = useState<'back' | 'front'>('back');
   // Recent device photos shown as a strip under the live camera (WhatsApp-style).
-  const [recentPhotos, setRecentPhotos] = useState<{ id: string; uri: string; isVideo?: boolean }[]>([]);
+  const [recentPhotos, setRecentPhotos] = useState<{
+    id: string;
+    uri: string;
+    isVideo?: boolean;
+    width?: number;
+    height?: number;
+  }[]>([]);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -888,11 +973,13 @@ export default function ChatScreen() {
   // ── Captured/selected media awaiting a caption before sending ────
   // Holds a photo or video the user just captured/picked. We show a preview
   // with a caption field (WhatsApp style) instead of sending immediately.
-  const [pendingMedia, setPendingMedia] = useState<{ uri: string; kind: 'image' | 'video' }[] | null>(null);
+  const [pendingMedia, setPendingMedia] = useState<PendingMediaItem[] | null>(null);
   const [pendingMediaIndex, setPendingMediaIndex] = useState(0);
   const carouselScrollAnim = useRef(new Animated.Value(0)).current;
   const carouselSwipeStartX = useRef(0);
   const [mediaCaption, setMediaCaption] = useState('');
+  const mediaSendInFlightRef = useRef(false);
+  const activeMediaUploadsRef = useRef(new Set<string>());
 
   // ── Full-screen video viewer ─────────────────────────────────────
   const [videoViewerUrl, setVideoViewerUrl] = useState<string | null>(null);
@@ -1131,28 +1218,59 @@ export default function ChatScreen() {
     setLoadingCatalog(true);
     (async () => {
       try {
-        // TODO(no-backend): there is no public endpoint exposing ANOTHER user's
-        // business catalog/collections or business-profile fields (email,
-        // website, industry, address, work schedule). The public /users/:id
-        // surface only returns id/phone/displayName/avatar/accountType. We fill
-        // what's available so the business-profile sheet still renders the
-        // name/phone, and leave the catalog empty (the UI already handles an
-        // empty catalog gracefully) rather than dropping the feature.
+        // The public /users/:id surface returns the target's business profile,
+        // including their catalog items/collections (image fields hold media
+        // OBJECT KEYS) and hours/address. Fetch it, resolve the product images
+        // to short-lived download URLs, and populate the catalog + profile sheet.
         const res = await endpoints.getUser(otherUserId);
-        if (!cancelled && res.ok) {
+        if (res.ok && !cancelled) {
           const data = res.data;
-          setSellerCatalog([]);
-          setSellerCollections([]);
+          const items: import('../types').CatalogItem[] = (data.catalogItems ?? []).map((i) => ({
+            id:              String(i.id),
+            name:            i.name,
+            price:           i.price,
+            description:     i.description ?? undefined,
+            // Keep the durable object key separate from the temporary URL that
+            // will replace imageUri for display below. Cart/order payloads must
+            // use the key; presigned HTTPS URLs expire and cannot be uploaded.
+            imageObjectKey:  i.imageUri ?? null,
+            imageUri:        i.imageUri ?? null,
+            collectionId:    i.collectionId ?? null,
+          }));
+          const cols: import('../types').CatalogCollection[] = (data.catalogCollections ?? []).map((c) => ({
+            id:        String(c.id),
+            name:      c.name,
+            emoji:     c.emoji ?? null,
+            createdAt: c.createdAt ?? 0,
+          }));
+
+          // Catalog images are stored as object keys; resolve them to URLs the
+          // <Image> components can render. Unresolved keys fall back to a
+          // placeholder rather than a broken image.
+          const keys = items.map((i) => i.imageUri).filter((k): k is string => !!k);
+          let urls: Record<string, string> = {};
+          if (keys.length > 0) {
+            try { urls = await mediaService.getDownloadUrls(keys); } catch { /* leave keys unresolved */ }
+          }
+          if (cancelled) return;
+          const resolvedItems = items.map((i) => ({
+            ...i,
+            imageUri: i.imageUri ? (urls[i.imageUri] ?? null) : null,
+          }));
+
+          setSellerCatalog(resolvedItems);
+          setSellerCollections(cols);
           setBusinessProfile({
-            email:            '',
-            website:          '',
+            email:            data.email || '',
+            website:          data.website || '',
             phone:            data.phoneNumber || '',
-            workSchedule:     {},
-            catalogCount:     0,
-            collectionsCount: 0,
-            description:      '',
-            industry:         '',
-            address:          null,
+            workSchedule:     data.workSchedule ?? {},
+            catalogCount:     resolvedItems.length,
+            collectionsCount: cols.length,
+            description:      data.about || '',
+            industry:         data.industry || '',
+            address:          data.address ?? null,
+            identityVerified: data.identityVerified === true,
           });
         } else if (!cancelled) {
           setSellerCatalog([]);
@@ -1171,6 +1289,20 @@ export default function ChatScreen() {
       }
     })();
     return () => { cancelled = true; };
+  }, [isGroup, otherUserId]);
+
+  // Identity badges are server-owned. Update an open profile immediately when
+  // a report or successful re-verification changes the other user's status.
+  useEffect(() => {
+    if (isGroup || !otherUserId) return;
+    const unsubscribe = socketClient.subscribe('user:identity-status', (raw) => {
+      const payload = raw as { userId?: string; identityVerified?: boolean } | null;
+      if (payload?.userId !== otherUserId || typeof payload.identityVerified !== 'boolean') return;
+      setBusinessProfile((current) => current
+        ? { ...current, identityVerified: payload.identityVerified! }
+        : current);
+    });
+    return unsubscribe;
   }, [isGroup, otherUserId]);
 
   // ── Check blocked status ─────────────────────────────────────────
@@ -1893,7 +2025,13 @@ export default function ChatScreen() {
           }
           // Keep the real media type from the library so videos are never mistaken for images
           // (the "#fragment" on iOS video URIs used to defeat the extension check).
-          return { id: a.id, uri: stripFragment(uri), isVideo: a.mediaType === 'video' };
+          return {
+            id: a.id,
+            uri: stripFragment(uri),
+            isVideo: a.mediaType === 'video',
+            width: a.width,
+            height: a.height,
+          };
         }),
       );
       setRecentPhotos(items);
@@ -1941,7 +2079,12 @@ export default function ChatScreen() {
       setCameraOpen(false);
       // Show the preview + caption screen instead of sending immediately.
       setMediaCaption('');
-      setPendingMedia([{ uri: photo.uri, kind: 'image' }]);
+      setPendingMedia([{
+        uri: photo.uri,
+        kind: 'image',
+        width: photo.width,
+        height: photo.height,
+      }]);
       setPendingMediaIndex(0);
     } catch (error) {
       console.error('[ChatScreen] Camera error:', error);
@@ -1949,72 +2092,172 @@ export default function ChatScreen() {
     }
   };
 
-  // Send whatever media is sitting in the preview, with optional caption.
-  const sendPendingMedia = async () => {
-    if (!pendingMedia || pendingMedia.length === 0 || !userId) return;
-    
-    const caption = mediaCaption.trim() || null;
+  /** Prepare, upload, and reconcile one optimistic media bubble. */
+  const runMediaUpload = async (job: MediaUploadJob): Promise<boolean> => {
+    if (activeMediaUploadsRef.current.has(job.clientId)) return false;
+    activeMediaUploadsRef.current.add(job.clientId);
 
-    // Close the preview up front so the UI feels responsive.
+    updateOptimisticMessage(
+      job.clientId,
+      {
+        uploadStatus: 'preparing',
+        uploadProgress: 0,
+        uploadBytesSent: 0,
+        uploadBytesTotal: job.fileSize ?? 0,
+        uploadError: null,
+      },
+      true,
+    );
+
+    try {
+      const localUri = await toUploadableUri(job.uri, job.kind);
+      const preflight = await isFileReadable(localUri);
+      if (!preflight.ok) {
+        throw new Error(`Media file is not readable (size=${preflight.size})`);
+      }
+
+      let uploadUri = localUri;
+      if (job.kind === 'image') {
+        const compressedUri = await compressImage(localUri);
+        const finalCheck = await isFileReadable(compressedUri);
+        uploadUri = finalCheck.ok ? compressedUri : localUri;
+      }
+
+      const uploadSize = await fileSize(uploadUri);
+      updateOptimisticMessage(
+        job.clientId,
+        {
+          uploadStatus: 'uploading',
+          uploadBytesTotal: uploadSize,
+          uploadBytesSent: 0,
+          uploadProgress: 0,
+        },
+        true,
+      );
+
+      const onProgress = (
+        percentage: number,
+        detail: { bytesSent: number; totalBytes: number },
+      ) => {
+        const status = percentage >= 100 ? 'sending' as const : 'uploading' as const;
+        updateOptimisticMessage(job.clientId, {
+          uploadStatus: status,
+          uploadProgress: percentage,
+          uploadBytesSent: detail.bytesSent,
+          uploadBytesTotal: detail.totalBytes,
+        });
+      };
+
+      const result = job.kind === 'video'
+        ? await sendVideoMessage(
+            chatId,
+            userId!,
+            uploadUri,
+            undefined,
+            onProgress,
+            job.caption,
+            job.clientId,
+          )
+        : await sendImageMessage(
+            chatId,
+            userId!,
+            uploadUri,
+            onProgress,
+            job.caption,
+            job.clientId,
+          );
+
+      if (!result.success || !result.message) {
+        throw new Error(result.error || 'The media could not be sent.');
+      }
+
+      // The server does not echo message:new back to the sender. Apply the
+      // HTTP response locally; clientId replaces the optimistic bubble in-place.
+      await reconcileBackendMessage(result.message);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Media upload failed';
+      console.error(`[ChatScreen] Media upload failed (${job.clientId}):`, error);
+      updateOptimisticMessage(
+        job.clientId,
+        {
+          uploadStatus: 'failed',
+          uploadError: message,
+        },
+        true,
+      );
+      return false;
+    } finally {
+      activeMediaUploadsRef.current.delete(job.clientId);
+    }
+  };
+
+  const retryMediaUpload = (item: FireMessage) => {
+    if (
+      item.uploadStatus !== 'failed' ||
+      !item.localMediaUri ||
+      (item.type !== 'image' && item.type !== 'video')
+    ) return;
+
+    void runMediaUpload({
+      clientId: item.clientId ?? item.messageId,
+      uri: item.localMediaUri,
+      kind: item.type,
+      caption: item.text,
+      width: item.mediaWidth ?? undefined,
+      height: item.mediaHeight ?? undefined,
+      fileSize: item.uploadBytesTotal,
+    });
+  };
+
+  // Insert every selected item immediately, then upload them serially so the
+  // user sees all reserved media spaces and per-item progress at once.
+  const sendPendingMedia = async () => {
+    if (!pendingMedia || pendingMedia.length === 0 || !userId || mediaSendInFlightRef.current) return;
+    mediaSendInFlightRef.current = true;
+
+    const caption = mediaCaption.trim() || null;
+    const jobs: MediaUploadJob[] = pendingMedia.map((media, index) => ({
+      ...media,
+      clientId: createMediaClientId(index),
+      caption: index === 0 ? caption : null,
+    }));
+
+    for (const job of jobs) {
+      addOptimisticMessage({
+        messageId: job.clientId,
+        clientId: job.clientId,
+        senderId: userId,
+        type: job.kind,
+        text: job.caption,
+        imageUrl: job.kind === 'image' ? job.uri : null,
+        videoUrl: job.kind === 'video' ? job.uri : null,
+        localMediaUri: job.uri,
+        timestamp: new Date(),
+        readBy: [userId],
+        deliveredTo: [],
+        uploadStatus: 'preparing',
+        uploadProgress: 0,
+        uploadBytesSent: 0,
+        uploadBytesTotal: job.fileSize ?? 0,
+        mediaWidth: job.width ?? null,
+        mediaHeight: job.height ?? null,
+      });
+    }
+
+    // Close the preview only after the optimistic records exist.
     setPendingMedia(null);
     setPendingMediaIndex(0);
     setMediaCaption('');
 
-    setUploadingImage(true);
-    setImageUploadProgress(0);
-    
     try {
-      // Send all media items
-      for (let i = 0; i < pendingMedia.length; i++) {
-        const media = pendingMedia[i];
-        const { uri, kind } = media;
-        
-        console.log(`[ChatScreen] Sending media ${i + 1}/${pendingMedia.length}`);
-        
-        try {
-          // Copy into the app cache first so Storage never reads a raw Photos-library path.
-          const localUri = await toUploadableUri(uri, kind);
-
-          // Final safety net: make sure we're about to hand a valid file to Storage.
-          const preflight = await isFileReadable(localUri);
-          if (!preflight.ok) {
-            throw new Error(`Media file is not readable (size=${preflight.size})`);
-          }
-
-          if (kind === 'video') {
-            const result = await sendVideoMessage(
-              chatId, userId, localUri, undefined,
-              (progress) => setImageUploadProgress(progress),
-              i === 0 ? caption : null, // Only use caption for first item
-            );
-            if (!result.success) {
-              console.error(`[ChatScreen] Media ${i + 1} upload failed`);
-            }
-          } else {
-            const compressedUri = await compressImage(localUri);
-            const finalCheck = await isFileReadable(compressedUri);
-            const uploadUri = finalCheck.ok ? compressedUri : localUri;
-            const uploadResult = await sendImageMessage(
-              chatId, userId, uploadUri,
-              (progress) => setImageUploadProgress(progress),
-              i === 0 ? caption : null, // Only use caption for first item
-            );
-            if (!uploadResult.success) {
-              console.error(`[ChatScreen] Media ${i + 1} upload failed`);
-            }
-          }
-        } catch (error: any) {
-          console.error(`[ChatScreen] Media ${i + 1} error:`, error);
-        }
+      let sentAny = false;
+      for (const job of jobs) {
+        sentAny = (await runMediaUpload(job)) || sentAny;
       }
-      
-      await checkAndTriggerAutoResponder();
-    } catch (error: any) {
-      console.error('[ChatScreen] Pending media upload error:', error);
-      Alert.alert('Error', error?.message || 'Failed to send media.');
+      if (sentAny) await checkAndTriggerAutoResponder();
     } finally {
-      setUploadingImage(false);
-      setImageUploadProgress(0);
+      mediaSendInFlightRef.current = false;
     }
   };
 
@@ -2038,9 +2281,13 @@ export default function ChatScreen() {
       setShowAttach(false);
 
       // Convert assets to pending media format
-      const assets = result.assets.map(asset => ({
+      const assets: PendingMediaItem[] = result.assets.map((asset) => ({
         uri: asset.uri,
-        kind: asset.type === 'video' ? 'video' as const : 'image' as const,
+        kind: asset.type === 'video' ? 'video' : 'image',
+        width: asset.width,
+        height: asset.height,
+        fileSize: asset.fileSize,
+        mimeType: asset.mimeType ?? null,
       }));
 
       // Show carousel preview for any number of items
@@ -2571,6 +2818,27 @@ export default function ChatScreen() {
       );
     }
 
+    // ── Meeting invite card — standalone render ──
+    if (item.type === 'meeting' && item.meeting) {
+      return (
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={onBubblePress}
+          onLongPress={() => handleLongPressMessage(item.messageId)}
+          delayLongPress={300}
+        >
+          <View style={[isSelected && styles.selectedMessage]}>
+            <MeetingBubble
+              meeting={item.meeting}
+              isOutgoing={isOut}
+              timestamp={formatTime(item.timestamp)}
+              tickIcon={tickIcon}
+            />
+          </View>
+        </TouchableOpacity>
+      );
+    }
+
     // Debug logging for file messages
     if (item.type === 'file') {
       console.log('[ChatScreen] Rendering file message:', {
@@ -2759,65 +3027,96 @@ export default function ChatScreen() {
               mimeType={item.mimeType ?? undefined}
               isOutgoing={true}
             />
-          ) : item.type === 'video' && item.videoUrl ? (
+          ) : item.type === 'video' && (item.localMediaUri || item.videoUrl) ? (
             <View style={[styles.bubble, styles.bubbleOut, styles.imageBubble]}>
-              <TouchableOpacity
-                activeOpacity={0.9}
-                onPress={() => setVideoViewerUrl(item.videoUrl!)}
-              >
-                <View style={styles.videoThumbWrap}>
-                  {item.thumbnailUrl ? (
+              <View style={styles.videoThumbWrap}>
+                <TouchableOpacity
+                  style={styles.mediaFill}
+                  activeOpacity={0.9}
+                  disabled={!!item.uploadStatus}
+                  onPress={() => setVideoViewerUrl(item.videoUrl ?? item.localMediaUri ?? null)}
+                >
+                  {item.localMediaUri ? (
+                    <LocalVideoBubblePreview key={item.localMediaUri} uri={item.localMediaUri} />
+                  ) : item.thumbnailUrl ? (
                     <Image source={{ uri: item.thumbnailUrl }} style={styles.videoThumbImage} resizeMode="cover" />
                   ) : (
                     <View style={[styles.videoThumbImage, styles.videoPlaceholder]} />
                   )}
-                  <View style={styles.videoPlayOverlay}>
-                    <AppIcon name="play" size={30} color="#fff" fixedColor />
-                  </View>
-                  {/* Time overlay only when there is NO caption */}
-                  {!item.text && (
+                  {!item.uploadStatus && (
+                    <View style={styles.videoPlayOverlay}>
+                      <AppIcon name="play" size={30} color="#fff" fixedColor />
+                    </View>
+                  )}
+                  {!item.text && !item.uploadStatus && (
                     <View style={styles.imageTimeOverlay}>
                       <AppText style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
                       <AppIcon name={tickIcon.icon} size={13} color={tickIcon.color} fixedColor />
                     </View>
                   )}
-                </View>
-              </TouchableOpacity>
+                </TouchableOpacity>
+                {item.uploadStatus && (
+                  <MediaUploadOverlay
+                    status={item.uploadStatus}
+                    progress={item.uploadProgress}
+                    bytesSent={item.uploadBytesSent}
+                    totalBytes={item.uploadBytesTotal}
+                    onRetry={() => retryMediaUpload(item)}
+                  />
+                )}
+              </View>
               {item.text ? (
                 <View style={styles.mediaCaptionBlock}>
                   <AppText style={[styles.mediaCaptionOut, { color: textColor }]}>{item.text}</AppText>
-                  <View style={styles.mediaCaptionTimeRow}>
-                    <AppText style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
-                    <AppIcon name={tickIcon.icon} size={13} color={tickIcon.color} fixedColor />
-                  </View>
+                  {!item.uploadStatus && (
+                    <View style={styles.mediaCaptionTimeRow}>
+                      <AppText style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
+                      <AppIcon name={tickIcon.icon} size={13} color={tickIcon.color} fixedColor />
+                    </View>
+                  )}
                 </View>
               ) : null}
             </View>
-          ) : item.type === 'image' && item.imageUrl ? (
+          ) : item.type === 'image' && (item.localMediaUri || item.imageUrl) ? (
             <View style={[styles.bubble, styles.bubbleOut, styles.imageBubble]}>
-              <TouchableOpacity
-                activeOpacity={0.9}
-                onPress={() => {
-                  setViewerImageUrl(item.imageUrl!);
-                  setViewerVisible(true);
-                }}
-              >
-                <Image
-                  source={{ uri: item.imageUrl }}
-                  style={styles.messageImage}
-                  resizeMode="cover"
-                />
-              </TouchableOpacity>
-              {item.text ? <AppText style={[styles.mediaCaptionOut, { color: textColor }]}>{item.text}</AppText> : null}
-              <View style={styles.imageTimeOverlay}>
-                <AppText style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
-                <AppIcon
-                  name={tickIcon.icon}
-                  size={13}
-                  color={tickIcon.color}
-                  fixedColor
-                />
+              <View style={styles.mediaFrame}>
+                <TouchableOpacity
+                  style={styles.mediaFill}
+                  activeOpacity={0.9}
+                  disabled={!!item.uploadStatus}
+                  onPress={() => {
+                    setViewerImageUrl(item.imageUrl ?? item.localMediaUri ?? null);
+                    setViewerVisible(true);
+                  }}
+                >
+                  <Image
+                    source={{ uri: item.localMediaUri ?? item.imageUrl! }}
+                    style={styles.messageImage}
+                    resizeMode="cover"
+                  />
+                </TouchableOpacity>
+                {item.uploadStatus && (
+                  <MediaUploadOverlay
+                    status={item.uploadStatus}
+                    progress={item.uploadProgress}
+                    bytesSent={item.uploadBytesSent}
+                    totalBytes={item.uploadBytesTotal}
+                    onRetry={() => retryMediaUpload(item)}
+                  />
+                )}
               </View>
+              {item.text ? <AppText style={[styles.mediaCaptionOut, { color: textColor }]}>{item.text}</AppText> : null}
+              {!item.uploadStatus && (
+                <View style={styles.imageTimeOverlay}>
+                  <AppText style={styles.timeOut}>{formatTime(item.timestamp)}</AppText>
+                  <AppIcon
+                    name={tickIcon.icon}
+                    size={13}
+                    color={tickIcon.color}
+                    fixedColor
+                  />
+                </View>
+              )}
             </View>
           ) : (
             <View style={[styles.bubble, styles.bubbleOut]}>
@@ -2881,7 +3180,7 @@ export default function ChatScreen() {
       <TouchableOpacity
         activeOpacity={1}
         onPress={onBubblePress}
-        onLongPress={() => handleLongPressMessage(item.messageId)}
+        onLongPress={item.uploadStatus ? undefined : () => handleLongPressMessage(item.messageId)}
         delayLongPress={300}
       >
         <View style={[isSelected && styles.selectedMessage]}>
@@ -3040,14 +3339,14 @@ export default function ChatScreen() {
               </View>
             </TouchableOpacity>
 
-            {/* Catalog button — only for 1-on-1 chats with a seller catalog */}
-            {!isGroup && sellerCatalog.length > 0 && (
+            {/* Marketplace — opens the other user's product catalog (1-on-1) */}
+            {!isGroup && (
               <TouchableOpacity
                 style={styles.iconBtn}
                 onPress={openCatalogSheet}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
-                <AppIcon name="storefront" size={20} color={COLORS.blue} fixedColor />
+                <AppIcon name="storefront-outline" size={20} color={COLORS.blue} fixedColor />
               </TouchableOpacity>
             )}
 
@@ -3108,11 +3407,25 @@ export default function ChatScreen() {
             <View style={[styles.menuCard, bevel]}>
               <TouchableOpacity
                 style={styles.menuItem}
-                onPress={async () => {
-                  const newMutedState = !muted;
-                  setMuted(newMutedState);
-                  await saveMutedState(chatId, newMutedState, userId);
+                onPress={() => {
                   setMenuOpen(false);
+                  if (muted) {
+                    setMuted(false);
+                    void saveMutedState(chatId, false, userId);
+                    return;
+                  }
+                  const until = (ms: number | null) =>
+                    ms === null ? null : new Date(Date.now() + ms).toISOString();
+                  const mute = (ms: number | null) => {
+                    setMuted(true);
+                    void saveMutedState(chatId, true, userId, until(ms));
+                  };
+                  Alert.alert('Mute notifications', 'For how long?', [
+                    { text: '8 hours', onPress: () => mute(8 * 60 * 60 * 1000) },
+                    { text: '1 week', onPress: () => mute(7 * 24 * 60 * 60 * 1000) },
+                    { text: 'Always', onPress: () => mute(null) },
+                    { text: 'Cancel', style: 'cancel' },
+                  ]);
                 }}
                 activeOpacity={0.75}
               >
@@ -3180,7 +3493,9 @@ export default function ChatScreen() {
               data={messagesWithDates}
               keyExtractor={(item) =>
                 item.type === 'message'
-                  ? item.data.messageId
+                  ? (item.data.clientId
+                      ? `${item.data.senderId}:${item.data.clientId}`
+                      : item.data.messageId)
                   : item.type === 'unreadDivider'
                   ? 'unread-divider'
                   : `date-${item.date.getTime()}`
@@ -3205,6 +3520,26 @@ export default function ChatScreen() {
                 if (distanceFromBottomRef.current <= SCROLL_THRESHOLD) {
                   listRef.current?.scrollToEnd({ animated: false });
                 }
+              }}
+              // Message rows have variable heights, so a scrollToIndex target
+              // that hasn't been rendered yet (e.g. the first-unread jump on a
+              // long thread) can't be located and would otherwise throw. Nudge
+              // to an approximate offset to force those rows to mount, then
+              // retry the exact scroll on the next frame.
+              onScrollToIndexFailed={(info) => {
+                listRef.current?.scrollToOffset({
+                  offset: info.averageItemLength * info.index,
+                  animated: false,
+                });
+                setTimeout(() => {
+                  if (messagesWithDates.length > info.index) {
+                    listRef.current?.scrollToIndex({
+                      index: info.index,
+                      animated: false,
+                      viewPosition: 0,
+                    });
+                  }
+                }, 120);
               }}
             />
           )}
@@ -3778,7 +4113,12 @@ export default function ChatScreen() {
                           setCameraOpen(false);
                           setMediaCaption('');
                           const isVid = p.isVideo ?? /\.(mp4|mov|m4v|3gp|avi)$/i.test(p.uri);
-                          setPendingMedia([{ uri: p.uri, kind: isVid ? 'video' : 'image' }]);
+                          setPendingMedia([{
+                            uri: p.uri,
+                            kind: isVid ? 'video' : 'image',
+                            width: p.width,
+                            height: p.height,
+                          }]);
                           setPendingMediaIndex(0);
                         }}
                       >
@@ -4032,35 +4372,58 @@ export default function ChatScreen() {
       >
         <CartSheet
           onClose={() => setCartSheetVisible(false)}
-          onSendOrder={async () => {
+          onSendOrder={() => {
             if (!userId || cartItems.length === 0) return;
-            setCartSheetVisible(false);
-            // Derive the currency prefix from the first item's price (e.g. "R", "$").
+            // Build the order payload and open the payment screen instead of
+            // sending directly. The order is finalized only on payment success.
             const currency = cartItems[0]?.item.price.match(/^[^0-9]*/)?.[0] ?? '';
             const orderItems = cartItems.map((c) => ({
-              id: c.item.id,
-              name: c.item.name,
-              price: c.item.price,
-              imageUri: c.item.imageUri ?? null,
-              quantity: c.quantity,
+              id:             c.item.id,
+              name:           c.item.name,
+              price:          c.item.price,
+              imageUri:       c.item.imageUri ?? null,
+              imageObjectKey: c.item.imageObjectKey ?? null,
+              quantity:       c.quantity,
             }));
             const totalStr = totalPrice != null ? totalPrice.toFixed(2) : null;
-            const result = await sendOrderMessage(chatId, userId, orderItems, totalStr, currency);
-            if (!result.success) {
-              Alert.alert('Error', 'Could not send the order. Please try again.');
-              return;
-            }
-            addOptimisticMessage({
-              messageId: result.messageId,
-              senderId: userId,
-              type: 'order',
-              order: { items: orderItems, total: totalStr, currency },
-            });
-            clearCart();
-            await checkAndTriggerAutoResponder();
+            const paymentItems: PaymentOrderItem[] = orderItems.map((o) => ({
+              id: o.id, name: o.name, price: o.price,
+              imageUri: o.imageUri, quantity: o.quantity,
+            }));
+            setPendingOrder({ items: paymentItems, currency, total: totalStr, orderItems });
+            setCartSheetVisible(false);
+            setPaymentVisible(true);
           }}
         />
       </Modal>
+
+      {/* ── Payment Sheet ── */}
+      <PaymentSheet
+        visible={paymentVisible}
+        items={pendingOrder?.items ?? []}
+        currency={pendingOrder?.currency ?? ''}
+        total={pendingOrder?.total ?? null}
+        onCancel={() => { setPaymentVisible(false); setPendingOrder(null); }}
+        onPaymentSuccess={async () => {
+          setPaymentVisible(false);
+          if (!userId || !pendingOrder) { setPendingOrder(null); return; }
+          const { orderItems, total: totalStr, currency: cur } = pendingOrder;
+          setPendingOrder(null);
+          const result = await sendOrderMessage(chatId, userId, orderItems, totalStr, cur);
+          if (!result.success) {
+            Alert.alert('Error', 'Could not send the order. Please try again.');
+            return;
+          }
+          addOptimisticMessage({
+            messageId: result.messageId,
+            senderId: userId,
+            type: 'order',
+            order: { items: orderItems, total: totalStr, currency: cur },
+          });
+          clearCart();
+          await checkAndTriggerAutoResponder();
+        }}
+      />
 
       {/* ── Create Poll Modal ── */}
       <CreatePollModal
@@ -4184,11 +4547,12 @@ export default function ChatScreen() {
                   <AppText style={[profileHeroStyles.name, { color: textColor, fontFamily }]}>
                     {displayName}
                   </AppText>
-                  {!isGroup && (
-                    <LinearGradient colors={GRADIENTS.primary} style={profileHeroStyles.verifiedBadge}>
-                      <AppIcon name="checkmark" size={10} color="#fff" fixedColor />
-                    </LinearGradient>
-                  )}
+                  {!isGroup && businessProfile ? (
+                    <IdentityVerificationBadge
+                      verified={businessProfile.identityVerified}
+                      compact
+                    />
+                  ) : null}
                 </View>
                 <AppText style={[profileHeroStyles.accountType, { color: FG.secondary }]}>
                   {isGroup ? `Group · ${messages.length} messages` : 'Business account'}
@@ -6046,6 +6410,18 @@ const styles = StyleSheet.create({
     height: 200,
     borderRadius: 12,
   },
+  // Fixed final media footprint: optimistic and completed bubbles occupy the
+  // same 200×200 area, so upload progress never causes layout jumps.
+  mediaFrame: {
+    width: 200,
+    height: 200,
+    borderRadius: 12,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  mediaFill: {
+    ...StyleSheet.absoluteFill,
+  },
   imageTimeOverlay: {
     position: 'absolute',
     bottom: 8,
@@ -6151,9 +6527,15 @@ const styles = StyleSheet.create({
   cameraRollThumb: { width: 60, height: 60 },
 
   // ── Video message bubble ────────────────────────────────────────────────────
-  // width:'100%' + aspectRatio makes the thumb fill the bubble horizontally
-  // so it always matches the caption text width below it.
-  videoThumbWrap: { width: '100%', aspectRatio: 1, borderRadius: 12, overflow: 'hidden', position: 'relative' },
+  // Match image bubbles exactly so the full video space is reserved from the
+  // instant the optimistic message appears through upload completion.
+  videoThumbWrap: {
+    width: 200,
+    height: 200,
+    borderRadius: 12,
+    overflow: 'hidden',
+    position: 'relative',
+  },
   // Fills the wrap completely — width/height 100% of the parent.
   videoThumbImage: { width: '100%', height: '100%', borderRadius: 12 },
   videoPlaceholder: { backgroundColor: '#1c2733', alignItems: 'center', justifyContent: 'center' },

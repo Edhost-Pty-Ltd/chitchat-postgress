@@ -38,6 +38,7 @@ export async function resolvePushRecipients(job: PushMessageJob): Promise<string
         AND NOT EXISTS (
           SELECT 1 FROM chat_mutes mu
            WHERE mu.chat_id = cm.chat_id AND mu.user_id = cm.user_id
+             AND (mu.muted_until IS NULL OR mu.muted_until > now())
         )`,
     [job.chatId, job.messageId, job.senderId],
   );

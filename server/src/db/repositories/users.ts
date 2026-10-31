@@ -1,9 +1,11 @@
-import { query } from '../pool.js';
+import { randomUUID } from 'node:crypto';
+import { query, withTransaction } from '../pool.js';
 
 /**
- * Create the user row on first authenticated contact, keyed by firebase uid
- * (Req 2.6). Idempotent: later calls only backfill a phone number if it was
- * previously null, and never overwrite profile fields.
+ * Legacy/test seeding helper. Production authentication no longer calls this:
+ * self-registered user rows are created only by completeSelfRegistration after
+ * Node verifies Django's signed face-enrollment receipt. Existing tests and
+ * internal seed paths still use this idempotent helper to prepare fixtures.
  */
 export async function upsertUserOnFirstContact(
   userId: string,
@@ -39,6 +41,12 @@ export interface UserRow {
   auto_responder_message?: string | null;
   catalog_items?: unknown[] | null;
   catalog_collections?: unknown[] | null;
+  requires_verification?: boolean;
+  reported_by?: string | null;
+  reported_at?: Date | null;
+  identity_verified?: boolean;
+  identity_verified_at?: Date | null;
+  verification_generation?: string | null;
 }
 
 /** Business-profile fields shown to other users (catalog, hours, address...). */
@@ -64,6 +72,12 @@ export interface UserProfile extends BusinessProfile {
   accountType: string;
   autoResponderEnabled: boolean;
   autoResponderMessage: string | null;
+  requiresVerification: boolean;
+  /** Canonical, server-owned identity status. Never inferred from local UI. */
+  identityVerified: boolean;
+  identityVerifiedAt: string | null;
+  /** Owner-only nonce binding a face proof to the latest report. */
+  verificationGeneration: string | null;
 }
 
 export function rowToBusiness(row: UserRow): BusinessProfile {
@@ -91,8 +105,160 @@ export function rowToProfile(row: UserRow): UserProfile {
     accountType: row.account_type,
     autoResponderEnabled: !!row.auto_responder_enabled,
     autoResponderMessage: row.auto_responder_message ?? null,
+    requiresVerification: !!row.requires_verification,
+    identityVerified: row.identity_verified !== false,
+    identityVerifiedAt: row.identity_verified_at?.toISOString() ?? null,
+    verificationGeneration: row.verification_generation ?? null,
     ...rowToBusiness(row),
   };
+}
+
+export interface ReportVerificationTransition {
+  generation: string;
+  duplicate: boolean;
+}
+
+/**
+ * Record a report and atomically move the target to "verification required".
+ *
+ * A fresh generation invalidates any face proof already in flight. Repeated
+ * taps by the SAME reporter within ten minutes are idempotent, preventing one
+ * client from continuously rotating the nonce and making verification
+ * impossible. The route separately requires the users to share a chat.
+ */
+export async function setRequiresVerification(
+  userId: string,
+  reporterId: string,
+): Promise<ReportVerificationTransition> {
+  const nextGeneration = randomUUID();
+  const reportId = randomUUID();
+
+  return withTransaction(async (client) => {
+    const target = await client.query<{
+      requires_verification: boolean;
+      verification_generation: string | null;
+    }>(
+      `SELECT requires_verification, verification_generation
+         FROM users WHERE id = $1 FOR UPDATE`,
+      [userId],
+    );
+    if (!target.rows[0]) throw new Error('reported user disappeared');
+
+    const duplicate = await client.query<{ verification_generation: string }>(
+      `SELECT verification_generation
+         FROM user_reports
+        WHERE reporter_id = $1 AND reported_id = $2 AND status = 'open'
+          AND created_at > now() - interval '10 minutes'
+        ORDER BY created_at DESC LIMIT 1`,
+      [reporterId, userId],
+    );
+    const currentGeneration = target.rows[0].verification_generation;
+    if (duplicate.rows[0] && target.rows[0].requires_verification && currentGeneration) {
+      return { generation: currentGeneration, duplicate: true };
+    }
+
+    await client.query(
+      `INSERT INTO user_reports
+         (id, reporter_id, reported_id, verification_generation)
+       VALUES ($1, $2, $3, $4)`,
+      [reportId, reporterId, userId, nextGeneration],
+    );
+    await client.query(
+      `UPDATE users
+          SET requires_verification = true,
+              identity_verified = false,
+              identity_verified_at = null,
+              verification_generation = $3,
+              reported_by = $2,
+              reported_at = now()
+        WHERE id = $1`,
+      [userId, reporterId, nextGeneration],
+    );
+    return { generation: nextGeneration, duplicate: false };
+  });
+}
+
+export interface CompleteVerificationResult {
+  state: 'cleared' | 'already_verified' | 'stale' | 'not_found';
+  reporterIds: string[];
+  verifiedAt: string | null;
+}
+
+/**
+ * Clear ONLY the exact report generation proven by Django. Row locking makes
+ * report-vs-verification races deterministic: if a newer report commits first,
+ * the old proof is stale; if it commits second, it immediately un-verifies the
+ * account again. No client-supplied boolean can change identity status.
+ */
+export async function completeRequiresVerification(
+  userId: string,
+  generation: string,
+): Promise<CompleteVerificationResult> {
+  return withTransaction(async (client) => {
+    const current = await client.query<{
+      requires_verification: boolean;
+      identity_verified: boolean;
+      identity_verified_at: Date | null;
+      verification_generation: string | null;
+      reported_by: string | null;
+    }>(
+      `SELECT requires_verification, identity_verified, identity_verified_at,
+              verification_generation, reported_by
+         FROM users WHERE id = $1 FOR UPDATE`,
+      [userId],
+    );
+    const row = current.rows[0];
+    if (!row) return { state: 'not_found', reporterIds: [], verifiedAt: null };
+    if (!row.requires_verification && row.identity_verified) {
+      return {
+        state: 'already_verified',
+        reporterIds: [],
+        verifiedAt: row.identity_verified_at?.toISOString() ?? null,
+      };
+    }
+    if (row.verification_generation !== generation) {
+      return { state: 'stale', reporterIds: [], verifiedAt: null };
+    }
+
+    const reporters = await client.query<{ reporter_id: string }>(
+      `SELECT DISTINCT reporter_id
+         FROM user_reports
+        WHERE reported_id = $1 AND status = 'open'`,
+      [userId],
+    );
+    const reporterIds = Array.from(
+      new Set([
+        ...reporters.rows.map((r) => r.reporter_id),
+        ...(row.reported_by ? [row.reported_by] : []),
+      ]),
+    ).filter((id) => id !== userId);
+
+    const updated = await client.query<{ identity_verified_at: Date }>(
+      `UPDATE users
+          SET requires_verification = false,
+              identity_verified = true,
+              identity_verified_at = now(),
+              verification_generation = null,
+              reported_by = null,
+              reported_at = null
+        WHERE id = $1 AND verification_generation = $2
+        RETURNING identity_verified_at`,
+      [userId, generation],
+    );
+    if (!updated.rows[0]) return { state: 'stale', reporterIds: [], verifiedAt: null };
+
+    await client.query(
+      `UPDATE user_reports
+          SET status = 'resolved', resolved_at = now()
+        WHERE reported_id = $1 AND status = 'open'`,
+      [userId],
+    );
+    return {
+      state: 'cleared',
+      reporterIds,
+      verifiedAt: updated.rows[0].identity_verified_at.toISOString(),
+    };
+  });
 }
 
 export async function getUserById(userId: string): Promise<UserRow | null> {
@@ -225,4 +391,112 @@ export async function matchContacts(
       avatarObjectKey: photoVisible ? r.avatar_object_key : null,
     };
   });
+}
+
+
+/**
+ * Account gate used by the REST and Socket.IO authorization checks.
+ *  - 'unregistered': no users row. The caller passed phone OTP but has not yet
+ *    completed face enrollment + liveness, so the account does not exist.
+ *  - 'verification_required': a reported account awaiting a live face proof.
+ *  - 'ok': full access.
+ */
+export type AccountGateStatus = 'unregistered' | 'verification_required' | 'ok';
+
+export async function accountGateStatus(userId: string): Promise<AccountGateStatus> {
+  const result = await query<{
+    requires_verification: boolean;
+    identity_verified: boolean;
+  }>(
+    `SELECT requires_verification, identity_verified
+       FROM users WHERE id = $1`,
+    [userId],
+  );
+  const row = result.rows[0];
+  if (!row) return 'unregistered';
+  return row.requires_verification || !row.identity_verified ? 'verification_required' : 'ok';
+}
+
+/**
+ * Fill a missing phone number on an EXISTING row from the verified token.
+ * Never inserts: rows are created only by completeSelfRegistration (after the
+ * face step) or when an owner/admin provisions an agent.
+ */
+export async function backfillPhoneIfRegistered(
+  userId: string,
+  phoneNumber: string | null,
+): Promise<void> {
+  if (!phoneNumber) return;
+  await query(
+    `UPDATE users SET phone_number = $2
+      WHERE id = $1 AND phone_number IS NULL
+        AND NOT EXISTS (SELECT 1 FROM users other WHERE other.phone_number = $2)`,
+    [userId, phoneNumber],
+  );
+}
+
+export interface SelfRegistrationProfile {
+  displayName: string;
+  email?: string | null;
+  website?: string | null;
+  about?: string | null;
+}
+
+export type SelfRegistrationResult =
+  | { state: 'created'; row: UserRow }
+  | { state: 'already_registered'; row: UserRow }
+  | { state: 'phone_taken' };
+
+/**
+ * Create the users row for a self-registered account. The route calls this
+ * only after verifying Django's signed face-enrollment receipt. Idempotent per
+ * uid, so a retry after a lost response returns the same account.
+ */
+export async function completeSelfRegistration(
+  userId: string,
+  phoneNumber: string,
+  profile: SelfRegistrationProfile,
+): Promise<SelfRegistrationResult> {
+  return withTransaction(async (client) => {
+    const existing = await client.query<UserRow>('SELECT * FROM users WHERE id = $1', [userId]);
+    if (existing.rows[0]) return { state: 'already_registered', row: existing.rows[0] };
+
+    const taken = await client.query('SELECT 1 FROM users WHERE phone_number = $1', [phoneNumber]);
+    if (taken.rowCount) return { state: 'phone_taken' };
+
+    const inserted = await client.query<UserRow>(
+      `INSERT INTO users (id, phone_number, display_name, email, website, about)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT DO NOTHING
+       RETURNING *`,
+      [
+        userId,
+        phoneNumber,
+        profile.displayName,
+        profile.email ?? null,
+        profile.website ?? null,
+        profile.about ?? null,
+      ],
+    );
+    if (inserted.rows[0]) return { state: 'created', row: inserted.rows[0] };
+
+    // Lost a race with a concurrent request for the same uid or phone.
+    const raced = await client.query<UserRow>('SELECT * FROM users WHERE id = $1', [userId]);
+    if (raced.rows[0]) return { state: 'already_registered', row: raced.rows[0] };
+    return { state: 'phone_taken' };
+  });
+}
+
+/** Fast owner-status check used by HTTP and Socket.IO authorization gates. */
+export async function identityVerificationRequired(userId: string): Promise<boolean> {
+  const result = await query<{
+    requires_verification: boolean;
+    identity_verified: boolean;
+  }>(
+    `SELECT requires_verification, identity_verified
+       FROM users WHERE id = $1`,
+    [userId],
+  );
+  const row = result.rows[0];
+  return !!row && (row.requires_verification || !row.identity_verified);
 }

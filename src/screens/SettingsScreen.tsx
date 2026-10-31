@@ -1,7 +1,7 @@
 ﻿// ─── Screen: Settings ────────────────────────────────────────────────────────
-import React from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { View, TouchableOpacity, StyleSheet, ScrollView, Linking } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons'; // kept for IoniconName type
@@ -9,6 +9,9 @@ import { Avatar, BottomNav, UserAvatar } from '../components';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { useAuth } from '../context/AuthContext';
+import { endpoints } from '../api/endpoints';
+import IdentityVerificationBadge from '../components/IdentityVerificationBadge';
+import { socketClient } from '../realtime/socket';
 
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useTheme } from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -45,10 +48,31 @@ const SETTINGS_SECTIONS: {
 
 export default function SettingsScreen() {
   const navigation = useNavigation<NavProp>();
-  const { signOut, phone, displayName, isCompanion } = useAuth();
+  const { signOut, phone, displayName, isCompanion, userId } = useAuth();
   const { FG } = useForeground();
   const { fontFamily, textColor, iconColor } = useTypography();
   const insets = useSafeAreaInsets();
+  const [identityVerified, setIdentityVerified] = useState<boolean | null>(null);
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      void endpoints.getMe().then((result) => {
+        if (active && result.ok) setIdentityVerified(result.data.identityVerified);
+      });
+      return () => { active = false; };
+    }, []),
+  );
+
+  useEffect(() => socketClient.subscribe('user:identity-status', (raw) => {
+    const payload = raw as { userId?: string; identityVerified?: boolean } | null;
+    if (
+      payload?.userId === userId &&
+      typeof payload.identityVerified === 'boolean'
+    ) {
+      setIdentityVerified(payload.identityVerified);
+    }
+  }), [userId]);
 
   const handleItem = (id: string) => {
     if (id === 'signout')       { signOut(); return; }
@@ -81,6 +105,13 @@ export default function SettingsScreen() {
           <View style={styles.profileText}>
             <AppText style={[styles.profileName, { color: textColor, fontFamily }]}>{displayName || 'John Doe'}</AppText>
             <AppText style={[styles.profileSub, { color: COLORS.sub, fontFamily }]}>View business profile</AppText>
+            {identityVerified !== null ? (
+              <IdentityVerificationBadge
+                verified={identityVerified}
+                compact
+                style={{ marginTop: 6 }}
+              />
+            ) : null}
           </View>
           <AppIcon name="chevron-forward" size={18} color={COLORS.sub} />
         </TouchableOpacity>

@@ -18,19 +18,21 @@ import { mediaService } from '../services/mediaService';
 import { fetchUserPrivacySettings } from './usePrivacySettings';
 import {
   loadLocalMessages, mergeLocalMessages, clearLocalMessages, removeLocalMessage,
-  loadDeletedIds, addDeletedIds, clearDeletedIds,
+  updateLocalMessage, loadDeletedIds, addDeletedIds, clearDeletedIds,
 } from './useLocalMessages';
 import { CatalogItem } from '../types';
 
 export interface FireMessage {
   messageId:    string;
+  /** Stable client-generated id used to reconcile optimistic sends. */
+  clientId?:    string | null;
   senderId:     string;
   text:         string | null;
   imageUrl:     string | null;
   voiceUrl:     string | null;
   videoUrl:     string | null;
   fileUrl:      string | null;
-  type:         'text' | 'image' | 'voice' | 'video' | 'file' | 'location' | 'system' | 'catalog' | 'order' | 'contact' | 'poll';
+  type:         'text' | 'image' | 'voice' | 'video' | 'file' | 'location' | 'system' | 'catalog' | 'order' | 'contact' | 'poll' | 'meeting';
   timestamp:    Date | null;
   expiresAt:    Date | null;
   readBy:       string[];
@@ -41,6 +43,15 @@ export interface FireMessage {
   mimeType:     string | null;
   thumbnailUrl: string | null;
   blockedMessage?: boolean;
+  /** Client-only fields for an image/video that is preparing or uploading. */
+  localMediaUri?: string | null;
+  uploadStatus?: 'preparing' | 'uploading' | 'sending' | 'failed';
+  uploadProgress?: number;
+  uploadBytesSent?: number;
+  uploadBytesTotal?: number;
+  uploadError?: string | null;
+  mediaWidth?: number | null;
+  mediaHeight?: number | null;
   // Catalog product card
   catalogItem?: CatalogItem | null;
   // Order card (cart checkout) — line items + total
@@ -69,6 +80,22 @@ export interface FireMessage {
     options: { id: string; text: string }[];
     votes: Record<string, string[]>; // optionId -> array of voter UIDs
     multiple: boolean;
+  } | null;
+  // Meeting invite card
+  meeting?: {
+    meetingId: string;
+    title: string;
+    startsAt: string;
+    endsAt: string;
+    venue: 'online' | 'in-person';
+    joinUrl: string;
+    organizerName?: string | null;
+    location?: {
+      name: string | null;
+      address: string | null;
+      lat: number | null;
+      lng: number | null;
+    } | null;
   } | null;
   location?: {
     latitude: number; longitude: number; accuracy?: number;
@@ -140,6 +167,8 @@ function collectObjectKeys(messages: BackendMessage[]): string[] {
   for (const m of messages) {
     if (m.mediaObjectKey) keys.add(m.mediaObjectKey);
     if (m.thumbnailObjectKey) keys.add(m.thumbnailObjectKey);
+    const catalogImage = (m.catalogItem as CatalogItem | null)?.imageUri;
+    if (catalogImage && !/^[a-z][a-z0-9+.-]*:/i.test(catalogImage)) keys.add(catalogImage);
     if (m.order?.items) {
       for (const it of m.order.items) if (it.imageObjectKey) keys.add(it.imageObjectKey);
     }
@@ -179,11 +208,17 @@ function mapBackendMessage(m: BackendMessage, urls: Record<string, string>): Fir
   const resolve = (key?: string | null) => (key ? urls[key] ?? null : null);
   const mediaUrl = resolve(m.mediaObjectKey);
   const thumbUrl = resolve(m.thumbnailObjectKey);
+  const rawCatalogItem = (m.catalogItem as CatalogItem | null) ?? null;
+  const catalogImageKey = rawCatalogItem?.imageObjectKey
+    ?? (rawCatalogItem?.imageUri && !/^[a-z][a-z0-9+.-]*:/i.test(rawCatalogItem.imageUri)
+      ? rawCatalogItem.imageUri
+      : null);
 
   const type = (m.type ?? 'text') as FireMessage['type'];
 
   return {
     messageId:    m.id,
+    clientId:     m.clientId ?? null,
     senderId:     m.senderId,
     text:         m.text ?? null,
     imageUrl:     type === 'image' ? mediaUrl : null,
@@ -201,7 +236,13 @@ function mapBackendMessage(m: BackendMessage, urls: Record<string, string>): Fir
     mimeType:     m.mimeType ?? null,
     thumbnailUrl: thumbUrl,
     blockedMessage: false,
-    catalogItem:  (m.catalogItem as CatalogItem | null) ?? null,
+    catalogItem:  rawCatalogItem
+      ? {
+          ...rawCatalogItem,
+          imageObjectKey: catalogImageKey,
+          imageUri: catalogImageKey ? resolve(catalogImageKey) : rawCatalogItem.imageUri ?? null,
+        }
+      : null,
     order:        m.order
       ? {
           items: m.order.items.map((it) => ({
@@ -224,6 +265,18 @@ function mapBackendMessage(m: BackendMessage, urls: Record<string, string>): Fir
           multiple: m.poll.multiple,
         }
       : null,
+    meeting:      m.meeting
+      ? {
+          meetingId: m.meeting.meetingId,
+          title: m.meeting.title,
+          startsAt: m.meeting.startsAt,
+          endsAt: m.meeting.endsAt,
+          venue: m.meeting.venue,
+          joinUrl: m.meeting.joinUrl,
+          organizerName: m.meeting.organizerName ?? null,
+          location: m.meeting.location ?? null,
+        }
+      : null,
     location:     (m.location as FireMessage['location']) ?? null,
     isLiveLocation: false,
     liveLocationExpiry: null,
@@ -238,6 +291,10 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
   const [messages, setMessages] = useState<FireMessage[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
+  // Needed by async reconciliation so a server message can retain the local
+  // preview currently on screen until the remote URL is available/rendered.
+  const messagesRef = useRef<FireMessage[]>([]);
+  messagesRef.current = messages;
   // This user's server-side "cleared" cutoff (ms): messages at/before it are
   // hidden for this user only. Does not affect the other members.
   const [clearedAt, setClearedAt] = useState<number>(0);
@@ -254,11 +311,26 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     loadDeletedIds(chatId).then((ids) => setDeletedIds(new Set(ids)));
   }, [chatId]);
 
-  // Seed from local cache immediately
+  // Seed from local cache immediately. If the app was killed during an upload,
+  // the task itself cannot survive the process restart; restore that bubble as
+  // failed/retryable rather than leaving a permanently spinning indicator.
   useEffect(() => {
     if (!chatId) return;
     loadLocalMessages(chatId).then((cached) => {
-      if (cached.length > 0) { setMessages(cached); setLoading(false); }
+      const restored = cached.map((message) =>
+        message.uploadStatus && message.uploadStatus !== 'failed'
+          ? {
+              ...message,
+              uploadStatus: 'failed' as const,
+              uploadError: 'Upload interrupted. Tap to retry.',
+            }
+          : message,
+      );
+      if (restored.length > 0) {
+        messagesRef.current = restored;
+        setMessages(restored);
+        setLoading(false);
+      }
     });
   }, [chatId]);
 
@@ -274,10 +346,14 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     await pruneLocalBefore(targetChatId, cutoffMs);
   }, []);
 
-  // Apply a batch of backend messages into state + local cache.
+  // Apply a batch of backend messages into state + local cache. A backend
+  // message carrying clientId replaces its optimistic counterpart instead of
+  // creating a duplicate. The current-session local preview is retained in
+  // memory for a seamless visual handoff, but is not persisted after success.
   const applyBackendMessages = useCallback(async (incoming: BackendMessage[]) => {
     const activeChatId = chatIdRef.current;
     if (!activeChatId) return;
+    const optimisticSnapshot = messagesRef.current;
     const urls = await mediaService.getDownloadUrls(collectObjectKeys(incoming));
     const mapped = incoming
       .filter((m) => !m.deletedForEveryone)
@@ -285,7 +361,25 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     if (mapped.length === 0) return;
     await mergeLocalMessages(activeChatId, mapped).catch(() => {});
     const merged = await loadLocalMessages(activeChatId);
-    setMessages(merged);
+    const withLocalPreview = merged.map((message) => {
+      if (!message.clientId) return message;
+      const optimistic = optimisticSnapshot.find(
+        (candidate) =>
+          candidate.senderId === message.senderId &&
+          candidate.clientId === message.clientId &&
+          !!candidate.localMediaUri,
+      );
+      return optimistic
+        ? {
+            ...message,
+            localMediaUri: optimistic.localMediaUri,
+            mediaWidth: optimistic.mediaWidth,
+            mediaHeight: optimistic.mediaHeight,
+          }
+        : message;
+    });
+    messagesRef.current = withLocalPreview;
+    setMessages(withLocalPreview);
   }, []);
 
   // Initial load + live socket updates.
@@ -318,9 +412,7 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
         setLoading(false);
 
         if (ownerUid) {
-          fetchUserPrivacySettings(ownerUid).then((privacy) => {
-            markAsRead(chatId, ownerUid, mapped, privacy.readReceipts);
-          });
+          markAsRead(chatId, ownerUid, mapped);
         }
       } else {
         setError(errText(res.error));
@@ -339,13 +431,9 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
       if (!message || message.chatId !== chatIdRef.current) return;
       void applyBackendMessages([message]).then(() => {
         if (ownerUid && message.senderId !== ownerUid) {
-          fetchUserPrivacySettings(ownerUid).then((privacy) => {
-            if (privacy.readReceipts) {
-              socketClient.emit('message:read', {
-                chatId: message.chatId,
-                messageIds: [message.id],
-              });
-            }
+          socketClient.emit('message:read', {
+            chatId: message.chatId,
+            messageIds: [message.id],
           });
         }
       });
@@ -427,13 +515,13 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     await applyClearedAt(chatId, parseMs(res.data.clearedAt));
   }, [chatId, ownerUid, applyClearedAt]);
 
-  // Optimistically insert a locally-built message so it appears instantly,
-  // before the server round-trips. The real message (same messageId) overwrites
-  // it on arrival. Used for poll/order/contact cards written via useChatActions.
+  // Optimistically insert a locally-built message so it appears instantly.
+  // Media uses messageId === clientId until the backend returns its real id.
   const addOptimisticMessage = useCallback((partial: Partial<FireMessage> & { messageId: string }) => {
     if (!chatId) return;
     const echo: FireMessage = {
       messageId: partial.messageId,
+      clientId: partial.clientId ?? partial.messageId,
       senderId: partial.senderId ?? ownerUid ?? '',
       text: partial.text ?? null,
       imageUrl: partial.imageUrl ?? null,
@@ -450,20 +538,55 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
       fileSize: partial.fileSize ?? null,
       mimeType: partial.mimeType ?? null,
       thumbnailUrl: partial.thumbnailUrl ?? null,
+      blockedMessage: partial.blockedMessage ?? false,
+      localMediaUri: partial.localMediaUri ?? null,
+      uploadStatus: partial.uploadStatus,
+      uploadProgress: partial.uploadProgress ?? 0,
+      uploadBytesSent: partial.uploadBytesSent ?? 0,
+      uploadBytesTotal: partial.uploadBytesTotal ?? 0,
+      uploadError: partial.uploadError ?? null,
+      mediaWidth: partial.mediaWidth ?? null,
+      mediaHeight: partial.mediaHeight ?? null,
       catalogItem: partial.catalogItem ?? null,
       order: partial.order ?? null,
       contact: partial.contact ?? null,
       poll: partial.poll ?? null,
+      meeting: partial.meeting ?? null,
       location: partial.location ?? null,
       replyTo: partial.replyTo ?? null,
       forwarded: partial.forwarded ?? false,
     };
     setMessages((prev) => {
       if (prev.some((m) => m.messageId === echo.messageId)) return prev;
-      return [...prev, echo];
+      const next = [...prev, echo];
+      messagesRef.current = next;
+      return next;
     });
     mergeLocalMessages(chatId, [echo]).catch(() => {});
   }, [chatId, ownerUid]);
+
+  /** Update one optimistic bubble; persist only meaningful stage/failure changes. */
+  const updateOptimisticMessage = useCallback((
+    messageId: string,
+    patch: Partial<FireMessage>,
+    persist = false,
+  ) => {
+    setMessages((prev) => {
+      const next = prev.map((message) =>
+        message.messageId === messageId ? { ...message, ...patch } : message,
+      );
+      messagesRef.current = next;
+      return next;
+    });
+    if (persist && chatId) {
+      void updateLocalMessage(chatId, messageId, patch);
+    }
+  }, [chatId]);
+
+  /** Replace an optimistic send with the backend message using its clientId. */
+  const reconcileBackendMessage = useCallback(async (message: BackendMessage) => {
+    await applyBackendMessages([message]);
+  }, [applyBackendMessages]);
 
   // Hide messages the user cleared for themselves (timestamp <= their cutoff)
   // and any they deleted "for me".
@@ -473,27 +596,39 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     return true;
   });
 
-  return { messages: visibleMessages, loading, error, sendMessage, clearMessages, deleteMessage, addOptimisticMessage };
+  return {
+    messages: visibleMessages,
+    loading,
+    error,
+    sendMessage,
+    clearMessages,
+    deleteMessage,
+    addOptimisticMessage,
+    updateOptimisticMessage,
+    reconcileBackendMessage,
+  };
 }
 
 // ── Mark incoming messages as read ────────────────────────────────────────────
-// Unread counters are maintained server-side when the chat is opened. We emit
-// read receipts over the socket for messages from other members (respecting the
-// reader's readReceipts privacy setting), mirroring the old Firestore readBy
-// batch update.
+// The server clears the reader's unread counter unconditionally on message:read
+// and only forwards the receipt to the senders when the reader's readReceipts
+// privacy allows it. So we ALWAYS emit to clear the badge; the server decides
+// whether to tell the senders.
 function markAsRead(
   chatId: string,
   ownerUid: string,
   messages: FireMessage[],
-  readReceipts = true,
 ) {
   try {
-    if (!readReceipts) return;
     const unreadIds = messages
       .filter((m) => m.senderId !== ownerUid && !(m.readBy ?? []).includes(ownerUid))
       .map((m) => m.messageId);
     if (unreadIds.length === 0) return;
     socketClient.emit('message:read', { chatId, messageIds: unreadIds });
+    // Notify local subscribers (useUnreadCount) that the reader has marked
+    // messages as read, so badges/counters refresh immediately without waiting
+    // for a server echo that never comes back to the reader.
+    socketClient.emitLocal('client:read', { chatId });
   } catch (error) {
     console.warn('[useMessages] Error marking messages:', error);
   }

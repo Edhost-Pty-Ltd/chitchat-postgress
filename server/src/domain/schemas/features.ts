@@ -1,14 +1,21 @@
 import { z } from 'zod';
 
-// ─── Chat mute ───────────────────────────────────────────────────────────────
-export const muteSchema = z.object({ muted: z.boolean() }).strict();
+// ─── Chat mute ─────────────────────────────────────────────────────────────
+// `mutedUntil` is the ISO instant the mute lapses; omit or null = "Always".
+// Ignored when `muted` is false.
+export const muteSchema = z
+  .object({
+    muted: z.boolean(),
+    mutedUntil: z.string().datetime({ offset: true }).nullable().optional(),
+  })
+  .strict();
 
-// ─── Profile views ───────────────────────────────────────────────────────────
+// ─── Profile views ─────────────────────────────────────────────────────────
 export const recordProfileViewSchema = z
   .object({ viewedUid: z.string().min(1).max(128) })
   .strict();
 
-// ─── Linked devices ──────────────────────────────────────────────────────────
+// ─── Linked devices ────────────────────────────────────────────────────────
 const deviceTypeSchema = z.enum(['phone', 'tablet', 'desktop', 'web']);
 const platformSchema = z.enum(['ios', 'android', 'web']);
 
@@ -42,15 +49,17 @@ export const registerDeviceSchema = z
   })
   .strict();
 
-// ─── Multi-agent / business ──────────────────────────────────────────────────
+// ─── Multi-agent / business ─────────────────────────────────────────────────
 const planSchema = z.enum(['free', 'pro', 'enterprise']);
 const routingSchema = z.enum(['round-robin', 'least-active', 'manual']);
+export const agentStatusSchema = z
+  .object({ status: z.enum(['available', 'busy', 'away']).nullable() })
+  .strict();
 
 export const createBusinessSchema = z
   .object({
-    name: z.string().min(1).max(256),
+    name: z.string().trim().min(1).max(256),
     plan: planSchema.optional(),
-    agents: z.array(z.string().min(1).max(128)).max(200).optional(),
     autoAssign: z.boolean().optional(),
     routingStrategy: routingSchema.optional(),
   })
@@ -58,18 +67,30 @@ export const createBusinessSchema = z
 
 export const updateBusinessSchema = z
   .object({
-    name: z.string().min(1).max(256).optional(),
+    name: z.string().trim().min(1).max(256).optional(),
     plan: planSchema.optional(),
-    agents: z.array(z.string().min(1).max(128)).max(200).optional(),
     autoAssign: z.boolean().optional(),
     routingStrategy: routingSchema.optional(),
   })
   .strict();
 
-export const agentStatusSchema = z
-  .object({ status: z.enum(['available', 'busy', 'away']).nullable() })
+/** The manager confirms consent in person before an encrypted face template is created. */
+export const createBusinessAgentSchema = z
+  .object({
+    firstName: z.string().trim().min(1).max(80),
+    surname: z.string().trim().min(1).max(80),
+    // Strict E.164: Firebase Admin receives only a canonical telephone value.
+    phoneNumber: z.string().regex(/^\+[1-9]\d{6,14}$/, 'Use an E.164 phone number'),
+    consentConfirmed: z.literal(true),
+  })
   .strict();
 
+export const agentFaceEnrollmentCompleteSchema = z
+  .object({ receipt: z.string().min(20).max(4096) })
+  .strict();
+
+// Kept for old serialized client surfaces. The route no longer permits users to
+// elevate themselves; business membership is the authority source.
 export const userRoleSchema = z
   .object({ role: z.enum(['customer', 'agent', 'admin']) })
   .strict();
@@ -78,7 +99,7 @@ export const internalNoteSchema = z
   .object({ text: z.string().min(1).max(4096) })
   .strict();
 
-// ─── Synced contacts (companion devices) ─────────────────────────────────────
+// ─── Synced contacts (companions show the owner's phone book) ───────────────
 export const syncedContactsSchema = z
   .object({
     contacts: z
@@ -97,7 +118,7 @@ export const syncedContactsSchema = z
   })
   .strict();
 
-// ─── Chat labels ─────────────────────────────────────────────────────────────
+// ─── Chat labels ───────────────────────────────────────────────────────────
 export const chatLabelSchema = z
   .object({
     title: z.string().min(1).max(60),

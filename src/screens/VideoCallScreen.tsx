@@ -290,6 +290,7 @@ export default function VideoCallScreen() {
   // ── WebRTC context ──────────────────────────────────────────────
   const {
     localStream, remoteStream, connectionState, networkQuality,
+    setActiveCallId, setIsCaller,
     initializePeerConnection, createOffer, createAnswer, setRemoteAnswer,
     addIceCandidate, toggleMute: toggleMuteWebRTC, toggleVideo,
     switchCamera: switchCameraWebRTC, startNetworkMonitoring, cleanup: cleanupWebRTC,
@@ -411,27 +412,60 @@ export default function VideoCallScreen() {
           return;
         }
 
-        // Duration is tracked locally. Use SignalingService for WebRTC signaling.
+        // ── 1:1 call signaling (offer/answer/ICE over Socket.IO) ──
+        setActiveCallId(callId);
+        setIsCaller(isOutgoing);
+        await SignalingService.joinCall(callId);
+
+        let answerApplied = false;
+        let offerAnswered = false;
+        const appliedIce = new Set<string>();
+        const applyRemoteIce = (candidates?: RTCIceCandidateInit[]) => {
+          if (!candidates) return;
+          for (const cand of candidates) {
+            const key = `${cand.candidate}-${cand.sdpMLineIndex}-${cand.sdpMid}`;
+            if (appliedIce.has(key)) continue;
+            appliedIce.add(key);
+            addIceCandidate(cand).catch((e) => console.warn('[VideoCall] addIceCandidate failed:', e));
+          }
+        };
+        const endFromRemote = (data: { status?: string }) => {
+          if (data.status === 'ended' || data.status === 'rejected' || data.status === 'missed') {
+            cleanupWebRTC();
+            navigation.goBack();
+            return true;
+          }
+          return false;
+        };
+
         if (isOutgoing) {
           const offer = await createOffer(true);
           await SignalingService.saveOffer(callId, offer);
           unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, (data) => {
-            if (data?.answer && !remoteStreamRef.current) {
+            if (!data) return;
+            if (data.answer && !answerApplied) {
+              answerApplied = true;
               setRemoteAnswer(data.answer).catch(console.error);
             }
-            if (data?.status === 'ended') navigation.goBack();
+            applyRemoteIce(data.calleeIceCandidates);
+            endFromRemote(data);
           });
         } else {
           unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, async (data) => {
-            if (data?.offer && !remoteStreamRef.current) {
+            if (!data) return;
+            if (data.offer && !offerAnswered) {
+              offerAnswered = true;
               const answer = await createAnswer(data.offer);
               await SignalingService.saveAnswer(callId, answer);
             }
-            if (data?.status === 'ended') navigation.goBack();
+            if (offerAnswered) applyRemoteIce(data.callerIceCandidates);
+            endFromRemote(data);
           });
         }
-
-        timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
+        // 1:1 call duration starts once WebRTC actually connects — see the
+        // callStatus effect below. Starting it here would start each device's
+        // clock at a different moment (whenever its own signaling round-trip
+        // happens to finish), which is what let the two sides drift apart.
       } catch (error) {
         console.error('[VideoCall] Setup failed:', error);
         setCallStatus('failed');
@@ -450,6 +484,16 @@ export default function VideoCallScreen() {
   useEffect(() => {
     if (connectionState === 'connected') startNetworkMonitoring();
   }, [connectionState, startNetworkMonitoring]);
+
+  // Start the 1:1 call-duration timer the moment WebRTC connects, so both
+  // participants' clocks start together instead of drifting apart. (Meetings
+  // start their own timer immediately on join, above — a room has no single
+  // "both sides connected" moment the way a 1:1 call does.)
+  useEffect(() => {
+    if (!isMeeting && callStatus === 'connected' && !timerRef.current) {
+      timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
+    }
+  }, [isMeeting, callStatus]);
 
   // ── React to being muted by organizer ───────────────────────────
   useEffect(() => {
@@ -955,7 +999,14 @@ export default function VideoCallScreen() {
     hangingUpRef.current = true;
     if (!isMeeting) {
       try {
-        await endpoints.endCall(callId);
+        // Emit the 'end' signal so the server relays it to the other party
+        // (their screen closes too) and records history for both sides.
+        // A positive duration means the call was answered → 'completed'.
+        await SignalingService.updateCallStatus(
+          callId,
+          'ended',
+          callStatus === 'connected' ? duration : 0,
+        );
       } catch (err) {
         console.warn('[VideoCall] end call update failed:', err);
       }
@@ -1225,7 +1276,7 @@ export default function VideoCallScreen() {
         )}
         {!mainP.isLocal && !remoteStream && (
           <View style={styles.mainAvatarOverlay}>
-            <Avatar initials={mainP.contact.avatar} color={mainP.contact.color} size={120} />
+            <Avatar initials={mainP.contact.avatar} color={mainP.contact.color} size={120} imageUrl={otherParty.photoUrl} />
             <AppText fixedColor style={styles.mainName}>{mainP.contact.name}</AppText>
             <AppText fixedColor style={styles.mainSub}>
               {isRecording ? `● Recording ${fmt(Math.floor(recordingMs / 1000))}` : `In call · ${fmt(duration)}`}

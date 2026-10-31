@@ -12,6 +12,7 @@ export const messageTypeSchema = z.enum([
   'poll',
   'order',
   'contact',
+  'meeting',
 ]);
 
 // ─── Embedded card payloads (poll / order / contact) ─────────────────────────
@@ -61,6 +62,30 @@ export const contactPayloadSchema = sharedContactSchema
   .extend({ contacts: z.array(sharedContactSchema).max(200).optional() })
   .strict();
 
+// ─── Meeting invite card payload ─────────────────────────────────────────────
+export const meetingPayloadSchema = z
+  .object({
+    meetingId: z.string().min(1).max(128),
+    title: z.string().min(1).max(200),
+    startsAt: z.string().max(64),
+    endsAt: z.string().max(64),
+    venue: z.enum(['online', 'in-person']),
+    joinUrl: z.string().max(1024),
+    organizerName: z.string().max(200).nullable().optional(),
+    location: z
+      .object({
+        name: z.string().max(256).nullable().optional(),
+        address: z.string().max(512).nullable().optional(),
+        lat: z.number().nullable().optional(),
+        lng: z.number().nullable().optional(),
+        placeId: z.string().max(256).nullable().optional(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
+  })
+  .strict();
+
 export const votePollSchema = z.object({ optionId: z.string().min(1).max(64) }).strict();
 
 export const createChatSchema = z
@@ -100,6 +125,7 @@ export const sendMessageSchema = z
     poll: pollPayloadSchema.optional(),
     order: orderPayloadSchema.optional(),
     contact: contactPayloadSchema.optional(),
+    meeting: meetingPayloadSchema.optional(),
   })
   .strict();
 

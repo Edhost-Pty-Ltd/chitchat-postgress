@@ -7,6 +7,7 @@ import {
   updateCallStatus,
   addCallHistory,
   type CallRow,
+  type HistoryStatus,
 } from '../../db/repositories/calls.js';
 import { isBlocked } from '../../db/repositories/blocks.js';
 import { logger } from '../../config/logger.js';
@@ -87,7 +88,11 @@ export function registerSignalingHandlers(socket: AuthedSocket): void {
           ? (data as { duration: number }).duration
           : null;
         await updateCallStatus(callId, 'ended', duration);
-        await recordHistory(call, 'completed', duration);
+        // A positive duration means the call was actually answered. Otherwise
+        // the caller hung up / cancelled while it was still ringing, which is a
+        // no-answer (outgoing for the caller, missed for the callee).
+        const answered = typeof duration === 'number' && duration > 0;
+        await recordHistory(call, answered ? 'answered' : 'no_answer', answered ? duration : null);
       }
     } catch (err) {
       logger.warn({ err, callId, kind }, 'call state update failed');
@@ -107,12 +112,39 @@ export function registerSignalingHandlers(socket: AuthedSocket): void {
   });
 }
 
-/** Write call history rows for both participants (Req 8.9). */
+/** The resolved outcome of a call, used to attribute per-party history. */
+type CallOutcome = 'answered' | 'no_answer' | 'rejected';
+
+/**
+ * Write call history rows for both participants, attributed per party (Req 8.9).
+ *
+ * The caller never sees "missed": an unanswered call is an outgoing 'no_answer'
+ * for them, while only the callee who didn't pick up gets 'missed'. An answered
+ * call is 'completed' for both with the shared duration; a decline is 'rejected'
+ * for both (and counts as "seen", so it never inflates the callee's badge).
+ */
 async function recordHistory(
   call: CallRow,
-  status: 'completed' | 'missed' | 'rejected' | 'busy' | 'failed',
+  outcome: CallOutcome,
   durationSec: number | null,
 ): Promise<void> {
+  let callerStatus: HistoryStatus;
+  let calleeStatus: HistoryStatus;
+  switch (outcome) {
+    case 'answered':
+      callerStatus = 'completed';
+      calleeStatus = 'completed';
+      break;
+    case 'rejected':
+      callerStatus = 'rejected';
+      calleeStatus = 'rejected';
+      break;
+    case 'no_answer':
+    default:
+      callerStatus = 'no_answer';
+      calleeStatus = 'missed';
+      break;
+  }
   await Promise.all([
     addCallHistory({
       userId: call.caller_id,
@@ -120,7 +152,7 @@ async function recordHistory(
       otherParty: call.callee_info,
       type: call.type,
       direction: 'outgoing',
-      status,
+      status: callerStatus,
       durationSec,
     }),
     addCallHistory({
@@ -129,7 +161,7 @@ async function recordHistory(
       otherParty: call.caller_info,
       type: call.type,
       direction: 'incoming',
-      status: status === 'completed' ? 'completed' : status,
+      status: calleeStatus,
       durationSec,
     }),
   ]);

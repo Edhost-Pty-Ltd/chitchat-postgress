@@ -12,6 +12,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.edhost.ChitChatBusiness",
+      "appleTeamId": "3D9KRP86P4",
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "ChitChat Business needs access to your photo library to share images and videos in chats.",
@@ -96,7 +97,8 @@
           "isAccessMediaLocationEnabled": true
         }
       ],
-      "expo-video",      [
+      "expo-video",
+      [
         "expo-notifications",
         {
           "color": "#0A2463",
@@ -113,7 +115,8 @@
         }
       ],
       "expo-sharing",
-      "expo-status-bar"
+      "expo-status-bar",
+      "./plugins/withFaceAISDK.js"
     ],
     "android": {
       "adaptiveIcon": {

@@ -24,6 +24,10 @@ the backend on `http://localhost:4000`.
 
 ## App ↔ backend
 
+- A new phone signup does not create a Postgres row on token verification.
+  `CreateAccountScreen` verifies OTP, `FaceEnrollmentScreen` runs FaceAISDK
+  enrollment + anti-spoofing, Django signs the completion, and only
+  `POST /me/register` inserts the user. Existing users are unchanged.
 - REST: `src/api/client.ts` (attaches the Firebase ID token as a bearer) and the
   typed surface in `src/api/endpoints.ts`.
 - Realtime: `src/realtime/socket.ts` (token handshake, auto room re-join).

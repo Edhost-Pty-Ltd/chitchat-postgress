@@ -79,14 +79,20 @@ async function saveProfile(patch: ProfilePatch): Promise<void> {
 }
 
 // ── DTO ↔ UI model ────────────────────────────────────────────────────────────
+function isCatalogObjectKey(value: string | null | undefined): value is string {
+  return !!value && !/^[a-z][a-z0-9+.-]*:/i.test(value) && !value.startsWith('/');
+}
+
 function fromItemDTO(i: CatalogItemDTO): CatalogItem {
+  const imageObjectKey = isCatalogObjectKey(i.imageUri) ? i.imageUri : null;
   return {
-    id:           String(i.id),
-    name:         i.name ?? '',
-    price:        i.price ?? '',
-    description:  i.description ?? undefined,
-    imageUri:     i.imageUri ?? null,
-    collectionId: i.collectionId ?? null,
+    id:              String(i.id),
+    name:            i.name ?? '',
+    price:           i.price ?? '',
+    description:     i.description ?? undefined,
+    imageUri:        i.imageUri ?? null,
+    imageObjectKey,
+    collectionId:    i.collectionId ?? null,
   };
 }
 
@@ -96,7 +102,7 @@ function toItemDTO(i: CatalogItem): CatalogItemDTO {
     name:         i.name,
     price:        i.price ?? '',
     description:  i.description ?? null,
-    imageUri:     i.imageUri ?? null,
+    imageUri:     i.imageObjectKey ?? i.imageUri ?? null,
     collectionId: i.collectionId ?? null,
   };
 }
@@ -723,6 +729,7 @@ export default function ProfileScreen() {
         price: newItemPrice.trim(),
         description: newItemDesc.trim() || undefined,
         imageUri: finalImageUri,
+        imageObjectKey: isCatalogObjectKey(finalImageUri) ? finalImageUri : null,
         collectionId: newItemCollectionId ?? null,
       };
 

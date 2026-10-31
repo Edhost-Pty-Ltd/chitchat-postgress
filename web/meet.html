@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>ChitChat Business — Meeting</title>
+<style>
+  :root {
+    --blue: #09b2ee;
+    --blue-dark: #0a74c4;
+    --bg: #0b1522;
+    --panel: #12202f;
+    --panel-2: #18293b;
+    --text: #eaf2fb;
+    --sub: #8aa0b6;
+    --danger: #e84343;
+    --ok: #22c55e;
+    --border: rgba(255,255,255,0.08);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: radial-gradient(1200px 600px at 50% -10%, #16304a 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { min-height: 100%; display: flex; flex-direction: column; }
+  .brandbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+  }
+  .logo {
+    width: 30px; height: 30px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--blue), var(--blue-dark));
+    display: grid; place-items: center; font-weight: 800; color: #fff; font-size: 15px;
+  }
+  .brandname { font-weight: 700; letter-spacing: .2px; }
+  .brandname small { color: var(--sub); font-weight: 500; }
+
+  .center { flex: 1; display: grid; place-items: center; padding: 20px; }
+  .card {
+    width: 100%; max-width: 520px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 18px; padding: 22px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.35);
+  }
+  .card h1 { font-size: 20px; margin: 0 0 4px; }
+  .card p.sub { color: var(--sub); margin: 0 0 18px; font-size: 14px; }
+
+  .preview {
+    position: relative; width: 100%; aspect-ratio: 16/10; background: #000;
+    border-radius: 14px; overflow: hidden; border: 1px solid var(--border); margin-bottom: 16px;
+  }
+  .preview video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  .preview .camoff {
+    position: absolute; inset: 0; display: grid; place-items: center; color: var(--sub); font-size: 14px;
+  }
+
+  label.field { display: block; font-size: 12px; color: var(--sub); margin: 0 0 6px; }
+  input[type=text] {
+    width: 100%; padding: 13px 14px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text); font-size: 15px; outline: none;
+  }
+  input[type=text]:focus { border-color: var(--blue); }
+
+  .row { display: flex; gap: 10px; align-items: center; }
+  .toggles { display: flex; gap: 10px; margin: 14px 0 18px; }
+  .toggle {
+    flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 11px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text); cursor: pointer; font-size: 14px;
+    user-select: none;
+  }
+  .toggle.off { color: var(--sub); background: #0e1a28; }
+
+  button.primary {
+    width: 100%; padding: 14px; border: none; border-radius: 12px; cursor: pointer;
+    background: linear-gradient(135deg, var(--blue), var(--blue-dark)); color: #fff;
+    font-size: 16px; font-weight: 700;
+  }
+  button.primary:disabled { opacity: .5; cursor: default; }
+
+  .msg { padding: 12px 14px; border-radius: 12px; font-size: 14px; margin-bottom: 14px; }
+  .msg.err { background: rgba(232,67,67,.12); border: 1px solid rgba(232,67,67,.3); color: #ffb4b4; }
+  .msg.info { background: rgba(9,178,238,.1); border: 1px solid rgba(9,178,238,.25); color: #bfe8fb; }
+
+  .state { text-align: center; }
+  .state .big { font-size: 48px; margin-bottom: 8px; }
+
+  /* ── In-call ───────────────────────────────────────────────────── */
+  #call { display: none; flex: 1; flex-direction: column; }
+  #call.active { display: flex; }
+  .grid {
+    flex: 1; display: grid; gap: 10px; padding: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    align-content: start;
+  }
+  .tile {
+    position: relative; background: #000; border-radius: 14px; overflow: hidden;
+    aspect-ratio: 16/10; border: 1px solid var(--border);
+  }
+  .tile video { width: 100%; height: 100%; object-fit: cover; background: #000; }
+  .tile.self video { transform: scaleX(-1); }
+  .tile .nametag {
+    position: absolute; left: 8px; bottom: 8px; padding: 4px 10px; border-radius: 8px;
+    background: rgba(0,0,0,.55); font-size: 12px; max-width: 70%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tile .avatar {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    font-size: 34px; font-weight: 800; color: #fff;
+  }
+  .tile .mutedot {
+    position: absolute; right: 8px; top: 8px; width: 24px; height: 24px; border-radius: 12px;
+    background: rgba(0,0,0,.55); display: grid; place-items: center; font-size: 12px;
+  }
+  .controls {
+    display: flex; justify-content: center; gap: 14px; padding: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .cbtn {
+    width: 56px; height: 56px; border-radius: 28px; border: 1px solid var(--border);
+    background: var(--panel-2); color: #fff; cursor: pointer; font-size: 20px;
+    display: grid; place-items: center;
+  }
+  .cbtn.off { background: #2a3647; color: var(--sub); }
+  .cbtn.end { background: var(--danger); border-color: var(--danger); }
+  .topinfo {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px;
+  }
+  .topinfo .count { color: var(--sub); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brandbar">
+    <div class="logo">C</div>
+    <div class="brandname">ChitChat Business <small>· Meeting</small></div>
+  </div>
+
+  <!-- ── Pre-join / states ── -->
+  <div class="center" id="lobby">
+    <div class="card" id="lobbyCard">
+      <!-- filled by JS -->
+      <div class="state"><div class="big">⏳</div><p class="sub">Loading meeting…</p></div>
+    </div>
+  </div>
+
+  <!-- ── In-call ── -->
+  <div id="call">
+    <div class="topinfo">
+      <div id="meetTitle">Meeting</div>
+      <div class="count"><span id="pcount">1</span> in call</div>
+    </div>
+    <div class="grid" id="grid"></div>
+    <div class="controls">
+      <button class="cbtn" id="btnMic" title="Mute">🎤</button>
+      <button class="cbtn" id="btnCam" title="Camera">🎥</button>
+      <button class="cbtn end" id="btnLeave" title="Leave">📞</button>
+    </div>
+  </div>
+</div>
+
+<!-- Socket.IO client (pin a 4.x that matches the server's socket.io@4). -->
+<script src="https://cdn.socket.io/4.8.1/socket.io.min.js" crossorigin="anonymous"></script>
+<script>
+(function () {
+  'use strict';
+
+  // ── Config ──────────────────────────────────────────────────────────────
+  // The API/socket origin. In production the website and API are same-origin,
+  // or set window.CHITCHAT_API_BASE before this script to override.
+  var API_BASE = (window.CHITCHAT_API_BASE || '').replace(/\/+$/, '') || window.location.origin;
+
+  var ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    // Add a TURN server here for reliable connectivity across strict NATs:
+    // { urls: 'turn:your.turn.server:3478', username: 'user', credential: 'pass' },
+  ];
+
+  // ── Extract meeting id from /meet/:id ────────────────────────────────────
+  function meetingIdFromUrl() {
+    var m = window.location.pathname.match(/\/meet\/([^/?#]+)/i);
+    if (m) return decodeURIComponent(m[1]);
+    var q = new URLSearchParams(window.location.search).get('id');
+    return q || '';
+  }
+  var MEETING_ID = meetingIdFromUrl();
+
+  // ── DOM helpers ──────────────────────────────────────────────────────────
+  var lobbyCard = document.getElementById('lobbyCard');
+  var lobby = document.getElementById('lobby');
+  var callEl = document.getElementById('call');
+  var grid = document.getElementById('grid');
+  var pcountEl = document.getElementById('pcount');
+  var meetTitleEl = document.getElementById('meetTitle');
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[<>&"]/g, function (c) {
+    return ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c];
+  }); }
+
+  function showState(emoji, title, sub) {
+    lobbyCard.innerHTML =
+      '<div class="state"><div class="big">' + emoji + '</div>' +
+      '<h1>' + esc(title) + '</h1>' +
+      (sub ? '<p class="sub">' + esc(sub) + '</p>' : '') + '</div>';
+  }
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  var localStream = null;
+  var micOn = true, camOn = true;
+  var socket = null, guestToken = null, myId = null, meetingTitle = 'Meeting';
+  var peers = {};        // peerId -> { pc, name, isGuest }
+  var displayName = '';
+
+  // ── 1. Load meeting info ───────────────────────────────────────────────────
+  function loadInfo() {
+    if (!MEETING_ID) { showState('⚠️', 'Invalid meeting link', 'This link is missing a meeting id.'); return; }
+    fetch(API_BASE + '/meet/' + encodeURIComponent(MEETING_ID) + '/info')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.exists) {
+          showState('🔍', 'Meeting not found', 'This meeting does not exist or the link is incorrect.');
+          return;
+        }
+        if (!data.joinable) {
+          showState('🔚', 'Meeting ended', 'This meeting has already ended.');
+          return;
+        }
+        meetingTitle = (data.meeting && data.meeting.title) || 'Meeting';
+        renderPreJoin(data.meeting);
+      })
+      .catch(function () {
+        showState('⚠️', 'Could not load meeting', 'Please check your connection and try again.');
+      });
+  }
+
+  // ── 2. Pre-join screen (name + camera/mic preview) ─────────────────────────
+  function renderPreJoin(meeting) {
+    lobbyCard.innerHTML =
+      '<h1>' + esc(meeting.title || 'Meeting') + '</h1>' +
+      '<p class="sub">Set up your camera and microphone, then join.</p>' +
+      '<div class="preview"><video id="preview" autoplay playsinline muted></video>' +
+      '<div class="camoff hidden" id="camoff">Camera is off</div></div>' +
+      '<div class="toggles">' +
+        '<div class="toggle" id="tMic">🎤 <span>Mic on</span></div>' +
+        '<div class="toggle" id="tCam">🎥 <span>Camera on</span></div>' +
+      '</div>' +
+      '<label class="field" for="name">Your name</label>' +
+      '<input id="name" type="text" maxlength="80" placeholder="Enter your name" />' +
+      '<div id="joinErr"></div>' +
+      '<button class="primary" id="btnJoin" style="margin-top:14px">Join meeting</button>';
+
+    var nameInput = document.getElementById('name');
+    try { nameInput.value = localStorage.getItem('cc_meet_name') || ''; } catch (e) {}
+
+    var previewVideo = document.getElementById('preview');
+    var camoff = document.getElementById('camoff');
+    var tMic = document.getElementById('tMic'), tCam = document.getElementById('tCam');
+
+    function reflectToggles() {
+      tMic.className = 'toggle' + (micOn ? '' : ' off');
+      tMic.querySelector('span').textContent = micOn ? 'Mic on' : 'Mic off';
+      tCam.className = 'toggle' + (camOn ? '' : ' off');
+      tCam.querySelector('span').textContent = camOn ? 'Camera on' : 'Camera off';
+      camoff.classList.toggle('hidden', camOn);
+      previewVideo.style.visibility = camOn ? 'visible' : 'hidden';
+    }
+
+    // Request camera + mic for the preview.
+    navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+      .then(function (stream) {
+        localStream = stream;
+        previewVideo.srcObject = stream;
+        reflectToggles();
+      })
+      .catch(function () {
+        document.getElementById('joinErr').innerHTML =
+          '<div class="msg err">Camera/microphone permission denied. You can still join with them off, or allow access and reload.</div>';
+        micOn = false; camOn = false; reflectToggles();
+      });
+
+    tMic.onclick = function () {
+      micOn = !micOn;
+      if (localStream) localStream.getAudioTracks().forEach(function (t) { t.enabled = micOn; });
+      reflectToggles();
+    };
+    tCam.onclick = function () {
+      camOn = !camOn;
+      if (localStream) localStream.getVideoTracks().forEach(function (t) { t.enabled = camOn; });
+      reflectToggles();
+    };
+
+    document.getElementById('btnJoin').onclick = function () {
+      var name = (nameInput.value || '').trim();
+      if (!name) { nameInput.focus(); return; }
+      try { localStorage.setItem('cc_meet_name', name); } catch (e) {}
+      displayName = name;
+      requestGuestAndJoin(name);
+    };
+  }
+
+  // ── 3. Get a guest token, then connect the socket ──────────────────────────
+  function requestGuestAndJoin(name) {
+    var btn = document.getElementById('btnJoin');
+    btn.disabled = true; btn.textContent = 'Joining…';
+    fetch(API_BASE + '/meet/' + encodeURIComponent(MEETING_ID) + '/guest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ displayName: name }),
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok) {
+          var msg = (res.j && res.j.error && res.j.error.message) || 'Could not join the meeting.';
+          document.getElementById('joinErr').innerHTML = '<div class="msg err">' + esc(msg) + '</div>';
+          btn.disabled = false; btn.textContent = 'Join meeting';
+          return;
+        }
+        guestToken = res.j.token;
+        myId = res.j.guestId;
+        connectSocket();
+      })
+      .catch(function () {
+        document.getElementById('joinErr').innerHTML = '<div class="msg err">Network error. Please try again.</div>';
+        btn.disabled = false; btn.textContent = 'Join meeting';
+      });
+  }
+
+  // ── 4. Socket + mesh WebRTC ────────────────────────────────────────────────
+  function connectSocket() {
+    socket = io(API_BASE, {
+      transports: ['websocket'],
+      auth: { guestToken: guestToken },
+      reconnection: true,
+    });
+
+    socket.on('connect', function () {
+      socket.emit('meeting:join', { meetingId: MEETING_ID }, function (ack) {
+        if (!ack || !ack.ok) {
+          showCallError('Could not join the meeting room.');
+          return;
+        }
+        enterCall();
+      });
+    });
+
+    socket.on('connect_error', function (err) {
+      var code = err && err.data && err.data.code;
+      if (code === 'AUTH_GUEST_INVALID') {
+        showState('⌛', 'Session expired', 'Please reload the page to rejoin.');
+      }
+    });
+
+    // A new participant joined — WE initiate the offer to them (deterministic:
+    // the existing participant is the offerer).
+    socket.on('meeting:peer-joined', function (p) {
+      if (!p || p.meetingId !== MEETING_ID || p.userId === myId) return;
+      createPeer(p.userId, p.displayName || 'Participant', true);
+    });
+
+    socket.on('meeting:peer-left', function (p) {
+      if (!p || p.userId === myId) return;
+      removePeer(p.userId);
+    });
+
+    // Targeted signaling: offer / answer / ICE.
+    socket.on('meeting:signal', function (p) {
+      if (!p || p.meetingId !== MEETING_ID || p.from === myId) return;
+      if (p.to && p.to !== myId) return;
+      handleSignal(p.from, p.data);
+    });
+
+    // Organizer ended the meeting / removed everyone.
+    socket.on('meeting:ended', function (p) {
+      if (p && p.meetingId !== MEETING_ID) return;
+      teardown();
+      showEndedOverlay('The meeting has ended.');
+    });
+
+    socket.on('meeting:kicked', function (p) {
+      if (p && p.meetingId !== MEETING_ID) return;
+      teardown();
+      showEndedOverlay('You were removed from the meeting.');
+    });
+  }
+
+  function enterCall() {
+    lobby.style.display = 'none';
+    callEl.classList.add('active');
+    meetTitleEl.textContent = meetingTitle;
+    addSelfTile();
+    wireControls();
+    updateCount();
+  }
+
+  // ── Tiles ──────────────────────────────────────────────────────────────────
+  function initials(name) {
+    var parts = (name || '').trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return '?';
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  function colorFor(id) {
+    var h = 0; for (var i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
+    return 'hsl(' + h + ',55%,45%)';
+  }
+  function addSelfTile() {
+    var t = document.createElement('div');
+    t.className = 'tile self'; t.id = 'tile-self';
+    t.innerHTML =
+      '<video autoplay playsinline muted></video>' +
+      '<div class="nametag">' + esc(displayName) + ' (you)</div>';
+    grid.appendChild(t);
+    t.querySelector('video').srcObject = localStream;
+  }
+  function addRemoteTile(peerId, name) {
+    if (document.getElementById('tile-' + peerId)) return;
+    var t = document.createElement('div');
+    t.className = 'tile'; t.id = 'tile-' + peerId;
+    t.innerHTML =
+      '<video autoplay playsinline></video>' +
+      '<div class="avatar" style="background:' + colorFor(peerId) + '">' + esc(initials(name)) + '</div>' +
+      '<div class="nametag">' + esc(name) + '</div>';
+    grid.appendChild(t);
+    updateCount();
+  }
+  function removePeer(peerId) {
+    var p = peers[peerId];
+    if (p && p.pc) { try { p.pc.close(); } catch (e) {} }
+    delete peers[peerId];
+    var t = document.getElementById('tile-' + peerId);
+    if (t) t.remove();
+    updateCount();
+  }
+  function updateCount() {
+    pcountEl.textContent = String(1 + Object.keys(peers).length);
+  }
+
+  // ── Peer connection (mesh) ──────────────────────────────────────────────────
+  function createPeer(peerId, name, isOfferer) {
+    if (peers[peerId]) return peers[peerId];
+    var pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    peers[peerId] = { pc: pc, name: name };
+    addRemoteTile(peerId, name);
+
+    if (localStream) localStream.getTracks().forEach(function (tk) { pc.addTrack(tk, localStream); });
+
+    pc.onicecandidate = function (e) {
+      if (e.candidate) sendSignal(peerId, { kind: 'ice', candidate: e.candidate });
+    };
+    pc.ontrack = function (e) {
+      var v = document.querySelector('#tile-' + CSS.escape(peerId) + ' video');
+      if (v && e.streams && e.streams[0]) {
+        v.srcObject = e.streams[0];
+        var av = document.querySelector('#tile-' + CSS.escape(peerId) + ' .avatar');
+        if (av) av.style.display = 'none';
+      }
+    };
+    pc.onconnectionstatechange = function () {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        // Keep the tile; connection may recover. Full removal happens on peer-left.
+      }
+    };
+
+    if (isOfferer) {
+      pc.createOffer().then(function (offer) {
+        return pc.setLocalDescription(offer).then(function () {
+          sendSignal(peerId, { kind: 'offer', sdp: pc.localDescription });
+        });
+      }).catch(function (err) { console.warn('offer failed', err); });
+    }
+    return peers[peerId];
+  }
+
+  function handleSignal(fromId, data) {
+    if (!data) return;
+    var peer = peers[fromId];
+    if (data.kind === 'offer') {
+      if (!peer) peer = createPeer(fromId, 'Participant', false);
+      var pc = peer.pc;
+      pc.setRemoteDescription(new RTCSessionDescription(data.sdp))
+        .then(function () { return pc.createAnswer(); })
+        .then(function (answer) { return pc.setLocalDescription(answer).then(function () {
+          sendSignal(fromId, { kind: 'answer', sdp: pc.localDescription });
+        }); })
+        .catch(function (err) { console.warn('answer failed', err); });
+    } else if (data.kind === 'answer') {
+      if (peer) peer.pc.setRemoteDescription(new RTCSessionDescription(data.sdp))
+        .catch(function (err) { console.warn('setRemote(answer) failed', err); });
+    } else if (data.kind === 'ice') {
+      if (peer && data.candidate) peer.pc.addIceCandidate(new RTCIceCandidate(data.candidate))
+        .catch(function () {});
+    }
+  }
+
+  function sendSignal(toId, data) {
+    socket.emit('meeting:signal', { meetingId: MEETING_ID, to: toId, data: data });
+  }
+
+  // ── Controls ────────────────────────────────────────────────────────────────
+  function wireControls() {
+    var btnMic = document.getElementById('btnMic');
+    var btnCam = document.getElementById('btnCam');
+    var btnLeave = document.getElementById('btnLeave');
+    function reflect() {
+      btnMic.className = 'cbtn' + (micOn ? '' : ' off'); btnMic.textContent = micOn ? '🎤' : '🔇';
+      btnCam.className = 'cbtn' + (camOn ? '' : ' off'); btnCam.textContent = camOn ? '🎥' : '📷';
+    }
+    btnMic.onclick = function () {
+      micOn = !micOn;
+      if (localStream) localStream.getAudioTracks().forEach(function (t) { t.enabled = micOn; });
+      reflect();
+    };
+    btnCam.onclick = function () {
+      camOn = !camOn;
+      if (localStream) localStream.getVideoTracks().forEach(function (t) { t.enabled = camOn; });
+      reflect();
+    };
+    btnLeave.onclick = function () { teardown(); showEndedOverlay('You left the meeting.'); };
+    reflect();
+  }
+
+  function showCallError(message) {
+    lobby.style.display = 'grid';
+    callEl.classList.remove('active');
+    showState('⚠️', 'Connection problem', message);
+  }
+
+  function showEndedOverlay(message) {
+    callEl.classList.remove('active');
+    lobby.style.display = 'grid';
+    lobbyCard.innerHTML =
+      '<div class="state"><div class="big">👋</div><h1>' + esc(message) + '</h1>' +
+      '<p class="sub">You can close this tab, or reload to rejoin if the meeting is still active.</p>' +
+      '<button class="primary" style="margin-top:14px" onclick="location.reload()">Rejoin</button></div>';
+  }
+
+  function teardown() {
+    Object.keys(peers).forEach(removePeer);
+    if (socket) {
+      try { socket.emit('meeting:leave', { meetingId: MEETING_ID }); } catch (e) {}
+      try { socket.disconnect(); } catch (e) {}
+    }
+    if (localStream) localStream.getTracks().forEach(function (t) { t.stop(); });
+    localStream = null;
+  }
+
+  window.addEventListener('beforeunload', function () {
+    try { if (socket) socket.emit('meeting:leave', { meetingId: MEETING_ID }); } catch (e) {}
+  });
+
+  // Go.
+  loadInfo();
+})();
+</script>
+</body>
+</html>

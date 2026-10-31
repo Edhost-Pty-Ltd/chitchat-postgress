@@ -14,6 +14,7 @@ import { getContactsAsync, requestPermissionsAsync, Fields } from 'expo-contacts
 import { normalizePhone, chunkArray } from '../utils/phoneUtils';
 import { endpoints, type SyncedContactDTO } from '../api/endpoints';
 import { useAuth } from '../context/AuthContext';
+import { mediaService } from '../services/mediaService';
 
 export interface AppContact {
   userId:            string;
@@ -32,6 +33,33 @@ const SYNC_MAX_NAME_LEN = 200;
 
 function sortByName(list: AppContact[]): AppContact[] {
   return list.sort((a, b) => (a.displayName || '').localeCompare(b.displayName || ''));
+}
+
+/** True when the value looks like a bare object key (no URI scheme). */
+function isObjectKey(v: string | undefined): v is string {
+  return !!v && !/^[a-z][a-z0-9+.-]*:/i.test(v) && !v.startsWith('/');
+}
+
+/**
+ * Resolve avatar object keys in a contacts list to short-lived download URLs.
+ * Object keys cannot be rendered directly by <Image>; they need a presigned
+ * URL. Local `file:` URIs and full `https:` URLs pass through unchanged.
+ */
+async function resolveAvatarUrls(list: AppContact[]): Promise<AppContact[]> {
+  const keys = list
+    .map((c) => c.firebasePhotoURL)
+    .filter(isObjectKey);
+  if (keys.length === 0) return list;
+  const uniqueKeys = [...new Set(keys)];
+  let urls: Record<string, string> = {};
+  try { urls = await mediaService.getDownloadUrls(uniqueKeys); } catch { /* leave unresolved */ }
+  return list.map((c) => ({
+    ...c,
+    firebasePhotoURL:
+      c.firebasePhotoURL && isObjectKey(c.firebasePhotoURL)
+        ? urls[c.firebasePhotoURL] ?? undefined
+        : c.firebasePhotoURL,
+  }));
 }
 
 /** The owner's synced phone book (companion view / primary fallback). */
@@ -113,7 +141,7 @@ export function useContacts() {
       if (isCompanion) {
         setPermission('granted');
         setCanAskAgain(true);
-        setContacts(await loadSyncedContacts());
+        setContacts(await resolveAvatarUrls(await loadSyncedContacts()));
         return;
       }
 
@@ -129,7 +157,7 @@ export function useContacts() {
           ? 'Contacts permission denied. Enable it in Settings to invite friends.'
           : 'Contacts permission required.');
         // Fall back to the phone book this account last synced to the backend.
-        setContacts(await loadSyncedContacts());
+        setContacts(await resolveAvatarUrls(await loadSyncedContacts()));
         return;
       }
 
@@ -153,7 +181,7 @@ export function useContacts() {
 
       if (contactsByPhone.size === 0) {
         // Nothing on this device yet — show the last synced snapshot, if any.
-        const synced = await loadSyncedContacts();
+        const synced = await resolveAvatarUrls(await loadSyncedContacts());
         if (synced.length === 0) setError('No contacts found on this device.');
         setContacts(synced);
         return;
@@ -194,7 +222,7 @@ export function useContacts() {
       });
 
       sortByName(appContacts);
-      setContacts(appContacts);
+      setContacts(await resolveAvatarUrls(appContacts));
 
       // Sync the matched snapshot for companion devices (fire-and-forget). Only
       // after a fully successful match, so a partial result never overwrites

@@ -50,10 +50,15 @@ export function useUnreadCount(userId: string | null): {
     void socketClient.connect().then(load).catch(() => { if (activeRef.current) setLoading(false); });
 
     // Refresh on any delivery/read/new-message event.
+    // `client:read` is a synthetic local event fired by markAsRead in useMessages
+    // when the user opens a chat — the server doesn't echo read receipts back to
+    // the reader, so without this the badge would stay stale until the next
+    // message:new triggers a re-fetch.
     const unsubs = [
       socketClient.subscribe('message:new',  () => void load()),
       socketClient.subscribe('message:read', () => void load()),
       socketClient.subscribe('message:delivered', () => void load()),
+      socketClient.subscribe('client:read',  () => void load()),
     ];
 
     return () => {

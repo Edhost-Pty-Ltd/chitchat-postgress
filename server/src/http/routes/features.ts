@@ -14,8 +14,9 @@ import {
   registerDeviceSchema,
   createBusinessSchema,
   updateBusinessSchema,
+  createBusinessAgentSchema,
+  agentFaceEnrollmentCompleteSchema,
   agentStatusSchema,
-  userRoleSchema,
   internalNoteSchema,
   syncedContactsSchema,
   chatLabelSchema,
@@ -36,18 +37,24 @@ import {
   removeOtherDevices,
 } from '../../db/repositories/linkedDevices.js';
 import {
-  listBusinessesForUser,
-  getBusiness,
-  createBusiness,
-  ownsBusiness,
-  updateBusiness,
-  setUserRole,
-  setAgentStatus,
-  getUserRoleStatus,
-  listInternalNotes,
+  BusinessAgentError,
   addInternalNote,
+  canIssueAgentFaceEnrollmentGrant,
+  canManageBusinessAgents,
   chatAgents,
+  completeBusinessAgentFaceEnrollment,
+  createBusiness,
+  getBusiness,
+  getBusinessAgentForViewer,
+  getBusinessDashboardForUser,
+  getUserRoleStatus,
   isChatAgent,
+  listBusinessesForUser,
+  listInternalNotes,
+  ownsBusiness,
+  provisionBusinessAgent,
+  setOwnBusinessAgentStatus,
+  updateBusiness,
 } from '../../db/repositories/businesses.js';
 import { listSyncedContacts, replaceSyncedContacts } from '../../db/repositories/syncedContacts.js';
 import {
@@ -56,8 +63,52 @@ import {
   updateChatLabel,
   deleteChatLabel,
 } from '../../db/repositories/chatLabels.js';
+import {
+  AgentFaceEnrollmentTokenError,
+  mintAgentFaceEnrollmentGrant,
+  verifyAgentFaceEnrollmentReceipt,
+} from '../../security/agentFaceEnrollment.js';
+import { getEnv } from '../../config/env.js';
+import { logger } from '../../config/logger.js';
 
 const primaryOnly = { preHandler: [requireAuth, requirePrimaryDevice] };
+
+function throwBusinessAgentError(err: unknown): never {
+  if (!(err instanceof BusinessAgentError)) throw err;
+  switch (err.code) {
+    case 'business_not_found':
+    case 'agent_not_found':
+      throw Errors.notFound(err.message);
+    case 'not_business_member':
+    case 'not_business_manager':
+    case 'agent_membership_inactive':
+      throw Errors.forbidden(err.message);
+    case 'agent_identity_recovery_required':
+      throw Errors.conflict(err.message);
+    case 'agent_phone_conflict':
+    case 'agent_already_assigned':
+    case 'agent_already_registered':
+    case 'agent_already_enrolled':
+    case 'agent_receipt_replayed':
+      throw Errors.conflict(err.message);
+  }
+}
+
+async function resolveAgentFirebaseUser(phoneNumber: string, displayName: string): Promise<{
+  uid: string;
+  created: boolean;
+}> {
+  const auth = getAdminAuth();
+  try {
+    const existing = await auth.getUserByPhoneNumber(phoneNumber);
+    return { uid: existing.uid, created: false };
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code !== 'auth/user-not-found') throw err;
+  }
+  const created = await auth.createUser({ phoneNumber, displayName });
+  return { uid: created.uid, created: true };
+}
 
 export async function registerFeatureRoutes(app: FastifyInstance): Promise<void> {
   // ─── Chat mute ─────────────────────────────────────────────────────────────
@@ -72,13 +123,14 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
       const userId = request.identity!.userId;
       const chatId = request.params.id;
       if (!(await isMember(chatId, userId))) throw Errors.forbidden('Not a member of this chat');
-      const { muted } = parse(muteSchema, request.body);
-      await setChatMuted(chatId, userId, muted);
-      return { chatId, muted };
+      const { muted, mutedUntil } = parse(muteSchema, request.body);
+      const until = muted && mutedUntil ? new Date(mutedUntil) : null;
+      await setChatMuted(chatId, userId, muted, until);
+      return { chatId, muted, mutedUntil: until?.toISOString() ?? null };
     },
   );
 
-  // ─── Profile views (old recordProfileView Cloud Function) ─────────────────
+  // ─── Profile views / owner analytics ──────────────────────────────────────
   app.post('/profile-views', { preHandler: requireAuth }, async (request) => {
     const viewerId = request.identity!.userId;
     const { viewedUid } = parse(recordProfileViewSchema, request.body);
@@ -90,15 +142,11 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
     return getProfileViewCounters(request.identity!.userId);
   });
 
-  // ─── Message analytics ───────────────────────────────────────────────────
   app.get('/me/message-stats', { preHandler: requireAuth }, async (request) => {
     return computeMessageStats(request.identity!.userId);
   });
 
-  // ─── Linked / companion devices (old mintCompanionToken + revokeDeviceToken) ─
-  // A not-yet-linked device signs in anonymously and creates a link request.
-  // The requester is always the authenticated (anonymous) caller — never a
-  // value from the body.
+  // ─── Linked / companion devices ──────────────────────────────────────────
   app.post('/device-links', { preHandler: requireAuthAllowAnonymous }, async (request) => {
     const body = parse(createLinkTokenSchema, request.body);
     await createLinkToken({
@@ -114,16 +162,11 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
     return { requestId: body.requestId, displayCode: body.displayCode };
   });
 
-  // The companion polls its own request. Once the primary has claimed it, the
-  // backend mints a Firebase custom token for the OWNER tagged
-  // { companion: true, deviceId } so the companion signs in as the owner and
-  // every later request can be checked against linked_devices.
   app.get<{ Params: { requestId: string } }>(
     '/device-links/:requestId',
     { preHandler: requireAuthAllowAnonymous },
     async (request) => {
       const token = await getLinkToken(request.params.requestId);
-      // Only the device that created the request may poll it.
       if (!token || token.requester_uid !== request.identity!.userId) {
         throw Errors.notFound('Link request not found');
       }
@@ -134,21 +177,19 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
       if (expired) {
         return { consumed: true, expired: true, ownerUid: token.owner_uid, customToken: null };
       }
-      let customToken: string | null = null;
       try {
-        customToken = await getAdminAuth().createCustomToken(token.owner_uid, {
+        const customToken = await getAdminAuth().createCustomToken(token.owner_uid, {
           companion: true,
           deviceId: token.device_id,
         });
+        return { consumed: true, expired: false, ownerUid: token.owner_uid, customToken };
       } catch (err) {
         request.log.error({ err }, 'createCustomToken failed');
         throw Errors.badRequest('Could not finish linking. Please try again.');
       }
-      return { consumed: true, expired: false, ownerUid: token.owner_uid, customToken };
     },
   );
 
-  // Look up a pending request by its human display code (primary device).
   app.get<{ Querystring: { code?: string } }>('/device-links', primaryOnly, async (request) => {
     const code = (request.query.code ?? '').trim();
     if (code.length < 4) return { requestId: null };
@@ -156,8 +197,6 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
     return { requestId: token?.id ?? null };
   });
 
-  // Primary device claims a pending request, registering the companion device.
-  // Companions cannot link further devices.
   app.post('/device-links/claim', primaryOnly, async (request) => {
     const ownerUid = request.identity!.userId;
     const { requestId, ownerName } = parse(claimLinkSchema, request.body);
@@ -170,8 +209,6 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
     return { devices: await listLinkedDevices(request.identity!.userId) };
   });
 
-  // Register this device. A companion can only (re)register the device it was
-  // linked with.
   app.post('/me/devices', { preHandler: requireAuth }, async (request) => {
     const identity = request.identity!;
     const body = parse(registerDeviceSchema, request.body);
@@ -191,8 +228,6 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
     },
   );
 
-  // Removing a device takes effect immediately: the companion's next request is
-  // rejected (verifier checks linked_devices) and its push tokens are dropped.
   app.delete<{ Params: { deviceId: string } }>(
     '/me/devices/:deviceId',
     primaryOnly,
@@ -212,7 +247,7 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
     return { ok: true, removed: removed.length };
   });
 
-  // ─── Synced contacts (companions show the owner's phone book) ─────────────
+  // ─── Synced contacts ──────────────────────────────────────────────────────
   app.get('/me/synced-contacts', { preHandler: requireAuth }, async (request) => {
     return { contacts: await listSyncedContacts(request.identity!.userId) };
   });
@@ -221,12 +256,12 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
     const { contacts } = parse(syncedContactsSchema, request.body);
     const saved = await replaceSyncedContacts(
       request.identity!.userId,
-      contacts.map((c) => ({
-        phone: c.phone,
-        displayName: c.displayName,
-        userId: c.userId ?? null,
-        isSaved: !!c.isSaved,
-        avatarObjectKey: c.avatarObjectKey ?? null,
+      contacts.map((contact) => ({
+        phone: contact.phone,
+        displayName: contact.displayName,
+        userId: contact.userId ?? null,
+        isSaved: !!contact.isSaved,
+        avatarObjectKey: contact.avatarObjectKey ?? null,
       })),
     );
     return { saved };
@@ -270,7 +305,18 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
     },
   );
 
-  // ─── Multi-agent / business ──────────────────────────────────────────────
+  // ─── Multi-agent business dashboard ──────────────────────────────────────
+  // Any standalone business account gets an idempotently bootstrapped business
+  // the first time it opens this screen. Existing agents instead receive their
+  // existing company context and their own dashboard view.
+  app.get('/businesses/dashboard', { preHandler: requireAuth }, async (request) => {
+    try {
+      return { dashboard: await getBusinessDashboardForUser(request.identity!.userId) };
+    } catch (err) {
+      throwBusinessAgentError(err);
+    }
+  });
+
   app.get('/businesses', { preHandler: requireAuth }, async (request) => {
     return { businesses: await listBusinessesForUser(request.identity!.userId) };
   });
@@ -278,8 +324,12 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
   app.post('/businesses', primaryOnly, async (request, reply) => {
     const ownerId = request.identity!.userId;
     const body = parse(createBusinessSchema, request.body);
-    const business = await createBusiness(ownerId, body);
-    return reply.code(201).send({ business });
+    try {
+      const business = await createBusiness(ownerId, body);
+      return reply.code(201).send({ business });
+    } catch (err) {
+      throwBusinessAgentError(err);
+    }
   });
 
   app.get<{ Params: { id: string } }>(
@@ -288,11 +338,11 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
     async (request) => {
       const business = await getBusiness(request.params.id);
       if (!business) throw Errors.notFound('Business not found');
-      const userId = request.identity!.userId;
-      if (business.ownerId !== userId && !business.agents.includes(userId)) {
+      const manager = await canManageBusinessAgents(request.params.id, request.identity!.userId);
+      if (!business.agents.includes(request.identity!.userId)) {
         throw Errors.forbidden('Not part of this business');
       }
-      return { business };
+      return { business: manager ? business : { ...business, agents: [] } };
     },
   );
 
@@ -306,25 +356,182 @@ export async function registerFeatureRoutes(app: FastifyInstance): Promise<void>
     return { business };
   });
 
-  // Agent role + live status on the authenticated user.
+  app.get<{ Params: { id: string; agentId: string } }>(
+    '/businesses/:id/agents/:agentId',
+    { preHandler: requireAuth },
+    async (request) => {
+      try {
+        return {
+          agent: await getBusinessAgentForViewer(
+            request.params.id,
+            request.params.agentId,
+            request.identity!.userId,
+          ),
+        };
+      } catch (err) {
+        throwBusinessAgentError(err);
+      }
+    },
+  );
+
+  /** Owner/admin provisioning of a distinct Firebase phone identity. */
+  app.post<{ Params: { id: string } }>(
+    '/businesses/:id/agents',
+    primaryOnly,
+    async (request, reply) => {
+      const managerId = request.identity!.userId;
+      const body = parse(createBusinessAgentSchema, request.body);
+      // Do this BEFORE Firebase Admin lookup/create. A caller who is not an
+      // active owner/admin cannot cause any external authentication side effect.
+      if (!(await canManageBusinessAgents(request.params.id, managerId))) {
+        throw Errors.forbidden('Only an active business manager can add agents');
+      }
+      const displayName = `${body.firstName} ${body.surname}`.trim();
+      let firebase: { uid: string; created: boolean };
+      try {
+        firebase = await resolveAgentFirebaseUser(body.phoneNumber, displayName);
+      } catch (err) {
+        request.log.warn({ code: (err as { code?: string }).code }, 'agent Firebase provisioning failed');
+        throw Errors.badRequest('Could not create the agent phone account');
+      }
+
+      try {
+        const agent = await provisionBusinessAgent({
+          businessId: request.params.id,
+          managerId,
+          agentId: firebase.uid,
+          phoneNumber: body.phoneNumber,
+          firstName: body.firstName,
+          surname: body.surname,
+          consentConfirmedAt: new Date(),
+        });
+        const grant = await canIssueAgentFaceEnrollmentGrant(
+          request.params.id,
+          managerId,
+          firebase.uid,
+        );
+        const minted = mintAgentFaceEnrollmentGrant(
+          { managerId, agentId: firebase.uid, businessId: request.params.id },
+          getEnv().AGENT_FACE_ENROLLMENT_SECRET,
+        );
+        emitToUser(managerId, 'business:agents-updated', { businessId: request.params.id });
+        return reply.code(201).send({
+          agent,
+          enrollmentGrant: minted.grant,
+          enrollmentGrantExpiresAt: minted.expiresAt,
+          firebaseAccountCreated: firebase.created,
+          requiresPhoneSignIn: true,
+          consentRecordedAt: grant.biometricConsentAt,
+        });
+      } catch (err) {
+        // Compensate only a Firebase account created by this request. Never
+        // delete an existing agent's Auth identity because a business attach failed.
+        if (firebase.created) {
+          try { await getAdminAuth().deleteUser(firebase.uid); } catch (cleanupErr) {
+            logger.warn({ cleanupErr, uid: firebase.uid }, 'could not clean up agent Firebase account');
+          }
+        }
+        throwBusinessAgentError(err);
+      }
+    },
+  );
+
+  /** Issue a fresh one-time face grant after an image/upload failure. */
+  app.post<{ Params: { id: string; agentId: string } }>(
+    '/businesses/:id/agents/:agentId/face-enrollment-grant',
+    primaryOnly,
+    async (request) => {
+      const managerId = request.identity!.userId;
+      try {
+        const agent = await canIssueAgentFaceEnrollmentGrant(
+          request.params.id,
+          managerId,
+          request.params.agentId,
+        );
+        const minted = mintAgentFaceEnrollmentGrant(
+          { managerId, agentId: request.params.agentId, businessId: request.params.id },
+          getEnv().AGENT_FACE_ENROLLMENT_SECRET,
+        );
+        return { agent, enrollmentGrant: minted.grant, enrollmentGrantExpiresAt: minted.expiresAt };
+      } catch (err) {
+        throwBusinessAgentError(err);
+      }
+    },
+  );
+
+  /** Final state transition is accepted only with Django's signed receipt. */
+  app.post<{ Params: { id: string; agentId: string } }>(
+    '/businesses/:id/agents/:agentId/face-enrollment-complete',
+    primaryOnly,
+    async (request) => {
+      const managerId = request.identity!.userId;
+      const { receipt } = parse(agentFaceEnrollmentCompleteSchema, request.body);
+      let proof;
+      try {
+        proof = verifyAgentFaceEnrollmentReceipt(
+          receipt,
+          getEnv().AGENT_FACE_ENROLLMENT_SECRET,
+        );
+      } catch (err) {
+        if (err instanceof AgentFaceEnrollmentTokenError) {
+          throw Errors.forbidden('Agent face enrollment could not be confirmed');
+        }
+        throw err;
+      }
+      if (
+        proof.managerId !== managerId ||
+        proof.businessId !== request.params.id ||
+        proof.agentId !== request.params.agentId
+      ) {
+        throw Errors.forbidden('Agent face enrollment could not be confirmed');
+      }
+      try {
+        const agent = await completeBusinessAgentFaceEnrollment({
+          businessId: request.params.id,
+          managerId,
+          agentId: request.params.agentId,
+          receiptJti: proof.jti,
+        });
+        emitToUser(managerId, 'business:agents-updated', { businessId: request.params.id });
+        return { agent };
+      } catch (err) {
+        throwBusinessAgentError(err);
+      }
+    },
+  );
+
+  /** Agents control their own availability in their own business dashboard. */
+  app.put<{ Params: { id: string } }>(
+    '/businesses/:id/me/agent-status',
+    primaryOnly,
+    async (request) => {
+      const { status } = parse(agentStatusSchema, request.body);
+      try {
+        const agent = await setOwnBusinessAgentStatus(
+          request.params.id,
+          request.identity!.userId,
+          status,
+        );
+        emitToUser(request.identity!.userId, 'business:agents-updated', { businessId: request.params.id });
+        return { agent };
+      } catch (err) {
+        throwBusinessAgentError(err);
+      }
+    },
+  );
+
+  // Legacy role endpoint deliberately fails closed. A user can no longer turn
+  // themselves into an admin; business membership is granted by an owner/admin.
+  app.put('/me/role', primaryOnly, async () => {
+    throw Errors.forbidden('Roles are managed by business owners');
+  });
+
   app.get('/me/agent', { preHandler: requireAuth }, async (request) => {
     return getUserRoleStatus(request.identity!.userId);
   });
 
-  app.put('/me/role', primaryOnly, async (request) => {
-    const { role } = parse(userRoleSchema, request.body);
-    await setUserRole(request.identity!.userId, role);
-    return { role };
-  });
-
-  app.put('/me/agent-status', { preHandler: requireAuth }, async (request) => {
-    const { status } = parse(agentStatusSchema, request.body);
-    await setAgentStatus(request.identity!.userId, status);
-    return { status };
-  });
-
-  // Internal notes on a chat — visible only to the business's owner/agents,
-  // never to the customer in the conversation.
+  // Internal notes on a chat — visible only to active business agents, never
+  // to the customer in the conversation.
   app.get<{ Params: { id: string } }>(
     '/chats/:id/notes',
     { preHandler: requireAuth },

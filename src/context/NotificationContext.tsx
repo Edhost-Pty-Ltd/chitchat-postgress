@@ -5,8 +5,10 @@ import React, {
 } from 'react';
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
-import { useAuth } from '../hooks/useAuth';
+import { useAuth } from './AuthContext';
 import { useNotificationSync } from '../hooks/useNotificationSync';
+import { usePhoneBook } from '../hooks/usePhoneBook';
+import { normalizePhone } from '../utils/phoneUtils';
 
 // NOTE: setNotificationHandler is already configured in usePushNotifications.ts.
 // We do NOT call it here again — calling it twice causes a render crash.
@@ -68,7 +70,7 @@ const NotificationContext = createContext<NotificationContextValue>({
 });
 
 export function NotificationProvider({ children }: { children: React.ReactNode }) {
-  const { user } = useAuth();
+  const { user, isSignedIn } = useAuth();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [toast, setToast]                 = useState<AppNotification | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -144,10 +146,18 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     [],
   );
 
-  // ── Sync real-time notifications from Firestore ───────────────────
+  // ── Sync real-time notifications from the socket ──────────────────
   // MUST be after pushNotification is defined — it is passed directly
-  // so the hook never needs to call useNotifications() itself.
-  useNotificationSync(user?.uid ?? null, pushNotification);
+  // so the hook never needs to call useNotifications() itself. The phone book
+  // resolves a sender's uid/phone to the name saved in THIS device's contacts,
+  // so a message notification shows the saved contact name, not the raw uid.
+  const { resolveName } = usePhoneBook();
+  const resolveSenderName = useCallback(
+    (phone: string | null | undefined, fallback: string) =>
+      resolveName(phone ? normalizePhone(phone) : null, fallback),
+    [resolveName],
+  );
+  useNotificationSync(isSignedIn ? (user?.uid ?? null) : null, pushNotification, resolveSenderName);
 
   const dismissToast = useCallback(() => {
     if (toastTimer.current) clearTimeout(toastTimer.current);

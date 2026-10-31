@@ -295,3 +295,20 @@ export async function totalUnread(userId: string): Promise<number> {
   );
   return Number(res.rows[0].total);
 }
+
+
+/**
+ * Users who share at least one chat with `userId`. Used to fan out the safe
+ * public identity boolean; report details and the private generation never
+ * leave the target's personal room.
+ */
+export async function getSharedChatPeerIds(userId: string): Promise<string[]> {
+  const result = await query<{ user_id: string }>(
+    `SELECT DISTINCT peer.user_id
+       FROM chat_members mine
+       JOIN chat_members peer ON peer.chat_id = mine.chat_id
+      WHERE mine.user_id = $1 AND peer.user_id <> $1`,
+    [userId],
+  );
+  return result.rows.map((row) => row.user_id);
+}

@@ -81,7 +81,7 @@ const TABS: {
   { id: 'settings',  icon: 'person-outline',       iconActive: 'person',       label: 'You',       screen: 'Settings'  },
 ];
 
-interface BottomNavProps { active: TabKey; }
+interface BottomNavProps { active: TabKey;  }
 
 export function BottomNav({ active }: BottomNavProps) {
   const navigation = useNavigation<NavProp>();

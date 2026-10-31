@@ -1,5 +1,6 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { verifyToken, parseBearer, AuthError, type AuthedIdentity } from '../../auth/verifier.js';
+import { accountGateStatus } from '../../db/repositories/users.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -36,9 +37,47 @@ async function authenticate(
  * code on any auth failure (Req 2.5). Handlers read `request.identity.userId`
  * and never trust a user id from the body (Req 2.11). Anonymous link-request
  * sessions are refused here.
+ *
+ * It also enforces the account gate server-side, so a modified client cannot
+ * skip a screen to get in:
+ *  - unregistered (OTP passed, face registration not done): only GET /me
+ *    (answers 404) and POST /me/register are reachable; everything else is
+ *    403 REGISTRATION_REQUIRED.
+ *  - reported (verification required): only GET /me and POST /me/verify;
+ *    everything else is 423 IDENTITY_VERIFICATION_REQUIRED.
  */
 export async function requireAuth(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   await authenticate(request, reply, false);
+  if (reply.sent || !request.identity || request.identity.isGuest) return;
+
+  const status = await accountGateStatus(request.identity.userId);
+  if (status === 'ok') return;
+
+  const route = request.routeOptions.url;
+  const isGetMe = request.method === 'GET' && route === '/me';
+
+  if (status === 'unregistered') {
+    const allowed = isGetMe || (request.method === 'POST' && route === '/me/register');
+    if (!allowed) {
+      await reply.code(403).send({
+        error: {
+          code: 'REGISTRATION_REQUIRED',
+          message: 'Complete face registration to continue',
+        },
+      });
+    }
+    return;
+  }
+
+  const allowedWhileUnverified = isGetMe || (request.method === 'POST' && route === '/me/verify');
+  if (!allowedWhileUnverified) {
+    await reply.code(423).send({
+      error: {
+        code: 'IDENTITY_VERIFICATION_REQUIRED',
+        message: 'Complete live identity verification to continue',
+      },
+    });
+  }
 }
 
 /**

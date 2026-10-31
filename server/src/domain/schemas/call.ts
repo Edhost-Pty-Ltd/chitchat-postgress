@@ -34,6 +34,19 @@ export const createMeetingSchema = z
     reminders: z.array(z.number().int().min(0).max(10080)).max(10).optional(),
     // Organizer display name used in the invitation message.
     organizerName: z.string().max(200).nullable().optional(),
+    // In-person venue (a real searched place). Only meaningful when type is
+    // 'in-person'; ignored otherwise.
+    location: z
+      .object({
+        name: z.string().max(256).nullable().optional(),
+        address: z.string().max(512).nullable().optional(),
+        lat: z.number().nullable().optional(),
+        lng: z.number().nullable().optional(),
+        placeId: z.string().max(256).nullable().optional(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
   })
   .strict();
 

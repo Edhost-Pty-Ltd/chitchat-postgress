@@ -28,6 +28,7 @@ export function useCallHistory(userId: string | null) {
             status: i.status as CallHistoryItem['status'],
             duration: i.durationSec,
             timestamp: new Date(i.timestamp),
+            seen: i.seen,
           })),
         );
       } else {

@@ -53,6 +53,7 @@ export function useChats(userId: string | null) {
       socketClient.subscribe('message:new',  () => void load()),
       socketClient.subscribe('message:read', () => void load()),
       socketClient.subscribe('chat:updated', () => void load()),
+      socketClient.subscribe('client:read',  () => void load()),
     ];
     return () => { active = false; unsubs.forEach((u) => u()); };
   }, [userId]);

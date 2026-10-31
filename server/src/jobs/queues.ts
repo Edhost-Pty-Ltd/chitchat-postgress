@@ -119,7 +119,8 @@ export function startWorkers(): void {
       const call = await getCall(job.data.callId);
       if (!call || call.status !== 'ringing') return;
       await updateCallStatus(call.id, 'missed');
-      await recordHistory(call, 'missed', null);
+      // Unanswered after 60s: callee gets 'missed', caller gets outgoing 'no_answer'.
+      await recordHistory(call, 'no_answer', null);
       emitToUser(call.callee_id, 'call:missed', { callId: call.id, caller: call.caller_info });
       emitToUser(call.caller_id, 'call:signal', {
         callId: call.id,

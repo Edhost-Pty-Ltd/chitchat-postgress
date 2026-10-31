@@ -1,5 +1,5 @@
 import { getAdminAuth } from './firebaseAdmin.js';
-import { upsertUserOnFirstContact } from '../db/repositories/users.js';
+import { backfillPhoneIfRegistered } from '../db/repositories/users.js';
 import { query } from '../db/pool.js';
 
 /** Identity resolved from a verified Firebase ID token (Req 2.4). */
@@ -22,6 +22,15 @@ export interface AuthedIdentity {
    * the device-link routes.
    */
   isAnonymous?: boolean;
+  /**
+   * True for a browser guest that joined a meeting via its public link. The
+   * guest's `userId` is `guest:<uuid>` and it may ONLY act on `guestMeetingId`.
+   */
+  isGuest?: boolean;
+  /** The single meeting a guest identity is allowed to participate in. */
+  guestMeetingId?: string;
+  /** Guest display name (browser participants enter this on the join screen). */
+  displayName?: string;
 }
 
 /** Machine-readable auth error codes surfaced to clients (Req 2.5, 2.8). */
@@ -80,20 +89,24 @@ async function companionStillLinked(ownerId: string, deviceId: string): Promise<
 
 /**
  * Verify a Firebase ID token and resolve the caller's identity (Req 2.4).
- * On first contact, upserts the user row keyed by firebase uid (Req 2.6) —
- * except for anonymous link-request sessions, which never get a user row.
+ *
+ * This NEVER creates a user row. A phone-verified session only becomes an
+ * account through POST /me/register, after the face step; until then the
+ * account gate in requireAuth / the socket handshake treats it as
+ * unregistered. For an existing row it backfills a missing phone number.
+ * Anonymous link-request sessions are skipped entirely.
  * Companion sessions are rejected as revoked once their device is removed, so
  * removal takes effect on the companion's very next request.
  * Throws AuthError on any missing/malformed/expired/revoked token (Req 2.5).
  *
- * `verify`/`upsert`/`isLinked` are injectable so unit tests can run without a
- * live Firebase project.
+ * `verify`/`syncPhone`/`isLinked` are injectable so unit tests can run without
+ * a live Firebase project.
  */
 export async function verifyToken(
   token: string | undefined | null,
   deps: {
     verify?: (t: string) => Promise<DecodedToken>;
-    upsert?: (id: string, phone: string | null) => Promise<void>;
+    syncPhone?: (id: string, phone: string | null) => Promise<void>;
     isLinked?: (ownerId: string, deviceId: string) => Promise<boolean>;
   } = {},
 ): Promise<AuthedIdentity> {
@@ -138,8 +151,8 @@ export async function verifyToken(
 
   const phoneNumber = decoded.phone_number ?? null;
   if (!isAnonymous) {
-    const upsert = deps.upsert ?? upsertUserOnFirstContact;
-    await upsert(decoded.uid, phoneNumber);
+    const syncPhone = deps.syncPhone ?? backfillPhoneIfRegistered;
+    await syncPhone(decoded.uid, phoneNumber);
   }
 
   return {

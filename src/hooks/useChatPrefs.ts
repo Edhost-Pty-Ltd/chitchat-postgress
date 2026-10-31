@@ -6,6 +6,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { endpoints } from '../api/endpoints';
+import { muteStore } from '../state/muteStore';
 
 export const MAX_PINNED = 3;
 
@@ -75,6 +76,8 @@ export function useChatPrefs(ownerUid: string | null) {
       if (res.ok) {
         const set = new Set(res.data.chatIds);
         setMutedChats(set);
+        // Share with the in-app notification path so muted chats stay silent.
+        muteStore.hydrate(res.data.chatIds);
         // Keep the local cache in sync for offline display.
         await AsyncStorage.multiSet(
           chatIds.map((id) => [MUTE_KEY(id), String(set.has(id))]),
@@ -94,27 +97,41 @@ export function useChatPrefs(ownerUid: string | null) {
     } catch { /* ignore */ }
   }, []);
 
-  const toggleMute = useCallback(async (chatId: string) => {
-    const key = MUTE_KEY(chatId);
-    const raw = await AsyncStorage.getItem(key);
-    const nextMuted = raw !== 'true';
-    await AsyncStorage.setItem(key, String(nextMuted));
+  // Mute a chat until `mutedUntil` (ISO instant) or forever when null ("Always").
+  const muteChat = useCallback(async (chatId: string, mutedUntil: string | null = null) => {
+    await AsyncStorage.setItem(MUTE_KEY(chatId), 'true');
     setMutedChats((prev) => {
       const copy = new Set(prev);
-      if (nextMuted) copy.add(chatId); else copy.delete(chatId);
+      copy.add(chatId);
       return copy;
     });
-    // Persist to the backend so push notifications skip muted chats.
+    // Silence the in-app notification path immediately (no round trip).
+    muteStore.mute(chatId, mutedUntil);
+    // Persist to the backend so push notifications skip this chat until it lapses.
     try {
-      await endpoints.setChatMuted(chatId, nextMuted);
+      await endpoints.setChatMuted(chatId, true, mutedUntil);
     } catch (err) {
       console.warn('[useChatPrefs] Failed to sync mute to backend:', err);
     }
-    return nextMuted;
+  }, []);
+
+  const unmuteChat = useCallback(async (chatId: string) => {
+    await AsyncStorage.setItem(MUTE_KEY(chatId), 'false');
+    setMutedChats((prev) => {
+      const copy = new Set(prev);
+      copy.delete(chatId);
+      return copy;
+    });
+    muteStore.unmute(chatId);
+    try {
+      await endpoints.setChatMuted(chatId, false);
+    } catch (err) {
+      console.warn('[useChatPrefs] Failed to sync unmute to backend:', err);
+    }
   }, []);
 
   return {
     pinned, favourites, mutedChats,
-    togglePin, toggleFavourite, toggleMute, loadMutedFor, reload,
+    togglePin, toggleFavourite, muteChat, unmuteChat, loadMutedFor, reload,
   };
 }

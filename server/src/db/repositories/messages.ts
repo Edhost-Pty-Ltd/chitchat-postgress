@@ -20,7 +20,8 @@ export type MessageType =
   | 'catalog'
   | 'poll'
   | 'order'
-  | 'contact';
+  | 'contact'
+  | 'meeting';
 
 export interface MessageInput {
   clientId?: string | null;
@@ -40,6 +41,7 @@ export interface MessageInput {
   poll?: unknown;        // { question, options:[{id,text}], multiple }
   order?: unknown;       // { items:[{id,name,price,imageObjectKey,quantity}], total, currency }
   contact?: unknown;     // { name, phone, userId, registered, photoObjectKey, contacts?:[...] }
+  meeting?: unknown;     // { meetingId, title, startsAt, endsAt, venue, joinUrl, location? }
 }
 
 export interface StoredMessage {
@@ -62,6 +64,7 @@ export interface StoredMessage {
   poll: unknown;
   order: unknown;
   contact: unknown;
+  meeting: unknown;
   createdAt: string;
   expiresAt: string;
   deletedForEveryone: boolean;
@@ -91,6 +94,7 @@ interface MessageRow {
   poll: unknown;
   order_data: unknown;
   contact_data: unknown;
+  meeting_data: unknown;
   created_at: Date;
   expires_at: Date;
   deleted_for_everyone: boolean;
@@ -122,6 +126,10 @@ function previewFor(input: MessageInput): string {
     case 'contact': {
       const n = (input.contact as { name?: string } | null)?.name;
       return n ? `👤 ${n}` : '👤 Contact';
+    }
+    case 'meeting': {
+      const t = (input.meeting as { title?: string } | null)?.title;
+      return t ? `📅 ${t}` : '📅 Meeting invitation';
     }
     default:
       return 'New message';
@@ -204,6 +212,7 @@ function rowToMessage(
     poll,
     order: row.order_data,
     contact: row.contact_data,
+    meeting: row.meeting_data,
     createdAt: row.created_at.toISOString(),
     expiresAt: row.expires_at.toISOString(),
     deletedForEveryone: row.deleted_for_everyone,
@@ -243,8 +252,8 @@ export async function sendMessage(
       `INSERT INTO messages
          (chat_id, sender_id, client_id, type, text, media_object_key, thumbnail_object_key,
           file_name, file_size, mime_type, duration_ms, location, catalog_item, reply_to, subtype,
-          poll, order_data, contact_data, expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+          poll, order_data, contact_data, meeting_data, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
        RETURNING *`,
       [
         chatId,
@@ -265,6 +274,7 @@ export async function sendMessage(
         input.poll != null ? JSON.stringify(input.poll) : null,
         input.order != null ? JSON.stringify(input.order) : null,
         input.contact != null ? JSON.stringify(input.contact) : null,
+        input.meeting != null ? JSON.stringify(input.meeting) : null,
         expiresAt,
       ],
     );

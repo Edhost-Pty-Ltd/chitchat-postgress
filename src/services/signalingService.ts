@@ -53,6 +53,20 @@ export class SignalingService {
     return callId;
   }
 
+  /**
+   * Join the call room (callee side). This registers the active call so the
+   * socket re-joins on reconnect AND emits call:join, which makes the server
+   * flush any buffered offer/ICE candidates to this device.
+   */
+  static async joinCall(callId: string): Promise<void> {
+    // Ensure a local state entry exists so onCallUpdated can accumulate signals.
+    if (!backendCalls.has(callId)) {
+      backendCalls.set(callId, { call: { callId }, listeners: new Set() });
+    }
+    await socketClient.connect();
+    socketClient.setActiveCall(callId);
+  }
+
   static async saveOffer(callId: string, offer: RTCSessionDescriptionInit): Promise<void> {
     socketClient.emit('call:signal', { callId, kind: 'offer', data: offer });
   }

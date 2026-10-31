@@ -11,6 +11,20 @@ import type { FireMessage } from './useMessages';
 
 const KEY = (chatId: string) => `local_msgs_${chatId}`;
 
+// AsyncStorage has no atomic read-modify-write operation. Serialize the media
+// optimistic/reconciliation writes per chat so a multi-select batch cannot
+// overwrite an earlier item while both are merging concurrently.
+const writeQueues = new Map<string, Promise<void>>();
+
+function enqueueWrite(chatId: string, work: () => Promise<void>): Promise<void> {
+  const previous = writeQueues.get(chatId) ?? Promise.resolve();
+  const queued = previous.catch(() => {}).then(work);
+  writeQueues.set(chatId, queued);
+  return queued.finally(() => {
+    if (writeQueues.get(chatId) === queued) writeQueues.delete(chatId);
+  });
+}
+
 // ── Serialisation helpers ────────────────────────────────────────────────────
 
 /** Convert Date fields to ISO strings for JSON storage. */
@@ -49,36 +63,66 @@ export async function loadLocalMessages(chatId: string): Promise<FireMessage[]> 
 }
 
 /**
- * Merge an incoming batch of Firestore messages into the local cache.
- * New messages are added; existing ones are updated in place.
- * The merged list is sorted by timestamp ascending before saving.
+ * Merge a message batch into the local cache. Besides the server id, media
+ * sends are deduplicated by (senderId, clientId): the optimistic record uses
+ * clientId as its temporary id, while the server returns a different id but
+ * preserves clientId. This replacement prevents duplicate bubbles.
  */
 export async function mergeLocalMessages(
   chatId: string,
   incoming: FireMessage[],
 ): Promise<void> {
-  try {
-    const existing = await loadLocalMessages(chatId);
+  return enqueueWrite(chatId, async () => {
+    try {
+      const existing = await loadLocalMessages(chatId);
+      const map = new Map<string, FireMessage>();
+      for (const m of existing) map.set(m.messageId, m);
 
-    // Build a map keyed by messageId so duplicates are overwritten.
-    const map = new Map<string, FireMessage>();
-    for (const m of existing)  map.set(m.messageId, m);
-    for (const m of incoming)  map.set(m.messageId, m);
+      for (const message of incoming) {
+        if (message.clientId) {
+          for (const [id, cached] of map) {
+            if (
+              id !== message.messageId &&
+              cached.senderId === message.senderId &&
+              cached.clientId === message.clientId
+            ) {
+              map.delete(id);
+            }
+          }
+        }
+        map.set(message.messageId, message);
+      }
 
-    // Sort ascending by timestamp. A null timestamp means the message was just
-    // sent and its serverTimestamp() hasn't resolved yet — it's the newest
-    // message, so it must sort to the BOTTOM (treat null as +Infinity), not the
-    // top. Using 0 here would date it to 1970 and float it above everything.
-    const merged = Array.from(map.values()).sort((a, b) => {
-      const ta = a.timestamp?.getTime() ?? Number.POSITIVE_INFINITY;
-      const tb = b.timestamp?.getTime() ?? Number.POSITIVE_INFINITY;
-      return ta - tb;
-    });
+      const merged = Array.from(map.values()).sort((a, b) => {
+        const ta = a.timestamp?.getTime() ?? Number.POSITIVE_INFINITY;
+        const tb = b.timestamp?.getTime() ?? Number.POSITIVE_INFINITY;
+        return ta - tb;
+      });
 
-    await AsyncStorage.setItem(KEY(chatId), JSON.stringify(merged.map(serialise)));
-  } catch (err) {
-    console.warn('[useLocalMessages] merge error:', err);
-  }
+      await AsyncStorage.setItem(KEY(chatId), JSON.stringify(merged.map(serialise)));
+    } catch (err) {
+      console.warn('[useLocalMessages] merge error:', err);
+    }
+  });
+}
+
+/** Persist a patch to one optimistic message (used for stage/failure changes). */
+export async function updateLocalMessage(
+  chatId: string,
+  messageId: string,
+  patch: Partial<FireMessage>,
+): Promise<void> {
+  return enqueueWrite(chatId, async () => {
+    try {
+      const existing = await loadLocalMessages(chatId);
+      const updated = existing.map((m) =>
+        m.messageId === messageId ? { ...m, ...patch } : m,
+      );
+      await AsyncStorage.setItem(KEY(chatId), JSON.stringify(updated.map(serialise)));
+    } catch (err) {
+      console.warn('[useLocalMessages] updateLocalMessage error:', err);
+    }
+  });
 }
 
 /** Wipe the local cache for a single chat (called by "Clear Chat"). */

@@ -6,13 +6,11 @@ import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useAuth } from '../hooks/useAuth';
 import { useIncomingCalls } from '../hooks/useIncomingCalls';
-import { useIncomingCallAnswer } from '../hooks/useIncomingCallAnswer';
 import { useCallContext } from '../context/CallContext';
 import { useRingtone } from '../hooks/useRingtone';
 import { SignalingService } from '../services/signalingService';
 import { IncomingCallOverlay } from '.';
 import type { RootStackParamList } from '../types';
-import type { Call } from '../types/call';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
 
@@ -20,7 +18,6 @@ export function IncomingCallManager() {
   const { user } = useAuth();
   const navigation = useNavigation<NavigationProp>();
   const { incomingCall, setIncomingCall, resetCallState } = useCallContext();
-  const incomingCallAnswer = useIncomingCallAnswer();
   const ringtone = useRingtone();
   
   // Listen for incoming calls
@@ -49,44 +46,22 @@ export function IncomingCallManager() {
     console.log('[IncomingCallManager] Answering call:', incomingCall.callId, 'Type:', incomingCall.type);
 
     try {
-      // Get the full call document to retrieve the offer
-      const callDoc = await SignalingService.getCall(incomingCall.callId);
-      
-      if (!callDoc || !callDoc.offer) {
-        console.error('[IncomingCallManager] Call document or offer not found');
-        setIncomingCall(null);
-        return;
-      }
+      // Navigate directly to the call screen. The screen's own setupCall
+      // useEffect will emit call:join (flushing the buffered offer from the
+      // server), subscribe to call:signal events, receive the offer, create an
+      // answer, and complete the WebRTC handshake. Trying to read the offer
+      // from the local Map *before* subscribing always fails because the callee
+      // hasn't joined the call room yet and the offer is still buffered server-
+      // side in Redis.
+      const screen = incomingCall.type === 'video' ? 'VideoCall' : 'AudioCall';
+      navigation.navigate(screen as any, {
+        callId: incomingCall.callId,
+        isOutgoing: false,
+        otherParty: incomingCall.caller,
+      });
 
-      // Answer the call with the correct type - wait for completion before navigation
-      const success = await incomingCallAnswer.answerCall(
-        incomingCall.callId, 
-        callDoc.offer,
-        incomingCall.type // Pass the call type (audio or video)
-      );
-
-      if (success) {
-        // Small delay to ensure answer is fully processed
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-        // Navigate to appropriate call screen based on type
-        if (incomingCall.type === 'video') {
-          navigation.navigate('VideoCall', {
-            callId: incomingCall.callId,
-            isOutgoing: false,
-            otherParty: incomingCall.caller,
-          });
-        } else {
-          navigation.navigate('AudioCall', {
-            callId: incomingCall.callId,
-            isOutgoing: false,
-            otherParty: incomingCall.caller,
-          });
-        }
-
-        // Clear incoming call from context after navigation starts
-        setTimeout(() => setIncomingCall(null), 200);
-      }
+      // Clear incoming call from context after navigation starts
+      setTimeout(() => setIncomingCall(null), 200);
     } catch (error) {
       console.error('[IncomingCallManager] Error answering call:', error);
       setIncomingCall(null);
@@ -100,7 +75,7 @@ export function IncomingCallManager() {
     console.log('[IncomingCallManager] Rejecting call:', incomingCall.callId);
 
     try {
-      await incomingCallAnswer.rejectCall(incomingCall.callId);
+      await SignalingService.updateCallStatus(incomingCall.callId, 'rejected');
       setIncomingCall(null);
     } catch (error) {
       console.error('[IncomingCallManager] Error rejecting call:', error);

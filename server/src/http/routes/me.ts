@@ -85,6 +85,9 @@ export async function registerMeRoutes(app: FastifyInstance): Promise<void> {
         about: row.about,
         avatarObjectKey: photoHidden ? null : row.avatar_object_key,
         accountType: row.account_type,
+        // Public identity signal only. Reporter ids, report times, and the
+        // private verification generation are never exposed here.
+        identityVerified: row.identity_verified !== false,
         email: row.email,
         website: row.website,
         operationalHours: row.operational_hours,

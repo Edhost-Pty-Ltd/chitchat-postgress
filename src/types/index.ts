@@ -77,12 +77,15 @@ export interface CatalogCollection {
 }
 
 export interface CatalogItem {
-  id:            string;
-  name:          string;
-  price:         string;
-  description?:  string;
-  imageUri?:     string | null;  // Firebase Storage download URL (after upload)
-  collectionId?: string | null;  // links to CatalogCollection.id, null = uncategorised
+  id:              string;
+  name:            string;
+  price:           string;
+  description?:    string;
+  /** Temporary/local URI used only for rendering or a pending upload. */
+  imageUri?:       string | null;
+  /** Durable server object key. Keep separate from a presigned display URL. */
+  imageObjectKey?: string | null;
+  collectionId?:   string | null;  // links to CatalogCollection.id, null = uncategorised
 }
 
 // ─── Broadcast ───────────────────────────────────────────────────────────────
@@ -236,6 +239,25 @@ export type RootStackParamList = {
   Profile: undefined;
   Dashboard:undefined;
   CreateAccount: undefined;
+  /**
+   * Facial-recognition enrollment. During registration, this route is opened
+   * immediately after OTP and creates the Node profile only after the SDK's
+   * enrollment + anti-spoofing flow and Django's signed receipt succeed.
+   */
+  FaceEnrollment:
+    | {
+        mode: 'registration';
+        profile: {
+          phoneNumber: string;
+          displayName: string;
+          email?: string | null;
+          website?: string | null;
+          about?: string | null;
+          avatarUri?: string | null;
+        };
+      }
+    | { mode?: 'enrollment'; onDone?: () => void }
+    | undefined;
   AccountSettings: undefined;
   PrivacySettings: undefined;
   NotificationSettings: undefined;

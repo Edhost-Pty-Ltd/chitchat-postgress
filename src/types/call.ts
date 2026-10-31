@@ -45,9 +45,13 @@ export interface CallHistoryItem {
   otherParty: CallParticipant;
   type: CallType;
   direction: CallDirection;
-  status: 'completed' | 'missed' | 'rejected' | 'busy' | 'failed';
+  // 'no_answer' is caller-side: an outgoing call the callee never picked up.
+  // The callee's matching row is 'missed'.
+  status: 'completed' | 'missed' | 'rejected' | 'busy' | 'failed' | 'no_answer';
   duration: number | null; // seconds
   timestamp: Date;
+  /** Whether the user has opened the Calls screen since this entry arrived. */
+  seen: boolean;
 }
 
 export interface IncomingCallData {

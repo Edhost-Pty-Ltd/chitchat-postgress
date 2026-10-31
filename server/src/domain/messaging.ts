@@ -62,23 +62,37 @@ export async function fanOutMessage(message: StoredMessage, senderName?: string)
   const blocked = await blockedEitherWay(message.senderId, others);
   const recipients = others.filter((id) => !blocked.has(id));
 
+  // Resolve the sender and chat once, so the realtime payload and the push
+  // share the same info. The client shows the sender's name as saved in the
+  // viewer's OWN contacts (matched by phone); shipping senderName/senderPhone
+  // lets it do that without an extra round trip, and the chat type lets group
+  // messages show the group name instead of a person's name.
+  const sender = await getUserById(message.senderId);
+  const name = senderName ?? notificationName(sender);
+  const senderPhone = sender?.phone_number ?? null;
+  const chatRow = await query<{ type: string; group_name: string | null }>(
+    'SELECT type, group_name FROM chats WHERE id = $1',
+    [message.chatId],
+  );
+  const isGroup = chatRow.rows[0]?.type === 'group';
+  const groupName = chatRow.rows[0]?.group_name ?? null;
+
   for (const uid of recipients) {
-    emitToUser(uid, 'message:new', { message });
+    emitToUser(uid, 'message:new', {
+      message,
+      chat: { type: isGroup ? 'group' : 'direct', groupName },
+      senderName: name,
+      senderPhone,
+    });
   }
 
   try {
-    const name = senderName ?? notificationName(await getUserById(message.senderId));
-    const chat = await query<{ type: string; group_name: string | null }>(
-      'SELECT type, group_name FROM chats WHERE id = $1',
-      [message.chatId],
-    );
-    const isGroup = chat.rows[0]?.type === 'group';
     const text = previewBody(message);
     await enqueueMessagePush({
       chatId: message.chatId,
       messageId: message.id,
       senderId: message.senderId,
-      title: isGroup ? chat.rows[0]?.group_name ?? 'Group' : name,
+      title: isGroup ? groupName ?? 'Group' : name,
       body: isGroup ? `${name}: ${text}` : text,
     });
   } catch (err) {

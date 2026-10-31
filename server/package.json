@@ -13,7 +13,10 @@
     "start": "node dist/index.js",
     "migrate": "node --env-file=.env node_modules/node-pg-migrate/bin/node-pg-migrate.js up -m migrations -j sql --no-check-order",
     "migrate:down": "node --env-file=.env node_modules/node-pg-migrate/bin/node-pg-migrate.js down -m migrations -j sql --no-check-order",
+    "migrate:firebase": "tsx --env-file=.env scripts/migrate-firebase-data.ts",
+    "migrate:firebase:apply": "tsx --env-file=.env scripts/migrate-firebase-data.ts --apply",
     "typecheck": "tsc --noEmit",
+    "typecheck:scripts": "tsc --noEmit -p scripts/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest"
   },

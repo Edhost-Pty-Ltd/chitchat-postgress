@@ -2,7 +2,8 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { createServer, type Server as HttpServer } from 'node:http';
 import { io as ioClient } from 'socket.io-client';
 import type { Server as IOServer } from 'socket.io';
-import { devStackAvailable, testEnv } from '../test/devStack.js';
+import { Client } from 'pg';
+import { devStackAvailable, devStackUrls, testEnv } from '../test/devStack.js';
 
 // Socket.IO handshake auth test (Req 2.7, 2.8). Needs Redis for the adapter.
 let available = false;
@@ -15,10 +16,23 @@ beforeAll(async () => {
   if (!available) return;
   Object.assign(process.env, testEnv());
 
+  // 'u1' is a registered account; 'u-unreg' passed OTP but has no row yet.
+  const pg = new Client({ connectionString: devStackUrls.DATABASE_URL });
+  await pg.connect();
+  try {
+    await pg.query("DELETE FROM users WHERE id = 'u-unreg'");
+    await pg.query("INSERT INTO users (id) VALUES ('u1') ON CONFLICT DO NOTHING");
+  } finally {
+    await pg.end();
+  }
+
   // Verify tokens without a live Firebase project: stub the verifier module.
   const verifier = await import('../auth/verifier.js');
   vi.spyOn(verifier, 'verifyToken').mockImplementation(async (token) => {
     if (token === 'good') return { userId: 'u1', firebaseUid: 'u1', phoneNumber: null };
+    if (token === 'unregistered') {
+      return { userId: 'u-unreg', firebaseUid: 'u-unreg', phoneNumber: '+15550009' };
+    }
     throw new verifier.AuthError('AUTH_TOKEN_INVALID', 'bad token');
   });
 
@@ -69,5 +83,12 @@ describe('Socket.IO handshake', () => {
     if (!available) return;
     expect((await connect(undefined)).ok).toBe(false);
     expect((await connect('bad')).ok).toBe(false);
+  });
+
+  it('rejects a phone-verified session that has not completed face registration', async () => {
+    if (!available) return;
+    const res = await connect('unregistered');
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe('Complete registration to connect');
   });
 });

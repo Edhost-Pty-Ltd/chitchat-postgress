@@ -9,7 +9,7 @@ import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { BottomNav } from '../components';
 import { useAuth } from '../context/AuthContext';
 import { useChats, ChatPreview } from '../hooks/useChats';
@@ -17,6 +17,7 @@ import { useContacts, AppContact } from '../hooks/useContacts';
 import { useChatPrefs, MAX_PINNED } from '../hooks/useChatPrefs';
 import { SwipeableRow } from '../components/SwipeableRow';
 import { ChatPreviewModal } from '../components/ChatPreviewModal';
+import FaceSetupPrompt from '../components/FaceSetupPrompt';
 import { clearLocalMessages } from '../hooks/useLocalMessages';
 import { isVisibleTo } from '../hooks/usePrivacySettings';
 import { useStatus } from '../hooks/useStatus';
@@ -34,10 +35,28 @@ import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from 
 import BroadcastScreen from './BroadcastScreen';
 
 type NavProp   = NativeStackNavigationProp<RootStackParamList, 'Chats'>;
-type TabType   = 'Chats' | 'Groups' | 'Broadcast' | string;
+type TabType   = 'Chats' | 'Groups' | 'Broadcast' | 'Favourites' | string;
 type SheetMode = 'select' | 'newContact' | 'newGroup';
 
 const NO_CHAT_PREFIX = '__nochat__';
+const FAVOURITES_TAB = 'Favourites';
+
+// Short, friendly explanations shown when the (i) info icon on a chat action is
+// tapped, or the action row / swipe button is long-pressed. Keyed by action key.
+const ACTION_HINTS: Record<string, string> = {
+  info: "Open this contact's profile — catalog, shared media and details.",
+  mute: 'Stop (or resume) notifications for this chat. Messages still arrive.',
+  favourite: 'Pin this chat to your Favourites tab for quick access.',
+  label: 'Organise this chat under a custom label.',
+  deleteContact: "Remove this person from your phone's address book. The chat stays.",
+  addContact: "Save this person to your phone's address book.",
+  clear: 'Erase every message in this chat — for you only. The other person keeps theirs.',
+  block: 'Stop receiving messages and calls from this contact.',
+  report: 'Flag this contact for review. They must verify their account before they can use the app again.',
+  delete: 'Remove this chat from your list.',
+  pin: 'Keep this chat pinned to the top of your list.',
+  more: 'More actions for this chat.',
+};
 
 // ─── Chat Label types ────────────────────────────────────────────────────────
 interface ChatLabel {
@@ -302,7 +321,7 @@ const ChatRow = memo(function ChatRow({
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
             {isFavourite && <Ionicons name="star" size={13} color="#f59e0b" />}
             {isMuted && <Ionicons name="notifications-off" size={13} color={FGsecondary} />}
-            {isPinned && <Ionicons name="pin" size={13} color={COLORS.blue} />}
+            {isPinned && <MaterialCommunityIcons name="pin" size={17} color={COLORS.blue} />}
             <Text style={[styles.chatTime, { color: FGsecondary }]}>{formatTime(item.timestamp)}</Text>
           </View>
         </View>
@@ -1357,7 +1376,7 @@ export default function ChatsScreen() {
     return socketClient.subscribe('chat:cleared', () => reloadChatsRef.current());
   }, [userId]);
   const { contacts, loading: contactsLoading, reload: reloadContacts, hasPermission, error: contactsError } = useContacts();
-  const { pinned, favourites, mutedChats, togglePin, toggleFavourite, toggleMute, loadMutedFor } = useChatPrefs(userId);
+  const { pinned, favourites, mutedChats, togglePin, toggleFavourite, muteChat, unmuteChat, loadMutedFor } = useChatPrefs(userId);
 
   // Chat currently targeted by the swipe-right actions menu
   const [actionChat, setActionChat] = useState<{
@@ -1543,6 +1562,11 @@ export default function ChatsScreen() {
 
   useEffect(() => {
     if (tab === 'Chats' || tab === 'Groups' || tab === 'Broadcast') return;
+    // Favourites tab only exists while there's at least one favourite chat.
+    if (tab === FAVOURITES_TAB) {
+      if (favourites.length === 0) setTab('Chats');
+      return;
+    }
     const exists = labels.some((l) => l.id === tab);
     if (exists) {
       if (pendingLabelIdRef.current === tab) pendingLabelIdRef.current = null;
@@ -1550,7 +1574,7 @@ export default function ChatsScreen() {
     }
     if (pendingLabelIdRef.current === tab) return;
     setTab('Chats');
-  }, [labels, tab]);
+  }, [labels, tab, favourites.length]);
 
   const [memberInfo, setMemberInfo] = useState<Map<string, { displayName: string; phone: string; photoURL?: string }>>(new Map());
   const [privacyPhotoMap, setPrivacyPhotoMap] = useState<Map<string, string>>(new Map());
@@ -1706,16 +1730,17 @@ export default function ChatsScreen() {
   }, [groupChats, userId, contactsMap, memberInfoMap]);
 
   const currentLabel = useMemo(
-    () => (tab === 'Chats' || tab === 'Groups' || tab === 'Broadcast')
+    () => (tab === 'Chats' || tab === 'Groups' || tab === 'Broadcast' || tab === FAVOURITES_TAB)
       ? null
       : (labels.find((l) => l.id === tab) ?? null),
     [labels, tab],
   );
 
   // ── Data for the current tab ────────────────────────────────────────────
-  // Chats  → every chat (direct + group)
-  // Groups → only groups
-  // Label  → chats belonging to that label + placeholders for members with no chat yet
+  // Chats      → every chat (direct + group)
+  // Groups     → only groups
+  // Favourites → chats whose chatId is in the favourites list
+  // Label      → chats belonging to that label + placeholders for members with no chat yet
   const data = useMemo(() => {
     let base: ChatPreview[];
 
@@ -1726,6 +1751,11 @@ export default function ChatsScreen() {
       base = groupChats;
     } else if (tab === 'Broadcast') {
       base = [];
+    } else if (tab === FAVOURITES_TAB) {
+      // Favourites are tracked by chatId — only real chats are ever
+      // favouritable, so simply filter the live chat list.
+      const favSet = new Set(favourites);
+      base = chats.filter((c) => favSet.has(c.chatId));
     } else {
       const label = labels.find((l) => l.id === tab);
       if (!label) return [];
@@ -1775,7 +1805,7 @@ export default function ChatsScreen() {
         return resolveDisplayName(c, userId, contactsMap, memberInfoMap).toLowerCase().includes(q);
       })
       .sort(byRecent);
-  }, [tab, groupChats, labels, chats, query, userId, contactsMap, memberInfoMap, pinned]);
+  }, [tab, groupChats, labels, chats, query, userId, contactsMap, memberInfoMap, pinned, favourites]);
 
   // Scroll to first unread chat or bottom when data updates
   useEffect(() => {
@@ -1813,6 +1843,17 @@ export default function ChatsScreen() {
 
   const handleSelectContact = useCallback(async (contact: AppContact) => {
     if (!userId) return;
+    // Only registered users have a real backend id — a device contact that
+    // never matched a ChitChat account has userId === their phone number,
+    // which the server rejects (no users row), so block that case up front
+    // with a clear message instead of letting the request fail silently.
+    if (!contact.isSaved) {
+      Alert.alert(
+        'Not on ChitChat',
+        `${contact.displayName} hasn't joined ChitChat yet. Invite them to start chatting.`,
+      );
+      return;
+    }
     setSheetOpen(false);
     try {
       const chatId = await getOrCreateDirectChat(userId, contact.userId);
@@ -1823,7 +1864,10 @@ export default function ChatsScreen() {
         otherUserId: contact.userId,
         otherUserPhoto: contact.photoUri || contact.firebasePhotoURL || null,
       });
-    } catch {}
+    } catch (err) {
+      console.error('[ChatsScreen] handleSelectContact failed:', err);
+      Alert.alert('Error', 'Could not open chat. Please try again.');
+    }
   }, [userId, navigation]);
 
   const handleNavigateToGroup = useCallback((chatId: string, groupName: string) => {
@@ -1872,6 +1916,24 @@ export default function ChatsScreen() {
     const res = await togglePin(chatId);
     if (!res.ok && res.reason) Alert.alert('Pin limit', res.reason);
   }, [togglePin]);
+
+  // Mute: already muted → unmute immediately; otherwise ask for how long first.
+  // "Always" is an indefinite mute (null expiry); the timed options send an
+  // absolute ISO instant so the server resumes notifications when it lapses.
+  const handleMutePress = useCallback((chatId: string) => {
+    if (mutedChats.has(chatId)) {
+      void unmuteChat(chatId);
+      return;
+    }
+    const until = (ms: number | null) =>
+      ms === null ? null : new Date(Date.now() + ms).toISOString();
+    Alert.alert('Mute notifications', 'For how long?', [
+      { text: '8 hours', onPress: () => void muteChat(chatId, until(8 * 60 * 60 * 1000)) },
+      { text: '1 week', onPress: () => void muteChat(chatId, until(7 * 24 * 60 * 60 * 1000)) },
+      { text: 'Always', onPress: () => void muteChat(chatId, until(null)) },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [mutedChats, muteChat, unmuteChat]);
 
   // Swipe-right → open the actions menu for this chat
   const openChatActions = useCallback((payload: NonNullable<typeof actionChat>) => {
@@ -1925,6 +1987,23 @@ export default function ChatsScreen() {
     } catch (err) {
       console.error('[ChatsScreen] block failed:', err);
       Alert.alert('Error', 'Could not block contact.');
+    }
+  }, [userId]);
+
+  // Report a contact: the reported user is put behind the "requires
+  // verification" gate on their device until they verify.
+  const actionReport = useCallback(async (otherUid: string, name: string) => {
+    if (!userId) return;
+    try {
+      const res = await endpoints.reportUser(otherUid);
+      if (!res.ok) throw new Error(res.error.message);
+      Alert.alert(
+        'Contact Reported',
+        `${name} has been reported. Their identity status is now Not verified. They must pass an on-device live-face check and a server-side match to their existing encrypted face reference before using the app again. You'll be notified after the server verifies them.`,
+      );
+    } catch (err) {
+      console.error('[ChatsScreen] report failed:', err);
+      Alert.alert('Error', 'Could not report contact.');
     }
   }, [userId]);
 
@@ -1997,6 +2076,7 @@ export default function ChatsScreen() {
         label: isPinned ? 'Unpin' : 'Pin',
         icon: 'pin',
         color: '#f59e0b',
+        hint: ACTION_HINTS.pin,
         onPress: () => handleTogglePin(item.chatId),
       },
       {
@@ -2004,13 +2084,15 @@ export default function ChatsScreen() {
         label: isMuted ? 'Unmute' : 'Mute',
         icon: isMuted ? 'notifications' : 'notifications-off',
         color: '#6366f1',
-        onPress: () => { toggleMute(item.chatId); },
+        hint: ACTION_HINTS.mute,
+        onPress: () => { handleMutePress(item.chatId); },
       },
       {
         key: 'more',
         label: 'More',
         icon: 'ellipsis-horizontal',
         color: COLORS.blue,
+        hint: ACTION_HINTS.more,
         onPress: () => openChatActions({
           chatId: item.chatId,
           displayName,
@@ -2067,7 +2149,7 @@ export default function ChatsScreen() {
   }, [
     userId, contacts, contactsMap, memberInfoMap, privacyPhotoMap, userStatusMap,
     bevel, textColor, fontFamily, FG.secondary, navigation, openOrCreateDirectChat,
-    pinned, mutedChats, favourites, handleTogglePin, toggleMute, openChatActions,
+    pinned, mutedChats, favourites, handleTogglePin, handleMutePress, openChatActions,
   ]);
 
   const openPreviewedChat = useCallback(() => {
@@ -2121,7 +2203,7 @@ export default function ChatsScreen() {
 
     list.push({
       key: 'mute', label: pc.isMuted ? 'Unmute' : 'Mute', icon: pc.isMuted ? 'notifications' : 'notifications-off-outline',
-      onPress: async () => { await toggleMute(pc.chatId); setPreviewChat(null); },
+      onPress: () => { setPreviewChat(null); handleMutePress(pc.chatId); },
     });
 
     list.push({
@@ -2213,6 +2295,22 @@ export default function ChatsScreen() {
           ]);
         },
       });
+
+      list.push({
+        key: 'report', label: 'Report contact', icon: 'flag-outline', destructive: true,
+        onPress: () => {
+          const uid = pc.otherUserId!; const name = pc.displayName;
+          setPreviewChat(null);
+          Alert.alert(
+            'Report contact',
+            `Report ${name}? They'll be asked to verify their account before they can use the app again.`,
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Report', style: 'destructive', onPress: () => actionReport(uid, name) },
+            ],
+          );
+        },
+      });
     }
 
     list.push({
@@ -2226,13 +2324,15 @@ export default function ChatsScreen() {
       },
     });
 
-    return list;
-  }, [previewChat, navigation, toggleMute, toggleFavourite, actionDeleteContact, actionClearChat, actionBlock, actionDeleteChat, currentLabel, isChatInLabel, toggleChatInLabel]);
+    // Attach a hint to every action by key so the (i) info icon can explain it.
+    return list.map((a) => ({ ...a, hint: ACTION_HINTS[a.key] }));
+  }, [previewChat, navigation, handleMutePress, toggleFavourite, actionDeleteContact, actionClearChat, actionBlock, actionReport, actionDeleteChat, currentLabel, isChatInLabel, toggleChatInLabel]);
 
   const currentLabelTitle = (() => {
     if (tab === 'Chats') return 'Chats';
     if (tab === 'Groups') return 'Groups';
     if (tab === 'Broadcast') return 'Broadcast';
+    if (tab === FAVOURITES_TAB) return 'Favourites';
     return currentLabel?.title ?? 'Label';
   })();
 
@@ -2393,7 +2493,7 @@ export default function ChatsScreen() {
 
             {([
               {
-                icon: 'information-circle-outline', label: 'Contact info', color: COLORS.blue,
+                key: 'info', icon: 'information-circle-outline', label: 'Contact info', color: COLORS.blue,
                 onPress: () => {
                   const ac = actionChat;
                   setActionChat(null);
@@ -2405,7 +2505,7 @@ export default function ChatsScreen() {
                 },
               },
               !actionChat.isSavedContact && !actionChat.isGroup && !!actionChat.otherUserId ? {
-                icon: 'person-add-outline', label: 'Add to contacts', color: COLORS.blue,
+                key: 'addContact', icon: 'person-add-outline', label: 'Add to contacts', color: COLORS.blue,
                 onPress: () => {
                   const ac = actionChat;
                   setActionChat(null);
@@ -2417,19 +2517,21 @@ export default function ChatsScreen() {
                 },
               } : null,
               {
+                key: 'mute',
                 icon: mutedChats.has(actionChat.chatId) ? 'notifications' : 'notifications-off-outline',
                 label: mutedChats.has(actionChat.chatId) ? 'Unmute' : 'Mute',
                 color: COLORS.blue,
-                onPress: async () => { await toggleMute(actionChat.chatId); setActionChat(null); },
+                onPress: () => { const id = actionChat.chatId; setActionChat(null); handleMutePress(id); },
               },
               {
+                key: 'favourite',
                 icon: favourites.includes(actionChat.chatId) ? 'star' : 'star-outline',
                 label: favourites.includes(actionChat.chatId) ? 'Remove favourite' : 'Add to favourites',
                 color: '#f59e0b',
                 onPress: async () => { await toggleFavourite(actionChat.chatId); setActionChat(null); },
               },
               {
-                icon: 'brush-outline', label: 'Clear chat', color: COLORS.blue,
+                key: 'clear', icon: 'brush-outline', label: 'Clear chat', color: COLORS.blue,
                 onPress: () => {
                   const ac = actionChat; setActionChat(null);
                   Alert.alert('Clear Chat', 'Clear all messages in this chat?', [
@@ -2439,7 +2541,7 @@ export default function ChatsScreen() {
                 },
               },
               !actionChat.isGroup && !!actionChat.otherUserId ? {
-                icon: 'ban-outline', label: 'Block', color: COLORS.missed,
+                key: 'block', icon: 'ban-outline', label: 'Block', color: COLORS.missed,
                 onPress: () => {
                   const ac = actionChat; setActionChat(null);
                   Alert.alert('Block Contact', `Block ${ac.displayName}?`, [
@@ -2448,8 +2550,22 @@ export default function ChatsScreen() {
                   ]);
                 },
               } : null,
+              !actionChat.isGroup && !!actionChat.otherUserId ? {
+                key: 'report', icon: 'flag-outline', label: 'Report contact', color: COLORS.missed,
+                onPress: () => {
+                  const ac = actionChat; setActionChat(null);
+                  Alert.alert(
+                    'Report contact',
+                    `Report ${ac.displayName}? They'll be asked to verify their account before they can use the app again.`,
+                    [
+                      { text: 'Cancel', style: 'cancel' },
+                      { text: 'Report', style: 'destructive', onPress: () => actionReport(ac.otherUserId!, ac.displayName) },
+                    ],
+                  );
+                },
+              } : null,
               {
-                icon: 'trash-outline', label: 'Delete chat', color: COLORS.missed,
+                key: 'delete', icon: 'trash-outline', label: 'Delete chat', color: COLORS.missed,
                 onPress: () => {
                   const ac = actionChat; setActionChat(null);
                   Alert.alert('Delete Chat', 'Delete this chat and all its messages?', [
@@ -2458,15 +2574,34 @@ export default function ChatsScreen() {
                   ]);
                 },
               },
-            ].filter(Boolean) as { icon: string; label: string; color: string; onPress: () => void }[])
-              .map((a) => (
-                <TouchableOpacity key={a.label} style={[styles.actionMenuRow, bevel]} activeOpacity={0.75} onPress={a.onPress}>
-                  <AppIcon name={a.icon as any} size={20} color={a.color} fixedColor />
-                  <AppText style={[styles.actionMenuLabel, { color: a.color === COLORS.missed ? COLORS.missed : textColor }]}>
-                    {a.label}
-                  </AppText>
-                </TouchableOpacity>
-              ))}
+            ].filter(Boolean) as { key: string; icon: string; label: string; color: string; onPress: () => void }[])
+              .map((a) => {
+                const hint = ACTION_HINTS[a.key];
+                return (
+                  <TouchableOpacity
+                    key={a.key}
+                    style={[styles.actionMenuRow, bevel]}
+                    activeOpacity={0.75}
+                    onPress={a.onPress}
+                    onLongPress={() => hint && Alert.alert(a.label, hint)}
+                    delayLongPress={300}
+                  >
+                    <AppIcon name={a.icon as any} size={20} color={a.color} fixedColor />
+                    <AppText style={[styles.actionMenuLabel, { color: a.color === COLORS.missed ? COLORS.missed : textColor }]}>
+                      {a.label}
+                    </AppText>
+                    {hint ? (
+                      <TouchableOpacity
+                        style={styles.actionMenuInfo}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        onPress={() => Alert.alert(a.label, hint)}
+                      >
+                        <AppIcon name="information-circle-outline" size={18} color={FG.secondary} />
+                      </TouchableOpacity>
+                    ) : null}
+                  </TouchableOpacity>
+                );
+              })}
           </View>
         )}
       </Modal>
@@ -2572,6 +2707,26 @@ export default function ChatsScreen() {
             );
           })}
 
+          {/* Favourites tab — appears automatically the moment a chat is
+              favourited, and disappears when the last favourite is removed. */}
+          {favourites.length > 0 && (
+            tab === FAVOURITES_TAB ? (
+              <TouchableOpacity onPress={() => setTab(FAVOURITES_TAB)} activeOpacity={0.85}>
+                <LinearGradient colors={GRADIENTS.primary} style={styles.tabPillActive}>
+                  <AppText style={styles.tabLabelActive}>Favourites</AppText>
+                </LinearGradient>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                style={[styles.tabPillInactive, bevel]}
+                onPress={() => setTab(FAVOURITES_TAB)}
+                activeOpacity={0.7}
+              >
+                <AppText style={[styles.tabLabel, { color: FG.secondary }]}>Favourites</AppText>
+              </TouchableOpacity>
+            )
+          )}
+
           {labels.map((label) => {
             const active = tab === label.id;
             return active ? (
@@ -2620,12 +2775,14 @@ export default function ChatsScreen() {
         </View>
       ) : (
         <FlatList
+          style={{ flex: 1 }}
           ref={chatsListRef}
           data={data}
           keyExtractor={(item) => item.chatId}
           renderItem={renderChat}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.listContent}
+          ListHeaderComponent={FaceSetupPrompt}
           ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
           removeClippedSubviews
           maxToRenderPerBatch={10}
@@ -2633,7 +2790,11 @@ export default function ChatsScreen() {
           initialNumToRender={12}
           ListEmptyComponent={
             <View style={styles.emptyWrap}>
-              <AppIcon name="chatbubbles-outline" size={52} color={COLORS.sub} />
+              <AppIcon
+                name={tab === FAVOURITES_TAB ? 'star-outline' : 'chatbubbles-outline'}
+                size={52}
+                color={COLORS.sub}
+              />
               <AppText style={styles.emptyText}>
                 {(tab === 'Chats' || tab === 'Groups')
                   ? `No ${tab.toLowerCase()} yet`
@@ -2707,8 +2868,12 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
-  avatarText: { color: '#fff', fontWeight: '700', fontSize: 18 },
-
+  avatarText: { 
+    color: '#fff', 
+    fontWeight: '700', 
+    fontSize: 18 
+  }, 
+  
   header: {
     flexDirection: 'column',
     paddingHorizontal: 14,
@@ -2723,6 +2888,7 @@ const styles = StyleSheet.create({
   appName: {
     fontSize: 22,
     fontWeight: '800',
+   
     color: COLORS.text, letterSpacing: -0.5,
   },
   searchBubble: {
@@ -2892,6 +3058,7 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS.md, marginBottom: 8,
   },
   actionMenuLabel: { fontSize: 15, fontWeight: '600' },
+  actionMenuInfo: { marginLeft: 'auto', padding: 2 },
 
   sheetSubHeader: {
     flexDirection: 'row', alignItems: 'center',
@@ -3008,7 +3175,7 @@ const styles = StyleSheet.create({
   },
   confirmText: { fontSize: 14, fontWeight: '700', color: '#fff' },
 
-  emptyWrap: { alignItems: 'center', paddingTop: 80, gap: 12, paddingHorizontal: 30 },
+  emptyWrap: { alignItems: 'center', paddingTop: 80, gap: 12, paddingHorizontal: 30 ,flex: 1  },
   emptyText: { fontSize: 15, color: COLORS.sub, textAlign: 'center' },
   emptySubText: { fontSize: 13, color: COLORS.sub, textAlign: 'center', marginTop: -4 },
 

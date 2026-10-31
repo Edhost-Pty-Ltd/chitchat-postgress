@@ -16,6 +16,10 @@ import { registerStatusRoutes } from './routes/statuses.js';
 import { registerMediaRoutes } from './routes/media.js';
 import { registerFeatureRoutes } from './routes/features.js';
 import { registerMeetingRoutes } from './routes/meetings.js';
+import { registerMeetingGuestRoutes } from './routes/meetingGuest.js';
+import { registerPlacesRoutes } from './routes/places.js';
+import { registerReportRoutes } from './routes/reports.js';
+import { registerRegistrationRoutes } from './routes/registration.js';
 
 /**
  * Build the Fastify app: structured logging with a request id (Req 1.10),
@@ -71,6 +75,10 @@ export async function buildServer(): Promise<FastifyInstance> {
   await registerMediaRoutes(app);
   await registerFeatureRoutes(app);
   await registerMeetingRoutes(app);
+  await registerMeetingGuestRoutes(app);
+  await registerPlacesRoutes(app);
+  await registerReportRoutes(app);
+  await registerRegistrationRoutes(app);
 
   return app;
 }

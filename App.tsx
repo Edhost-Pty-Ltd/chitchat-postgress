@@ -18,6 +18,7 @@ import AppNavigator from './src/navigation/AppNavigator';
 import ToastOverlay from './src/components/ToastNotification';
 import { FloatingCallManager } from './src/components/FloatingCallManager';
 import { BiometricGate } from './src/components/BiometricGate';
+import { VerificationGate } from './src/components/VerificationGate';
 import { usePushNotifications } from './src/hooks/usePushNotifications';
 
 // Disable native screens on web to avoid touch/interaction issues
@@ -130,6 +131,7 @@ export default function App() {
                     <ToastOverlay />
                     <FloatingCallManager />
                     <BiometricGate />
+                    <VerificationGate />
                   </NavigationContainer>
                 </CartProvider>
               </FloatingCallProvider>

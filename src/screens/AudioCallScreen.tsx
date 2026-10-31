@@ -11,11 +11,10 @@ import {
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useWebRTC } from '../hooks/useWebRTC';
+import { useCallContext } from '../context/CallContext';
 import { useAuth } from '../hooks/useAuth';
 import { useFloatingCall } from '../context/FloatingCallContext';
 import { useRingtone } from '../hooks/useRingtone';
-import { endpoints } from '../api/endpoints';
 import { SignalingService } from '../services/signalingService';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
 
@@ -45,10 +44,19 @@ export default function AudioCallScreen() {
   const [callStatus,   setCallStatus]   = useState<string>('connecting');
   const [showQuality,  setShowQuality]  = useState(false);
 
-  // WebRTC hook for managing peer connection and streams
+  // Whether WebRTC media has actually connected (used to end the ringtone,
+  // start the timer, and decide the call outcome on hang-up).
+  const connectedRef = useRef(false);
+
+  // Shared WebRTC instance from CallContext. CallContext already wires outgoing
+  // ICE candidates to SignalingService.addIceCandidate (using the caller/callee
+  // flag set via setIsCaller below), so using the shared instance means a
+  // SINGLE peer connection per call and ICE flowing automatically.
   const {
     connectionState,
     networkQuality,
+    setIsCaller,
+    setActiveCallId,
     initializePeerConnection,
     createOffer,
     createAnswer,
@@ -57,24 +65,29 @@ export default function AudioCallScreen() {
     toggleMute: toggleMuteWebRTC,
     startNetworkMonitoring,
     cleanup: cleanupWebRTC,
-  } = useWebRTC({
-    onConnectionStateChange: (state) => {
-      console.log('[AudioCall] Connection state:', state);
-      if (state === 'connected') {
-        setCallStatus('connected');
-        startNetworkMonitoring();
-      } else if (state === 'disconnected' || state === 'failed') {
-        setCallStatus('disconnected');
-      }
-    },
-    onNetworkQualityChange: (quality) => {
-      console.log('[AudioCall] Network quality:', quality);
-      if (quality === 'poor' || quality === 'fair') {
-        setShowQuality(true);
-        setTimeout(() => setShowQuality(false), 3000);
-      }
-    },
-  });
+  } = useCallContext();
+
+  // Tell CallContext whether this device is the caller so outgoing ICE
+  // candidates are tagged correctly (caller vs callee) for the relay.
+  useEffect(() => { setIsCaller(isOutgoing); }, [isOutgoing, setIsCaller]);
+
+  useEffect(() => {
+    if (connectionState === 'connected') {
+      connectedRef.current = true;
+      setCallStatus('connected');
+      startNetworkMonitoring();
+    } else if (connectionState === 'disconnected' || connectionState === 'failed') {
+      setCallStatus('disconnected');
+    }
+  }, [connectionState]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (networkQuality === 'poor' || networkQuality === 'fair') {
+      setShowQuality(true);
+      const t = setTimeout(() => setShowQuality(false), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [networkQuality]);
 
   // Build contact from otherParty
   const contact: Contact = {
@@ -107,39 +120,74 @@ export default function AudioCallScreen() {
 
   // Initialize WebRTC and call setup
   useEffect(() => {
+    // Tracks signalling we've already acted on so each is handled exactly once.
+    let answerApplied = false;
+    let offerAnswered = false;
+    const appliedIce = new Set<string>();
+    let ended = false;
+
+    const endFromRemote = () => {
+      if (ended) return;
+      ended = true;
+      ringtone.stop();
+      cleanupWebRTC();
+      navigation.goBack();
+    };
+
+    const applyRemoteIce = (candidates?: RTCIceCandidateInit[]) => {
+      if (!candidates) return;
+      for (const cand of candidates) {
+        const key = `${cand.candidate}-${cand.sdpMLineIndex}-${cand.sdpMid}`;
+        if (appliedIce.has(key)) continue;
+        appliedIce.add(key);
+        addIceCandidate(cand).catch((e) => console.warn('[AudioCall] addIceCandidate failed:', e));
+      }
+    };
+
     const setupCall = async () => {
       try {
-        // Duration is managed locally; the backend call record has startedAt
-        // from POST /calls. No separate read needed.
+        // Register the active call so CallContext tags outgoing ICE candidates
+        // with the right callId, and so a reconnect re-joins the call room.
+        setActiveCallId(callId);
+        await SignalingService.joinCall(callId);
 
-        // Initialize WebRTC peer connection for audio only
-        await initializePeerConnection(false); // false for audio-only call
+        // Initialize the shared peer connection for audio only.
+        await initializePeerConnection(false);
 
         if (isOutgoing) {
           console.log('[AudioCall] Creating offer as caller...');
           const offer = await createOffer(false);
           await SignalingService.saveOffer(callId, offer);
 
-          // Listen for answer from callee via socket
+          // Listen for the callee's answer + their ICE candidates.
           unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, (data) => {
-            if (data?.answer) {
+            if (!data) return;
+            if (data.answer && !answerApplied) {
+              answerApplied = true;
               setRemoteAnswer(data.answer).catch(console.error);
             }
-            if (data?.status === 'ended') navigation.goBack();
+            applyRemoteIce(data.calleeIceCandidates);
+            if (data.status === 'ended' || data.status === 'rejected' || data.status === 'missed') {
+              endFromRemote();
+            }
           });
         } else {
-          console.log('[AudioCall] Waiting for offer as callee...');
+          console.log('[AudioCall] Answering as callee...');
           unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, async (data) => {
-            if (data?.offer) {
+            if (!data) return;
+            if (data.offer && !offerAnswered) {
+              offerAnswered = true;
               const answer = await createAnswer(data.offer);
               await SignalingService.saveAnswer(callId, answer);
             }
-            if (data?.status === 'ended') navigation.goBack();
+            // Apply the caller's ICE only after we've answered (remote
+            // description must exist first).
+            if (offerAnswered) applyRemoteIce(data.callerIceCandidates);
+            if (data.status === 'ended' || data.status === 'rejected' || data.status === 'missed') {
+              endFromRemote();
+            }
           });
         }
-
-        // Start call timer
-        timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
       } catch (error) {
         console.error('[AudioCall] Setup failed:', error);
         setCallStatus('failed');
@@ -154,6 +202,17 @@ export default function AudioCallScreen() {
       cleanupWebRTC();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Start the call-duration timer the moment WebRTC actually connects, so both
+  // participants' clocks start together — not whenever each device's own
+  // signaling round-trip happens to finish (which used to make the two sides
+  // drift apart). connectionState reaching 'connected' is a real event shared
+  // by both peers, unlike "my setupCall() function reached this line".
+  useEffect(() => {
+    if (callStatus === 'connected' && !timerRef.current) {
+      timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
+    }
+  }, [callStatus]);
 
   // Handle Android back button - minimize call instead of ending it
   useEffect(() => {
@@ -189,7 +248,14 @@ export default function AudioCallScreen() {
   const hangUp = async () => {
     ringtone.stop();
     try {
-      await endpoints.endCall(callId);
+      // Emit the 'end' signal over the socket. The server relays it to the
+      // other participant (so THEIR screen closes too) and records call history
+      // for both sides: a positive duration = completed, 0 = no-answer/missed.
+      await SignalingService.updateCallStatus(
+        callId,
+        'ended',
+        connectedRef.current ? duration : 0,
+      );
     } catch (error) {
       console.error('[AudioCall] Failed to end call:', error);
     }
@@ -270,7 +336,7 @@ export default function AudioCallScreen() {
       {/* ── Main area ── */}
       <View style={styles.mainArea}>
         <View style={styles.avatarRing}>
-          <Avatar initials={contact.avatar} color={contact.color} size={110} />
+          <Avatar initials={contact.avatar} color={contact.color} size={110} imageUrl={otherParty.photoUrl} />
         </View>
         <AppText fixedColor style={styles.callerName}>{contact.name}</AppText>
         <AppText fixedColor style={styles.callStatus}>

@@ -70,6 +70,15 @@ export async function registerMeetingRoutes(app: FastifyInstance): Promise<void>
     if (endsAt <= startsAt) throw Errors.badRequest('End time must be after start time');
 
     const title = body.title ?? 'Meeting';
+    const location = body.location
+      ? {
+          name: body.location.name ?? null,
+          address: body.location.address ?? null,
+          lat: body.location.lat ?? null,
+          lng: body.location.lng ?? null,
+          placeId: body.location.placeId ?? null,
+        }
+      : null;
     const { meetingId, participants } = await createMeeting(organizerId, {
       title,
       participants: body.participants ?? [],
@@ -77,15 +86,31 @@ export async function registerMeetingRoutes(app: FastifyInstance): Promise<void>
       endsAt,
       type: body.type,
       reminders: body.reminders,
+      location,
     });
 
     const organizer = await getUserById(organizerId);
     const organizerName =
       body.organizerName?.trim() || organizer?.display_name?.trim() || 'A business';
-    await sendMeetingInvites(organizerId, organizerName, title, participants);
-    await broadcastMeetingUpdate(meetingId, 'created');
 
     const state = await getMeeting(meetingId);
+    if (state) {
+      await sendMeetingInvites(
+        organizerId,
+        organizerName,
+        {
+          id: meetingId,
+          title: state.title,
+          startsAt: state.startsAt,
+          endsAt: state.endsAt,
+          type: state.type,
+          location: state.location,
+        },
+        participants,
+      );
+    }
+    await broadcastMeetingUpdate(meetingId, 'created');
+
     return reply.code(201).send({ meetingId, state });
   });
 
@@ -116,7 +141,19 @@ export async function registerMeetingRoutes(app: FastifyInstance): Promise<void>
       const organizer = await getUserById(userId);
       const organizerName =
         body.organizerName?.trim() || organizer?.display_name?.trim() || 'A business';
-      await sendMeetingInvites(userId, organizerName, state.title, added);
+      await sendMeetingInvites(
+        userId,
+        organizerName,
+        {
+          id: meetingId,
+          title: state.title,
+          startsAt: state.startsAt,
+          endsAt: state.endsAt,
+          type: state.type,
+          location: state.location,
+        },
+        added,
+      );
       await broadcastMeetingUpdate(meetingId, 'participants');
       return { added };
     },

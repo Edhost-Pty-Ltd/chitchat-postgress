@@ -89,15 +89,23 @@ export async function updateCallStatus(
   );
 }
 
+/**
+ * Per-party history status. 'no_answer' is caller-side only: an unanswered call
+ * is an outgoing "no answer" for the caller and a 'missed' for the callee.
+ */
+export type HistoryStatus = 'completed' | 'missed' | 'rejected' | 'busy' | 'failed' | 'no_answer';
+
 export async function addCallHistory(entry: {
   userId: string;
   callId: string;
   otherParty: CallParticipant;
   type: CallType;
   direction: 'incoming' | 'outgoing';
-  status: 'completed' | 'missed' | 'rejected' | 'busy' | 'failed';
+  status: HistoryStatus;
   durationSec: number | null;
 }): Promise<void> {
+  // A re-write for the same (user, call) updates status/duration but must NOT
+  // reset `seen` — leaving it out of the SET preserves whatever it was.
   await query(
     `INSERT INTO call_history (user_id, call_id, other_party, type, direction, status, duration_sec)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -115,6 +123,11 @@ export async function addCallHistory(entry: {
   );
 }
 
+/** Mark all of a user's unseen call-history rows as seen (clears the badge). */
+export async function markCallsSeen(userId: string): Promise<void> {
+  await query('UPDATE call_history SET seen = true WHERE user_id = $1 AND seen = false', [userId]);
+}
+
 export interface HistoryItem {
   callId: string;
   otherParty: CallParticipant;
@@ -123,6 +136,7 @@ export interface HistoryItem {
   status: string;
   durationSec: number | null;
   timestamp: string;
+  seen: boolean;
 }
 
 export async function listCallHistory(
@@ -145,8 +159,9 @@ export async function listCallHistory(
     status: string;
     duration_sec: number | null;
     created_at: Date;
+    seen: boolean;
   }>(
-    `SELECT call_id, other_party, type, direction, status, duration_sec, created_at
+    `SELECT call_id, other_party, type, direction, status, duration_sec, created_at, seen
        FROM call_history WHERE user_id = $1 ${keyset}
       ORDER BY created_at DESC, call_id DESC
       LIMIT ${limit + 1}`,
@@ -162,6 +177,7 @@ export async function listCallHistory(
     status: r.status,
     durationSec: r.duration_sec,
     timestamp: r.created_at.toISOString(),
+    seen: r.seen,
   }));
   const last = rows[rows.length - 1];
   return {

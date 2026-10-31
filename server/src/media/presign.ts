@@ -169,6 +169,23 @@ export async function deleteObject(objectKey: string): Promise<void> {
 }
 
 /**
+ * Write bytes directly to the store server-side. Unlike presignUpload (which
+ * only issues a URL for someone else to PUT to), this performs the upload
+ * itself. Used by the Firebase data migration script to re-host media that
+ * used to live in Firebase Storage.
+ */
+export async function putObjectBuffer(
+  objectKey: string,
+  body: Buffer,
+  contentType: string,
+): Promise<void> {
+  const env = getEnv();
+  await s3().send(
+    new PutObjectCommand({ Bucket: env.S3_BUCKET, Key: objectKey, Body: body, ContentType: contentType }),
+  );
+}
+
+/**
  * Authorize that a caller may write the requested category. Avatars/status are
  * always self-scoped (the key embeds the caller's id). Chat/group/meeting keys
  * require membership, checked by the route before calling this. Here we enforce

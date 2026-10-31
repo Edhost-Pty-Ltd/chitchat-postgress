@@ -5,8 +5,8 @@
 // URLs at render time through mediaService.getDownloadUrl.
 
 import { endpoints } from '../api/endpoints';
-import type { OrderPayload, ContactPayload } from '../api/endpoints';
-import { mediaService, fileSize } from '../services/mediaService';
+import type { OrderPayload, ContactPayload, BackendMessage } from '../api/endpoints';
+import { mediaService, fileSize, type MediaUploadProgress } from '../services/mediaService';
 import { getFileExtension } from '../utils/fileUtils';
 import { fetchUserPrivacySettings } from './usePrivacySettings';
 
@@ -121,36 +121,52 @@ export async function sendVoiceMessage(
   }
 }
 
+export interface SendMediaResult {
+  success: boolean;
+  messageId: string;
+  message?: BackendMessage;
+  error?: string;
+}
+
+type MediaProgressCallback = (percentage: number, detail: MediaUploadProgress) => void;
+
 // ── Send an image message ─────────────────────────────────────────────────────
 export async function sendImageMessage(
   chatId: string,
   senderId: string,
   imageUri: string,
-  onProgress?: (progress: number) => void,
+  onProgress?: MediaProgressCallback,
   caption?: string | null,
-): Promise<{ success: boolean; messageId: string }> {
+  clientId?: string,
+): Promise<SendMediaResult> {
   try {
-    onProgress?.(0);
     const sizeBytes = await fileSize(imageUri);
-    const mediaObjectKey = await mediaService.upload(imageUri, 'chat-media', {
-      chatId,
-      sizeBytes,
-      ext: getFileExtension(imageUri),
-    });
-    onProgress?.(100);
+    const mediaObjectKey = await mediaService.upload(
+      imageUri,
+      'chat-media',
+      {
+        chatId,
+        sizeBytes,
+        ext: getFileExtension(imageUri),
+      },
+      (detail) => onProgress?.(detail.percentage, detail),
+    );
 
     const trimmedCaption = caption?.trim() || null;
-
     const res = await endpoints.sendMessage(chatId, {
+      clientId,
       type: 'image',
       text: trimmedCaption,
       mediaObjectKey,
     });
-    if (!res.ok) return { success: false, messageId: '' };
-    return { success: true, messageId: res.data.message.id };
+    if (!res.ok) {
+      return { success: false, messageId: '', error: res.error.message };
+    }
+    return { success: true, messageId: res.data.message.id, message: res.data.message };
   } catch (err) {
+    const message = err instanceof Error ? err.message : 'Image upload failed';
     console.error('sendImageMessage error:', err);
-    return { success: false, messageId: '' };
+    return { success: false, messageId: '', error: message };
   }
 }
 
@@ -160,17 +176,22 @@ export async function sendVideoMessage(
   senderId: string,
   videoUri: string,
   thumbnailUri?: string,
-  onProgress?: (progress: number) => void,
+  onProgress?: MediaProgressCallback,
   caption?: string | null,
-): Promise<{ success: boolean; messageId: string }> {
+  clientId?: string,
+): Promise<SendMediaResult> {
   try {
-    onProgress?.(0);
     const videoSize = await fileSize(videoUri);
-    const mediaObjectKey = await mediaService.upload(videoUri, 'chat-media', {
-      chatId,
-      sizeBytes: videoSize,
-      ext: getFileExtension(videoUri),
-    });
+    const mediaObjectKey = await mediaService.upload(
+      videoUri,
+      'chat-media',
+      {
+        chatId,
+        sizeBytes: videoSize,
+        ext: getFileExtension(videoUri),
+      },
+      (detail) => onProgress?.(detail.percentage, detail),
+    );
 
     let thumbnailObjectKey: string | null = null;
     if (thumbnailUri) {
@@ -181,21 +202,23 @@ export async function sendVideoMessage(
         ext: 'jpg',
       });
     }
-    onProgress?.(100);
 
     const trimmedCaption = caption?.trim() || null;
-
     const res = await endpoints.sendMessage(chatId, {
+      clientId,
       type: 'video',
       text: trimmedCaption,
       mediaObjectKey,
       thumbnailObjectKey,
     });
-    if (!res.ok) return { success: false, messageId: '' };
-    return { success: true, messageId: res.data.message.id };
+    if (!res.ok) {
+      return { success: false, messageId: '', error: res.error.message };
+    }
+    return { success: true, messageId: res.data.message.id, message: res.data.message };
   } catch (err) {
+    const message = err instanceof Error ? err.message : 'Video upload failed';
     console.error('sendVideoMessage error:', err);
-    return { success: false, messageId: '' };
+    return { success: false, messageId: '', error: message };
   }
 }
 
@@ -267,27 +290,50 @@ export async function sendNumberChangeNotification(
   }
 }
 
+// ── Catalog media identity helpers ───────────────────────────────────────────
+// SDK 57's native upload API takes a local file URI. An http(s) value here is
+// a short-lived display/download URL, not a file to upload and not a durable
+// object key. Bare object keys have no URI scheme.
+const LOCAL_MEDIA_URI_RE = /^(file:|content:|assets-library:|ph:|blob:|data:)/i;
+const URI_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
+
+function asObjectKey(value: string | null | undefined): string | null {
+  if (!value || URI_SCHEME_RE.test(value) || value.startsWith('/')) return null;
+  return value;
+}
+
+async function catalogImageKey(
+  chatId: string,
+  imageUri: string | null | undefined,
+  existingKey: string | null | undefined,
+): Promise<string | null> {
+  const durableKey = asObjectKey(existingKey) ?? asObjectKey(imageUri);
+  if (durableKey) return durableKey;
+  if (!imageUri || !LOCAL_MEDIA_URI_RE.test(imageUri)) return null;
+
+  const sizeBytes = await fileSize(imageUri);
+  if (sizeBytes <= 0) throw new Error('Catalog image file is unavailable');
+  return mediaService.upload(imageUri, 'chat-media', {
+    chatId,
+    sizeBytes,
+    ext: getFileExtension(imageUri),
+  });
+}
+
 // ── Send a catalog product-card message ───────────────────────────────────────
-// Writes a message of type 'catalog' with the full CatalogItem embedded so the
-// receiver sees name/price/image without fetching the sender's profile. If the
-// item image is a local URI it is uploaded first and the catalogItem carries an
-// object key; otherwise the existing value is kept (may already be an object
-// key stored in the catalog).
+// Reuse an existing catalog image OBJECT KEY whenever available. Only a true
+// local URI is uploaded; presigned HTTPS display URLs must never be re-uploaded.
 export async function sendCatalogItemMessage(
   chatId:    string,
   senderId:  string,
   item:      import('../types').CatalogItem,
 ): Promise<{ success: boolean; messageId: string }> {
   try {
-    let imageObjectKey: string | null = item.imageUri ?? null;
-    if (imageObjectKey && /^(file:|content:|https?:|assets-library:|ph:)/i.test(imageObjectKey)) {
-      const sizeBytes = await fileSize(imageObjectKey);
-      imageObjectKey = await mediaService.upload(imageObjectKey, 'chat-media', {
-        chatId,
-        sizeBytes,
-        ext: getFileExtension(imageObjectKey),
-      });
-    }
+    const imageObjectKey = await catalogImageKey(
+      chatId,
+      item.imageUri,
+      item.imageObjectKey,
+    );
 
     const res = await endpoints.sendMessage(chatId, {
       type: 'catalog',
@@ -350,7 +396,10 @@ export interface OrderLineItem {
   id: string;
   name: string;
   price: string;
+  /** Temporary/local URI for the immediate UI preview. */
   imageUri: string | null;
+  /** Durable catalog object key sent in the order payload. */
+  imageObjectKey?: string | null;
   quantity: number;
 }
 export async function sendOrderMessage(
@@ -365,15 +414,11 @@ export async function sendOrderMessage(
 
     const orderItems: OrderPayload['items'] = await Promise.all(
       items.map(async (it) => {
-        let imageObjectKey: string | null = it.imageUri ?? null;
-        if (imageObjectKey && /^(file:|content:|https?:|assets-library:|ph:)/i.test(imageObjectKey)) {
-          const sizeBytes = await fileSize(imageObjectKey);
-          imageObjectKey = await mediaService.upload(imageObjectKey, 'chat-media', {
-            chatId,
-            sizeBytes,
-            ext: getFileExtension(imageObjectKey),
-          });
-        }
+        const imageObjectKey = await catalogImageKey(
+          chatId,
+          it.imageUri,
+          it.imageObjectKey,
+        );
         return {
           id: it.id,
           name: it.name,

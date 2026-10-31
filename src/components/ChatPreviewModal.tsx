@@ -8,7 +8,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  View, Modal, Pressable, StyleSheet, ScrollView, ActivityIndicator, Text, Animated, Easing, TouchableOpacity, Dimensions,
+  View, Modal, Pressable, StyleSheet, ScrollView, ActivityIndicator, Text, Animated, Easing, TouchableOpacity, Dimensions, Alert,
 } from 'react-native';
 import { endpoints } from '../api/endpoints';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
@@ -47,6 +47,8 @@ export interface PreviewAction {
   label: string;
   icon: string;
   destructive?: boolean;
+  /** Optional one-line explanation shown when the (i) icon is tapped / row long-pressed. */
+  hint?: string;
   onPress: () => void;
 }
 
@@ -226,6 +228,8 @@ export function ChatPreviewModal({
                     style={[styles.actionRow, i < actions.length - 1 && styles.actionRowBorder]}
                     activeOpacity={0.7}
                     onPress={a.onPress}
+                    onLongPress={() => a.hint && Alert.alert(a.label, a.hint)}
+                    delayLongPress={300}
                   >
                     <AppIcon
                       name={a.icon as any}
@@ -236,6 +240,15 @@ export function ChatPreviewModal({
                     <AppText style={[styles.actionLabel, { color: a.destructive ? COLORS.missed : textColor }]}>
                       {a.label}
                     </AppText>
+                    {a.hint ? (
+                      <TouchableOpacity
+                        style={styles.actionInfo}
+                        hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                        onPress={() => Alert.alert(a.label, a.hint!)}
+                      >
+                        <AppIcon name="information-circle-outline" size={18} color={FG.secondary} />
+                      </TouchableOpacity>
+                    ) : null}
                   </TouchableOpacity>
                 ))}
               </View>
@@ -285,6 +298,7 @@ const styles = StyleSheet.create({
     borderBottomColor: 'rgba(150,150,160,0.15)',
   },
   actionLabel: { fontSize: 15, fontWeight: '600' },
+  actionInfo: { marginLeft: 'auto', padding: 2 },
 
   header: {
     paddingHorizontal: 18, paddingTop: 16, paddingBottom: 10,

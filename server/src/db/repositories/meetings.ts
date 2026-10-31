@@ -2,6 +2,14 @@ import { query, withTransaction } from '../pool.js';
 
 export type MeetingType = 'online' | 'in-person';
 
+export interface MeetingLocation {
+  name: string | null;
+  address: string | null;
+  lat: number | null;
+  lng: number | null;
+  placeId: string | null;
+}
+
 export interface MeetingState {
   id: string;
   title: string;
@@ -13,6 +21,8 @@ export interface MeetingState {
   startsAt: string;
   endsAt: string;
   type: MeetingType;
+  /** Physical place for in-person meetings; null for virtual. */
+  location: MeetingLocation | null;
   reminders: number[];
   minutes: string | null;
   minutesGeneratedAt: string | null;
@@ -41,6 +51,11 @@ interface MeetingRow {
   reminders: number[] | null;
   minutes: string | null;
   minutes_generated_at: Date | null;
+  location_name: string | null;
+  location_address: string | null;
+  location_lat: number | null;
+  location_lng: number | null;
+  location_place_id: string | null;
 }
 
 interface ParticipantRow {
@@ -67,6 +82,16 @@ function buildState(row: MeetingRow, parts: ParticipantRow[], recordingCount: nu
     startsAt: startsAt.toISOString(),
     endsAt: endsAt.toISOString(),
     type: row.type ?? 'online',
+    location:
+      row.location_name || row.location_address || row.location_lat != null
+        ? {
+            name: row.location_name,
+            address: row.location_address,
+            lat: row.location_lat,
+            lng: row.location_lng,
+            placeId: row.location_place_id,
+          }
+        : null,
     reminders: row.reminders ?? [60, 30, 15, 10],
     minutes: row.minutes,
     minutesGeneratedAt: row.minutes_generated_at ? row.minutes_generated_at.toISOString() : null,
@@ -86,6 +111,7 @@ export interface CreateMeetingInput {
   endsAt?: Date | null;
   type?: MeetingType;
   reminders?: number[];
+  location?: MeetingLocation | null;
 }
 
 /**
@@ -99,10 +125,13 @@ export async function createMeeting(
 ): Promise<{ meetingId: string; participants: string[] }> {
   const startsAt = input.startsAt ?? new Date();
   const endsAt = input.endsAt ?? new Date(startsAt.getTime() + 60 * 60 * 1000);
+  const loc = input.type === 'in-person' ? input.location ?? null : null;
   return withTransaction(async (client) => {
     const res = await client.query<{ id: string }>(
-      `INSERT INTO meetings (title, organizer_id, starts_at, ends_at, type, reminders)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      `INSERT INTO meetings
+         (title, organizer_id, starts_at, ends_at, type, reminders,
+          location_name, location_address, location_lat, location_lng, location_place_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
       [
         input.title,
         organizerId,
@@ -110,6 +139,11 @@ export async function createMeeting(
         endsAt,
         input.type ?? 'online',
         input.reminders ?? [60, 30, 15, 10],
+        loc?.name ?? null,
+        loc?.address ?? null,
+        loc?.lat ?? null,
+        loc?.lng ?? null,
+        loc?.placeId ?? null,
       ],
     );
     const meetingId = res.rows[0].id;

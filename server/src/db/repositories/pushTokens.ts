@@ -11,6 +11,12 @@ export async function addPushToken(
   platform: string | null,
   deviceId: string | null = null,
 ): Promise<void> {
+  // A push token identifies one physical device, which belongs to exactly one
+  // user at a time — whoever is currently signed in on it. Clear the token from
+  // any previous owner first, so a notification meant for them is never
+  // delivered to this device after a different account signs in (otherwise the
+  // sender, who used this device earlier, keeps receiving the recipient's push).
+  await query('DELETE FROM push_tokens WHERE token = $1 AND user_id <> $2', [token, userId]);
   await query(
     `INSERT INTO push_tokens (user_id, token, platform, device_id)
      VALUES ($1, $2, $3, $4)

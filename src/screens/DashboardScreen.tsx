@@ -29,6 +29,8 @@ import {
 } from '../context/ThemeContext';
 import { useMessageAnalytics, deliveryRate, readRate } from '../hooks/useMessageAnalytics';
 import { INDUSTRY_CATEGORIES } from '../types';
+import IdentityVerificationBadge from '../components/IdentityVerificationBadge';
+import { socketClient } from '../realtime/socket';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList>;
 
@@ -50,6 +52,8 @@ interface UserProfile {
   profileViews?:       number;
   profileViewsToday?:  number;
   profileViewsResetAt?: any;
+  identityVerified?: boolean;
+  identityVerifiedAt?: string | null;
   // Enhanced profile fields
   industry?:       string;
   description?:    string;
@@ -152,6 +156,8 @@ export default function DashboardScreen() {
           description:  me.about ?? undefined,
           address:      me.address ?? undefined,
           workSchedule: me.workSchedule ?? undefined,
+          identityVerified: me.identityVerified,
+          identityVerifiedAt: me.identityVerifiedAt,
           profileViews: viewsRes.ok ? viewsRes.data.profileViews : 0,
           profileViewsToday: viewsRes.ok ? viewsRes.data.profileViewsToday : 0,
         });
@@ -168,6 +174,21 @@ export default function DashboardScreen() {
   useEffect(() => {
     void loadProfile();
   }, [loadProfile]);
+
+  useEffect(() => {
+    if (!userId) return;
+    return socketClient.subscribe('user:identity-status', (raw) => {
+      const payload = raw as { userId?: string; identityVerified?: boolean; verifiedAt?: string | null } | null;
+      if (payload?.userId !== userId || typeof payload.identityVerified !== 'boolean') return;
+      setProfile((current) => current
+        ? {
+            ...current,
+            identityVerified: payload.identityVerified!,
+            identityVerifiedAt: payload.verifiedAt ?? null,
+          }
+        : current);
+    });
+  }, [userId]);
 
   // ── Chat-based live analytics ─────────────────────────────────────────────
   const analytics = useMemo(() => {
@@ -312,9 +333,10 @@ export default function DashboardScreen() {
                     <AppText style={[styles.bizName, { color: textColor, fontFamily }]} numberOfLines={1}>
                       {displayName || 'Business'}
                     </AppText>
-                    <LinearGradient colors={GRADIENTS.primary} style={styles.verifiedBadge}>
-                      <AppIcon name="checkmark" size={10} color="#fff" fixedColor />
-                    </LinearGradient>
+                    <IdentityVerificationBadge
+                      verified={profile?.identityVerified === true}
+                      compact
+                    />
                   </View>
                   <AppText style={[styles.bizSub, { color: FG.secondary }]} numberOfLines={1}>
                     {profile?.phone || phone || 'Business account'}
