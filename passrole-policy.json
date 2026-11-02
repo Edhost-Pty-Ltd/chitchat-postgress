@@ -1,0 +1,20 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PassEcsRolesForExpress",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole",
+        "iam:GetRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::389890955689:role/ecsInfrastructureRoleForExpressServices",
+        "arn:aws:iam::389890955689:role/ecsTaskExecutionRole"
+      ],
+      "Condition": {
+        "StringEquals": { "iam:PassedToService": "ecs.amazonaws.com" }
+      }
+    }
+  ]
+}

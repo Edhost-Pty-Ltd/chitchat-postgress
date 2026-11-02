@@ -255,29 +255,64 @@ export default function StatusScreen() {
     const color = stringToColor(name);
     const initials = getInitials(name);
 
+    // Find the latest status's media for thumbnail preview (newest first)
+    const sorted   = [...item.statuses].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    const latest   = sorted[0];
+    // Prefer explicit thumbnail, fall back to mediaUrl for images, null for text-only
+    const thumbUrl =
+      (latest?.thumbnailUrl && /^https?:/.test(latest.thumbnailUrl) ? latest.thumbnailUrl : null) ??
+      (latest?.mediaType === 'image' && latest.mediaUrl && /^https?:/.test(latest.mediaUrl)
+        ? latest.mediaUrl
+        : null);
+    const isTextStatus = latest?.mediaType === 'text';
+    const textBg = latest?.backgroundColor ?? color;
+
     return (
       <TouchableOpacity
         style={[styles.statusCard, bevel]}
         activeOpacity={0.75}
         onPress={() => handleViewContactStatus(item)}
       >
-        {/* Avatar with gradient ring */}
+        {/* ── Thumbnail ring (WhatsApp-style) ─────────────────────────── */}
         <LinearGradient
-          colors={item.hasUnviewed ? [color, COLORS.blue] : ['#888888', '#666666']}
+          colors={item.hasUnviewed ? [color, COLORS.blue] : ['#C7C7CC', '#AEAEB2']}
           style={styles.ring}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
         >
           <View style={styles.ringInner}>
-            {visiblePhoto ? (
-              <Image source={{ uri: visiblePhoto }} style={styles.avatarImage} />
+            {thumbUrl ? (
+              /* Media thumbnail fills the circle */
+              <Image
+                source={{ uri: thumbUrl }}
+                style={styles.avatarImage}
+                contentFit="cover"
+              />
+            ) : isTextStatus ? (
+              /* Text status — show coloured background with first letter of caption */
+              <View style={[styles.avatarCircle, { backgroundColor: textBg }]}>
+                <AppText style={styles.avatarText} numberOfLines={2}>
+                  {latest.caption?.slice(0, 2) ?? 'T'}
+                </AppText>
+              </View>
+            ) : visiblePhoto ? (
+              /* No media yet (URL still resolving) — fall back to profile photo */
+              <Image source={{ uri: visiblePhoto }} style={styles.avatarImage} contentFit="cover" />
             ) : (
+              /* Final fallback: initials */
               <View style={[styles.avatarCircle, { backgroundColor: color }]}>
                 <AppText style={styles.avatarText}>{initials}</AppText>
               </View>
             )}
           </View>
         </LinearGradient>
+
+        {/* Small profile-photo badge overlaid on the bottom-right of the ring */}
+        {visiblePhoto && thumbUrl && (
+          <View style={styles.badgeWrap}>
+            <Image source={{ uri: visiblePhoto }} style={styles.badgeImage} contentFit="cover" />
+          </View>
+        )}
 
         <View style={styles.statusMeta}>
           <AppText style={[styles.statusName, { color: textColor, fontFamily }]}>
@@ -486,9 +521,27 @@ const styles = StyleSheet.create({
     borderRadius: 22,
   },
   avatarText: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
     color: '#ffffff',
+    textAlign: 'center',
+  },
+  // Small profile photo badge overlaid on the thumbnail ring
+  badgeWrap: {
+    position: 'absolute',
+    left: 40,   // right edge of the ~54px ring minus badge overlap
+    top: 38,    // bottom edge of the ring minus badge overlap
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: COLORS.sky1,
+    overflow: 'hidden',
+    zIndex: 2,
+  },
+  badgeImage: {
+    width: '100%',
+    height: '100%',
   },
   statusMeta: { flex: 1 },
   statusName: { fontSize: 14, fontWeight: '700', color: COLORS.text },

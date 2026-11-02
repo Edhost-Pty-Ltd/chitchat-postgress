@@ -693,6 +693,18 @@ function SelectContactSheet({
     ? contacts.filter((c) => c.displayName.toLowerCase().includes(searchQuery.toLowerCase()))
     : contacts;
 
+  // Partition into on-app (sorted A-Z, already sorted by useContacts) and off-app
+  const onApp  = filtered.filter((c) => c.isSaved);
+  const offApp = filtered.filter((c) => !c.isSaved);
+
+  const handleInvite = async (c: AppContact) => {
+    try {
+      await Share.share({
+        message: `Hey ${c.displayName}! I'm using Chit-Chat Business to stay connected. Join me here: https://chitchatbusiness.app`,
+      });
+    } catch { /* dismissed */ }
+  };
+
   if (mode === 'newContact') {
     return <NewContactSheet onBack={() => setMode('select')} onDone={onClose} reloadContacts={reloadContacts} />;
   }
@@ -742,7 +754,6 @@ function SelectContactSheet({
         ) : (
           <View style={{ flex: 1 }}>
             <AppText style={[styles.sheetTitle, { color: textColor }]}>Select contact</AppText>
-            <AppText style={[styles.sheetSub, { color: FG.secondary }]}>{contacts.length} contacts</AppText>
           </View>
         )}
 
@@ -820,20 +831,71 @@ function SelectContactSheet({
         </View>
       ) : (
         <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
-          {filtered.map((c) => (
-            <TouchableOpacity key={c.userId} style={[styles.contactRow, bevel]} activeOpacity={0.75}
-              onPress={() => { setMenuOpen(false); onNavigate(c); }}>
+          {/* ── On Chit-Chat contacts, grouped A-Z ── */}
+          {onApp.length > 0 && (() => {
+            const rows: React.ReactNode[] = [];
+            let lastLetter = '';
+            for (const c of onApp) {
+              const first = c.displayName.trim()[0]?.toUpperCase() ?? '#';
+              const letter = /[A-Z]/.test(first) ? first : '#';
+              if (letter !== lastLetter) {
+                lastLetter = letter;
+                rows.push(
+                  <View key={`letter-${letter}`} style={styles.sheetLetterHeader}>
+                    <AppText style={styles.sheetLetterText}>{letter}</AppText>
+                  </View>
+                );
+              }
+              rows.push(
+                <TouchableOpacity key={c.userId} style={[styles.contactRow, bevel]} activeOpacity={0.75}
+                  onPress={() => { setMenuOpen(false); onNavigate(c); }}>
+                  <ChatAvatar
+                    displayName={c.displayName}
+                    contactPhotoUri={c.photoUri}
+                    firebasePhotoURL={c.firebasePhotoURL}
+                    isSavedContact={c.isSaved}
+                  />
+                  <View style={styles.contactMeta}>
+                    <AppText style={[styles.contactName, { color: textColor }]}>{c.displayName}</AppText>
+                  </View>
+                </TouchableOpacity>
+              );
+            }
+            return rows;
+          })()}
+
+          {/* ── Invite divider ── */}
+          {offApp.length > 0 && (
+            <View style={styles.sheetInviteDivider}>
+              <AppText style={[styles.sheetInviteDividerText, { color: textColor }]}>
+                Invite to Chit-Chat
+              </AppText>
+            </View>
+          )}
+
+          {/* ── Off-app contacts with Invite button ── */}
+          {offApp.map((c) => (
+            <View key={`invite-${c.userId}`} style={[styles.contactRow, bevel]}>
               <ChatAvatar
                 displayName={c.displayName}
                 contactPhotoUri={c.photoUri}
-                firebasePhotoURL={c.firebasePhotoURL}
-                isSavedContact={c.isSaved}
+                firebasePhotoURL={undefined}
+                isSavedContact={false}
               />
               <View style={styles.contactMeta}>
                 <AppText style={[styles.contactName, { color: textColor }]}>{c.displayName}</AppText>
-                <AppText style={[styles.contactSub, { color: FG.secondary }]} numberOfLines={1}>{formatSAPhone(c.phone)}</AppText>
+                <AppText style={[styles.contactSub, { color: FG.secondary }]} numberOfLines={1}>
+                  {formatSAPhone(c.phone)}
+                </AppText>
               </View>
-            </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.sheetInviteBtn}
+                activeOpacity={0.75}
+                onPress={() => handleInvite(c)}
+              >
+                <AppText style={styles.sheetInviteBtnText}>Invite</AppText>
+              </TouchableOpacity>
+            </View>
           ))}
         </ScrollView>
       )}
@@ -2985,6 +3047,48 @@ const styles = StyleSheet.create({
   contactMeta: { flex: 1 },
   contactName: { fontSize: 14, fontWeight: '600', color: COLORS.text },
   contactSub:  { fontSize: 12, color: COLORS.sub, marginTop: 2 },
+
+  // ── Letter section header inside the sheet ────────────────────────────────
+  sheetLetterHeader: {
+    paddingHorizontal: 28,
+    paddingTop: 12,
+    paddingBottom: 2,
+  },
+  sheetLetterText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.blue,
+    letterSpacing: 0.6,
+  },
+
+  // ── "Invite to Chit-Chat" divider inside the sheet ────────────────────────
+  sheetInviteDivider: {
+    marginHorizontal: 0,
+    marginTop: 16,
+    marginBottom: 8,
+    paddingVertical: 9,
+    paddingHorizontal: 28,
+    backgroundColor: COLORS.sky2,
+  },
+  sheetInviteDividerText: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+
+  // ── Invite button inside the sheet ───────────────────────────────────────
+  sheetInviteBtn: {
+    paddingHorizontal: 13,
+    paddingVertical: 6,
+    borderRadius: RADIUS.full,
+    backgroundColor: 'rgba(9,178,238,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(9,178,238,0.25)',
+  },
+  sheetInviteBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.blue,
+  },
 
   checkbox:   { width: 24, height: 24, borderRadius: 12, borderWidth: 1.5, borderColor: COLORS.sub, alignItems: 'center', justifyContent: 'center' },
   checkboxOn: { backgroundColor: COLORS.blue, borderColor: COLORS.blue },
