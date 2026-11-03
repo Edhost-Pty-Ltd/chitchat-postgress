@@ -95,8 +95,6 @@
       ],
       "expo-video",
       [
-      "expo-video",
-      [
         "expo-notifications",
         {
           "color": "#0A2463",

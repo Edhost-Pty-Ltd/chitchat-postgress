@@ -28,6 +28,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { endpoints } from '../api/endpoints';
 import { socketClient } from '../realtime/socket';
 import { mediaService } from '../services/mediaService';
+import { useNetworkState } from '../hooks/useNetworkState';
+import { useOutboxFlusher } from '../hooks/useOutbox';
 import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
 import { RootStackParamList } from '../types';
 
@@ -87,6 +89,14 @@ function formatTime(date: Date | null): string {
   if (days === 1) return 'Yesterday';
   if (days < 7) return date.toLocaleDateString([], { weekday: 'long' });
   return date.toLocaleDateString([], { day: '2-digit', month: '2-digit' });
+}
+
+/** Short "m:ss" duration used in the voice-note preview pill. */
+function formatVoiceDuration(seconds: number): string {
+  const safe = Math.max(0, Math.floor(seconds));
+  const m = Math.floor(safe / 60);
+  const s = safe % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
 function stringToColor(str: string): string {
@@ -310,7 +320,15 @@ const ChatRow = memo(function ChatRow({
   isSavedContact, hasStatus, userId, bevel, textColor, fontFamily,
   FGsecondary, onPress, onLongPress, senderInfo, isPinned, isMuted, isFavourite,
 }: ChatRowProps) {
-  const isVoiceNote = item.lastMessage === '[Voice Note]';
+  // Robust voice-note detection. Older messages use the literal
+  // "[Voice Note]" marker; newer ones may append a duration like
+  // "[Voice Note:12s]". Both are handled here so the preview works
+  // before and after a server rollout.
+  const voiceMatch = typeof item.lastMessage === 'string'
+    ? item.lastMessage.match(/^\[Voice Note(?::(\d+)s)?\]$/)
+    : null;
+  const isVoiceNote = !!voiceMatch;
+  const voiceNoteSeconds = voiceMatch?.[1] ? parseInt(voiceMatch[1], 10) : null;
 
   const senderPrefix = (() => {
     if (!item.lastSenderId) return '';
@@ -347,7 +365,10 @@ const ChatRow = memo(function ChatRow({
             <View style={styles.voiceNotePreview}>
               {senderPrefix ? <Text style={styles.chatPreview}>{senderPrefix}</Text> : null}
               <Ionicons name="mic" size={14} color={COLORS.sub} style={{ marginRight: 3 }} />
-              <Text style={styles.chatPreview}>Voice Note</Text>
+              <Text style={styles.chatPreview}>
+                Voice Note
+                {voiceNoteSeconds != null ? ` · ${formatVoiceDuration(voiceNoteSeconds)}` : ''}
+              </Text>
             </View>
           ) : (
             <Text style={styles.chatPreview} numberOfLines={2}>
@@ -1448,6 +1469,11 @@ export default function ChatsScreen() {
   const reloadChatsRef = useRef(reloadChats);
   reloadChatsRef.current = reloadChats;
 
+  // Network state — drives the offline banner and outbox flushing.
+  const { isOnline } = useNetworkState();
+  // Flush the outbox on mount and on reconnect (fires once per offline → online).
+  useOutboxFlusher();
+
   // A clear (here, in the chat screen or on another of my devices) hides that
   // chat's preview server-side; refresh the list when one happens.
   useEffect(() => {
@@ -2445,6 +2471,16 @@ export default function ChatsScreen() {
     <View style={styles.root}>
       <AppBg />
 
+      {/* ── Offline banner ── */}
+      {!isOnline && (
+        <View style={styles.offlineBanner}>
+          <AppIcon name="cloud-offline-outline" size={15} color="#fff" fixedColor />
+          <AppText fixedColor style={styles.offlineBannerText}>
+            No connection — messages will send when back online
+          </AppText>
+        </View>
+      )}
+
       <Modal visible={sheetOpen} transparent animationType="slide"
         onRequestClose={() => setSheetOpen(false)} statusBarTranslucent>
         <Pressable style={styles.overlay} onPress={() => setSheetOpen(false)} />
@@ -2877,18 +2913,23 @@ export default function ChatsScreen() {
           renderItem={renderChat}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.listContent}
-          ListHeaderComponent={FaceSetupPrompt}
           ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
           removeClippedSubviews
           maxToRenderPerBatch={10}
           windowSize={10}
           initialNumToRender={12}
+          // NOTE: Single `ListHeaderComponent` — the previous version had two
+          // props (the second overrode the first), which meant FaceSetupPrompt
+          // never rendered. Both are now rendered together.
           ListHeaderComponent={
-            chatsLoading ? (
-              <View style={styles.loadingRow}>
-                <ActivityIndicator size="small" color={COLORS.blue} />
-              </View>
-            ) : null
+            <>
+              <FaceSetupPrompt />
+              {chatsLoading && (
+                <View style={styles.loadingRow}>
+                  <ActivityIndicator size="small" color={COLORS.blue} />
+                </View>
+              )}
+            </>
           }
           ListEmptyComponent={
             <View style={styles.emptyWrap}>
@@ -2953,6 +2994,21 @@ export default function ChatsScreen() {
 // ─── Styles ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: COLORS.sky1 },
+
+  offlineBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#6b7280',
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+  },
+  offlineBannerText: {
+    fontSize: 12,
+    color: '#fff',
+    fontWeight: '500',
+  },
 
   avatarCircle: {
     width: 50, height: 50, borderRadius: 25,

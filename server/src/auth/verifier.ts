@@ -114,6 +114,7 @@ export async function verifyToken(
     verify?: (t: string) => Promise<DecodedToken>;
     syncPhone?: (id: string, phone: string | null) => Promise<void>;
     isLinked?: (ownerId: string, deviceId: string) => Promise<boolean>;
+    upsert?: (userId: string, phone: string | null) => Promise<void>;
     /**
      * Whether the decoded-token cache and recent-upsert cache may be used
      * (default true). The socket handshake passes false so every new
@@ -174,10 +175,15 @@ export async function verifyToken(
 
   const phoneNumber = decoded.phone_number ?? null;
   if (!isAnonymous) {
-    const upsert = deps.upsert ?? upsertUserOnFirstContact;
+    const upsert = deps.upsert ?? backfillPhoneIfRegistered;
     // Skip the per-request write when this uid was upserted within the TTL.
     if (!(cacheable && wasRecentlyUpserted(decoded.uid))) {
-      await upsert(decoded.uid, phoneNumber);
+      try {
+        await upsert(decoded.uid, phoneNumber);
+      } catch {
+        // Phone backfill is best-effort — a constraint violation or transient
+        // DB error must never turn an otherwise valid token into a 500.
+      }
       if (cacheable) markUpserted(decoded.uid);
     }
   }
@@ -192,12 +198,6 @@ export async function verifyToken(
   };
 }
 
-/**
- * The caches are only safe to use on the real verification path: when the
- * caller injects a custom `verify` or `upsert` (unit tests) we must always run
- * them directly, and when `useCache: false` (socket handshake) we force a fresh
- * verify.
- */
 function useCacheEnabled(deps: {
   verify?: unknown;
   upsert?: unknown;

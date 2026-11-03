@@ -8,6 +8,7 @@
 // only for low-frequency structural changes (chat:updated) and reconnects.
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { endpoints } from '../api/endpoints';
 import { socketClient } from '../realtime/socket';
 
@@ -65,6 +66,35 @@ function sortByRecent(list: ChatPreview[]): ChatPreview[] {
   });
 }
 
+// ── Local chat-list cache ─────────────────────────────────────────────────────
+const CHATS_CACHE_KEY = (userId: string) => `local_chats_${userId}`;
+
+async function saveChatsCache(userId: string, chats: ChatPreview[]): Promise<void> {
+  try {
+    const serialised = chats.map((c) => ({
+      ...c,
+      timestamp: c.timestamp ? c.timestamp.toISOString() : null,
+    }));
+    await AsyncStorage.setItem(CHATS_CACHE_KEY(userId), JSON.stringify(serialised));
+  } catch {
+    // Best-effort — never crash because of a cache write.
+  }
+}
+
+async function loadChatsCache(userId: string): Promise<ChatPreview[]> {
+  try {
+    const raw = await AsyncStorage.getItem(CHATS_CACHE_KEY(userId));
+    if (!raw) return [];
+    const parsed: any[] = JSON.parse(raw);
+    return parsed.map((c) => ({
+      ...c,
+      timestamp: c.timestamp ? new Date(c.timestamp) : null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export function useChats(userId: string | null) {
   const [chats,   setChats]   = useState<ChatPreview[]>([]);
   const [loading, setLoading] = useState(false);
@@ -95,10 +125,22 @@ export function useChats(userId: string | null) {
 
     const loadAll = async () => {
       const mapped = await fetchAll();
-      if (!active || !mapped) { if (active) setLoading(false); return; }
-      setChats(sortByRecent(mapped));
+      if (!active) { if (active) setLoading(false); return; }
+      if (mapped) {
+        const sorted = sortByRecent(mapped);
+        setChats(sorted);
+        void saveChatsCache(userId, sorted);
+      }
       setLoading(false);
     };
+
+    // Seed from local cache immediately so the list is visible while the
+    // network request is in flight (or if the device is offline).
+    loadChatsCache(userId).then((cached) => {
+      if (!active || cached.length === 0) return;
+      setChats(sortByRecent(cached));
+      setLoading(false);
+    });
 
     // Incremental: a new message updates only its chat row.
     const onNew = (payload: unknown) => {
@@ -165,7 +207,13 @@ export function useChats(userId: string | null) {
 
   const reload = useCallback(() => {
     if (!userIdRef.current) return;
-    void fetchAll().then((mapped) => { if (mapped) setChats(sortByRecent(mapped)); });
+    void fetchAll().then((mapped) => {
+      if (mapped) {
+        const sorted = sortByRecent(mapped);
+        setChats(sorted);
+        void saveChatsCache(userIdRef.current!, sorted);
+      }
+    });
   }, [fetchAll]);
 
   return { chats, loading, error, reload, markChatRead, setActiveChat };

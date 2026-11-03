@@ -21,6 +21,10 @@ import {
   updateLocalMessage, loadDeletedIds, addDeletedIds, clearDeletedIds,
 } from './useLocalMessages';
 import { CatalogItem } from '../types';
+import { checkIsOnline } from './useNetworkState';
+import {
+  enqueueOutbox, registerOutboxCallbacks, removeFromOutbox,
+} from './useOutbox';
 
 export interface FireMessage {
   messageId:    string;
@@ -45,7 +49,7 @@ export interface FireMessage {
   blockedMessage?: boolean;
   /** Client-only fields for an image/video that is preparing or uploading. */
   localMediaUri?: string | null;
-  uploadStatus?: 'preparing' | 'uploading' | 'sending' | 'failed';
+  uploadStatus?: 'pending' | 'preparing' | 'uploading' | 'sending' | 'failed';
   uploadProgress?: number;
   uploadBytesSent?: number;
   uploadBytesTotal?: number;
@@ -287,14 +291,14 @@ function mapBackendMessage(m: BackendMessage, urls: Record<string, string>): Fir
   };
 }
 
-// How many messages to request per page. The first page loads instantly; older
-// pages are fetched on demand when the user scrolls toward the top.
-const MESSAGE_PAGE_SIZE = 30;
-
 export function useMessages(chatId: string | null, ownerUid: string | null) {
   const [messages, setMessages] = useState<FireMessage[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
+  // Needed by async reconciliation so a server message can retain the local
+  // preview currently on screen until the remote URL is available/rendered.
+  const messagesRef = useRef<FireMessage[]>([]);
+  messagesRef.current = messages;
   // This user's server-side "cleared" cutoff (ms): messages at/before it are
   // hidden for this user only. Does not affect the other members.
   const [clearedAt, setClearedAt] = useState<number>(0);
@@ -335,14 +339,7 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
   }, [chatId]);
 
   // The cutoff belongs to one chat; it is re-read from the server on load.
-  // Also reset pagination state so a loadOlder fired right after a chat switch
-  // can't page the PREVIOUS chat's cursor into the new chat's list.
-  useEffect(() => {
-    setClearedAt(0);
-    nextCursorRef.current = null;
-    loadingMoreRef.current = false;
-    setHasMore(false);
-  }, [chatId]);
+  useEffect(() => { setClearedAt(0); }, [chatId]);
 
   // Apply the server's cutoff: hide everything at/before it now and prune the
   // local cache so a later reload can't bring those messages back.
@@ -389,40 +386,6 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     setMessages(withLocalPreview);
   }, []);
 
-  // Fetch the next (older) page of messages and merge it into the list. Called
-  // when the user scrolls toward the top. No-op when there's nothing older or a
-  // fetch is already in flight.
-  const loadOlder = useCallback(async () => {
-    const activeChatId = chatIdRef.current;
-    const cursor = nextCursorRef.current;
-    if (!activeChatId || !cursor || loadingMoreRef.current) return;
-
-    loadingMoreRef.current = true;
-    setLoadingMore(true);
-    try {
-      const res = await endpoints.listMessages(activeChatId, { cursor, limit: MESSAGE_PAGE_SIZE });
-      if (activeChatId !== chatIdRef.current) return; // chat switched mid-fetch
-      if (!res.ok) return;
-
-      nextCursorRef.current = res.data.nextCursor;
-      setHasMore(res.data.nextCursor != null);
-
-      const urls = await mediaService.getDownloadUrls(collectObjectKeys(res.data.messages));
-      if (activeChatId !== chatIdRef.current) return;
-      const mapped = res.data.messages
-        .filter((m) => !m.deletedForEveryone)
-        .map((m) => mapBackendMessage(m, urls));
-      if (mapped.length > 0) {
-        await mergeLocalMessages(activeChatId, mapped).catch(() => {});
-        const merged = await loadLocalMessages(activeChatId);
-        if (activeChatId === chatIdRef.current) setMessages(merged);
-      }
-    } finally {
-      loadingMoreRef.current = false;
-      setLoadingMore(false);
-    }
-  }, []);
-
   // Initial load + live socket updates.
   useEffect(() => {
     if (!chatId) return;
@@ -434,17 +397,13 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
       // the cutoff itself is only needed to prune the local cache, which may
       // predate a clear made on another device.
       const [res, cutoff] = await Promise.all([
-        endpoints.listMessages(chatId, { limit: MESSAGE_PAGE_SIZE }),
+        endpoints.listMessages(chatId),
         fetchClearedAt(chatId),
       ]);
       if (!active) return;
       if (cutoff > 0) await applyClearedAt(chatId, cutoff);
       if (!active) return;
       if (res.ok) {
-        // Remember where the next (older) page starts.
-        nextCursorRef.current = res.data.nextCursor;
-        setHasMore(res.data.nextCursor != null);
-
         const urls = await mediaService.getDownloadUrls(collectObjectKeys(res.data.messages));
         if (!active) return;
         const mapped = res.data.messages
@@ -491,53 +450,6 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
       if (chatIdRef.current) removeLocalMessage(chatIdRef.current, p.messageId).catch(() => {});
     };
 
-    // A recipient acknowledged delivery of one of OUR messages. The server
-    // emits { chatId, messageId, userId }; add that user to the message's
-    // deliveredTo list so the tick advances to the grey double-tick live.
-    const onDelivered = (payload: unknown) => {
-      const p = payload as { chatId?: string; messageId?: string; userId?: string };
-      if (!p?.messageId || !p.userId || p.chatId !== chatIdRef.current) return;
-      setMessages((prev) => {
-        let changed = false;
-        const next = prev.map((m) => {
-          if (m.messageId !== p.messageId) return m;
-          const delivered = m.deliveredTo ?? [];
-          if (delivered.includes(p.userId!)) return m;
-          changed = true;
-          return { ...m, deliveredTo: [...delivered, p.userId!] };
-        });
-        if (changed && chatIdRef.current) {
-          const updated = next.find((m) => m.messageId === p.messageId);
-          if (updated) mergeLocalMessages(chatIdRef.current, [updated]).catch(() => {});
-        }
-        return changed ? next : prev;
-      });
-    };
-
-    // A recipient read one or more of OUR messages. The server emits
-    // { chatId, messageIds, userId }; add that user to each message's readBy
-    // list so the tick turns blue live.
-    const onRead = (payload: unknown) => {
-      const p = payload as { chatId?: string; messageIds?: string[]; userId?: string };
-      if (!Array.isArray(p?.messageIds) || !p.userId || p.chatId !== chatIdRef.current) return;
-      const ids = new Set(p.messageIds);
-      setMessages((prev) => {
-        const touched: FireMessage[] = [];
-        const next = prev.map((m) => {
-          if (!ids.has(m.messageId)) return m;
-          const read = m.readBy ?? [];
-          if (read.includes(p.userId!)) return m;
-          const updated = { ...m, readBy: [...read, p.userId!] };
-          touched.push(updated);
-          return updated;
-        });
-        if (touched.length > 0 && chatIdRef.current) {
-          mergeLocalMessages(chatIdRef.current, touched).catch(() => {});
-        }
-        return touched.length > 0 ? next : prev;
-      });
-    };
-
     const onEditedOrPoll = (payload: unknown) => {
       const message = (payload as { message?: BackendMessage })?.message;
       if (!message || message.chatId !== chatIdRef.current) return;
@@ -554,8 +466,6 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     const unsubs = [
       socketClient.subscribe('message:new', onNew),
       socketClient.subscribe('message:deleted', onDeleted),
-      socketClient.subscribe('message:delivered', onDelivered),
-      socketClient.subscribe('message:read', onRead),
       socketClient.subscribe('message:edited', onEditedOrPoll),
       socketClient.subscribe('poll:updated', onEditedOrPoll),
       socketClient.subscribe('chat:cleared', onCleared),
@@ -571,8 +481,28 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
 
   async function sendMessage(text: string): Promise<boolean> {
     if (!chatId || !ownerUid || !text.trim()) return false;
+    const trimmed = text.trim();
+
+    // ── Offline path: add a pending bubble and queue for later ──────────
+    const online = await checkIsOnline();
+    if (!online) {
+      const clientId = `pending_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+      addOptimisticMessage({
+        messageId: clientId,
+        clientId,
+        senderId: ownerUid,
+        text: trimmed,
+        type: 'text',
+        timestamp: new Date(),
+        uploadStatus: 'pending',
+      });
+      await enqueueOutbox(chatId, clientId, trimmed);
+      return true;
+    }
+
+    // ── Online path: send immediately ───────────────────────────────────
     try {
-      const res = await endpoints.sendMessage(chatId, { type: 'text', text: text.trim() });
+      const res = await endpoints.sendMessage(chatId, { type: 'text', text: trimmed });
       if (!res.ok) { setError(errText(res.error)); return false; }
       await applyBackendMessages([res.data.message]);
       return true;
@@ -682,6 +612,42 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
     await applyBackendMessages([message]);
   }, [applyBackendMessages]);
 
+  /**
+   * Retry sending a message that is sitting in the outbox as 'failed'.
+   * Resets the bubble to 'pending' and re-queues it.
+   */
+  const retryPendingMessage = useCallback(async (clientId: string, text: string) => {
+    if (!chatId || !ownerUid || !text) return;
+    updateOptimisticMessage(clientId, { uploadStatus: 'pending', uploadError: null }, true);
+    await enqueueOutbox(chatId, clientId, text);
+    // Attempt an immediate flush (no-op if still offline).
+    const { flushOutbox } = await import('./useOutbox');
+    void flushOutbox();
+  }, [chatId, ownerUid, updateOptimisticMessage]);
+
+  // Register outbox callbacks so flushed messages update our bubbles.
+  useEffect(() => {
+    if (!chatId) return;
+    const unregister = registerOutboxCallbacks(
+      chatId,
+      // onPending: bubble is added by sendMessage before enqueue, no-op here
+      () => {},
+      // onSuccess: replace the pending bubble with the confirmed server message
+      (_clientId, backendMessage) => {
+        void applyBackendMessages([backendMessage]);
+      },
+      // onFailure: flip the bubble to failed so the user can retry
+      (clientId) => {
+        updateOptimisticMessage(clientId, {
+          uploadStatus: 'failed',
+          uploadError: 'Failed to send. Tap to retry.',
+        }, true);
+        void removeFromOutbox(clientId);
+      },
+    );
+    return unregister;
+  }, [chatId, applyBackendMessages, updateOptimisticMessage]);
+
   // Hide messages the user cleared for themselves (timestamp <= their cutoff)
   // and any they deleted "for me".
   const visibleMessages = messages.filter((m) => {
@@ -691,19 +657,16 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
   });
 
   return {
-   
     messages: visibleMessages,
     loading,
     error,
-   
     sendMessage,
     clearMessages,
     deleteMessage,
     addOptimisticMessage,
     updateOptimisticMessage,
     reconcileBackendMessage,
- ,
-    loadOlder, hasMore, loadingMore,
+    retryPendingMessage,
   };
 }
 

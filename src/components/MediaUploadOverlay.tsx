@@ -3,7 +3,7 @@ import { ActivityIndicator, StyleSheet, TouchableOpacity, View } from 'react-nat
 import Svg, { Circle } from 'react-native-svg';
 import { AppIcon, AppText } from '../context/ThemeContext';
 
-export type MediaUploadStatus = 'preparing' | 'uploading' | 'sending' | 'failed';
+export type MediaUploadStatus = 'pending' | 'preparing' | 'uploading' | 'sending' | 'failed';
 
 interface Props {
   status: MediaUploadStatus;

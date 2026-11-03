@@ -1,8 +1,7 @@
 // ─── useVoiceRecorder Hook ────────────────────────────────────────────────────
-// Handles audio recording lifecycle, microphone permissions, duration tracking,
-// auto-stop at 120s, warning at 110s, and cleanup on unmount.
-//
-// Uses expo-audio (SDK 56).
+// Recording lifecycle, permissions, duration, metering, warning at 110s,
+// auto-stop at 120s, smooth 100ms updates, live amplitude history.
+// Uses expo-audio (SDK 56/57).
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import {
@@ -12,14 +11,14 @@ import {
   RecordingPresets,
   setAudioModeAsync,
 } from 'expo-audio';
-import type { AudioRecorder } from 'expo-audio';
 
 // ─── Interfaces ───────────────────────────────────────────────────────────────
 
 export interface RecordingState {
   status: 'idle' | 'requesting-permission' | 'recording' | 'cancelled' | 'stopped';
   durationMs: number;
-  metering: number;
+  metering: number;              // dBFS, -160 .. 0
+  amplitudeHistory: number[];    // normalized 0..1, last 50 samples
   isWarning: boolean;
   permissionDenied: boolean;
   permissionDeniedPermanently: boolean;
@@ -29,6 +28,12 @@ export interface RecordingResult {
   uri: string;
   durationMs: number;
   fileSize: number;
+  metering: number;
+}
+
+export interface UseVoiceRecorderOptions {
+  /** Fires when the 120s auto-stop kicks in — the result you'd normally get from stopRecording(). */
+  onAutoStop?: (result: RecordingResult) => void;
 }
 
 export interface UseVoiceRecorderReturn {
@@ -43,113 +48,150 @@ export interface UseVoiceRecorderReturn {
 const MAX_DURATION_MS = 120_000;
 const WARNING_THRESHOLD_MS = 110_000;
 const MIN_DURATION_MS = 1_000;
-
-// ─── Initial State ────────────────────────────────────────────────────────────
+const UPDATE_INTERVAL_MS = 100;
+const AMPLITUDE_HISTORY_LENGTH = 50;
 
 const INITIAL_STATE: RecordingState = {
   status: 'idle',
   durationMs: 0,
   metering: -160,
+  amplitudeHistory: [],
   isWarning: false,
   permissionDenied: false,
   permissionDeniedPermanently: false,
 };
 
-// ─── Hook Implementation ──────────────────────────────────────────────────────
+/** Convert dBFS to a 0..1 normalized amplitude (clamped to -60..0 dB). */
+function normalizeMetering(db: number): number {
+  const clamped = Math.max(-60, Math.min(0, db));
+  return (clamped + 60) / 60;
+}
 
-export function useVoiceRecorder(): UseVoiceRecorderReturn {
+// ─── Hook ─────────────────────────────────────────────────────────────────────
+
+export function useVoiceRecorder(
+  options: UseVoiceRecorderOptions = {},
+): UseVoiceRecorderReturn {
+  const { onAutoStop } = options;
+
   const [state, setState] = useState<RecordingState>(INITIAL_STATE);
   const isStoppingRef = useRef(false);
   const isRecordingRef = useRef(false);
 
-  // Create recorder with high quality preset and metering enabled
   const recorder = useAudioRecorder({
     ...RecordingPresets.HIGH_QUALITY,
     isMeteringEnabled: true,
   });
 
-  const recorderState = useAudioRecorderState(recorder, 1000);
+  // 100 ms → smooth timer + live waveform
+  const recorderState = useAudioRecorderState(recorder, UPDATE_INTERVAL_MS);
 
-  // ── Sync recorder state to component state ────────────────────
+  const onAutoStopRef = useRef(onAutoStop);
+  onAutoStopRef.current = onAutoStop;
+
+  // ── Core stop implementation ─────────────────────────────────────────────
+  const stopRecordingInternal = useCallback(async (): Promise<RecordingResult | null> => {
+    if (!isRecordingRef.current || isStoppingRef.current) return null;
+    isStoppingRef.current = true;
+
+    try {
+      await recorder.stop();
+
+      const uri = recorder.uri;
+      const durationMs = recorderState.durationMillis;
+      const metering = recorderState.metering ?? -160;
+
+      isRecordingRef.current = false;
+
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+      }).catch(() => {});
+
+      if (!uri || durationMs < MIN_DURATION_MS) {
+        setState(INITIAL_STATE);
+        return null;
+      }
+
+      setState((prev) => ({ ...prev, status: 'stopped', durationMs }));
+
+      const estimatedFileSize = Math.round((durationMs / 1000) * 16_000);
+
+      return { uri, durationMs, fileSize: estimatedFileSize, metering };
+    } catch (error) {
+      console.error('[useVoiceRecorder] stop error:', error);
+      isRecordingRef.current = false;
+      setState(INITIAL_STATE);
+      return null;
+    } finally {
+      isStoppingRef.current = false;
+    }
+  }, [recorder, recorderState.durationMillis, recorderState.metering]);
+
+  // Ref-based access so the effect never captures a stale closure.
+  const stopRecordingRef = useRef(stopRecordingInternal);
+  stopRecordingRef.current = stopRecordingInternal;
+
+  // ── Sync recorder → component state + auto-stop ──────────────────────────
   useEffect(() => {
     if (!isRecordingRef.current) return;
 
     const durationMs = recorderState.durationMillis;
-    const metering = recorderState.metering ?? -160;
+    const rawMetering = recorderState.metering ?? -160;
     const isWarning = durationMs >= WARNING_THRESHOLD_MS;
+    const normalized = normalizeMetering(rawMetering);
 
-    setState((prev) => ({
-      ...prev,
-      durationMs,
-      metering,
-      isWarning,
-    }));
+    setState((prev) => {
+      if (
+        prev.durationMs === durationMs &&
+        prev.metering === rawMetering &&
+        prev.isWarning === isWarning
+      ) {
+        return prev;
+      }
+      const amplitudeHistory = [
+        ...prev.amplitudeHistory.slice(-(AMPLITUDE_HISTORY_LENGTH - 1)),
+        normalized,
+      ];
+      return {
+        ...prev,
+        durationMs,
+        metering: rawMetering,
+        amplitudeHistory,
+        isWarning,
+      };
+    });
 
-    // Auto-stop at max duration
     if (durationMs >= MAX_DURATION_MS && !isStoppingRef.current) {
-      isStoppingRef.current = true;
-      stopRecordingInternal();
+      void stopRecordingRef.current().then((result) => {
+        if (result && onAutoStopRef.current) onAutoStopRef.current(result);
+      });
     }
   }, [recorderState]);
 
-  // ── Internal stop (used by auto-stop) ─────────────────────────
-  const stopRecordingInternal = useCallback(async () => {
-    try {
-      await recorder.stop();
-      const uri = recorder.uri;
-      const durationMs = recorderState.durationMillis;
-
-      isRecordingRef.current = false;
-
-      // Reset audio mode after recording
-      await setAudioModeAsync({ allowsRecording: false });
-
-      if (uri && durationMs >= MIN_DURATION_MS) {
-        setState((prev) => ({
-          ...prev,
-          status: 'stopped',
-          durationMs,
-        }));
-      } else {
-        setState(INITIAL_STATE);
-      }
-    } catch (error) {
-      console.error('[useVoiceRecorder] stopRecordingInternal error:', error);
-      isRecordingRef.current = false;
-      setState(INITIAL_STATE);
-    } finally {
-      isStoppingRef.current = false;
-    }
-  }, [recorder, recorderState.durationMillis]);
-
-  // ── Start Recording ───────────────────────────────────────────
+  // ── Start ────────────────────────────────────────────────────────────────
   const startRecording = useCallback(async () => {
-    // Ignore new press if already recording
-    if (isRecordingRef.current) return;
+    if (isRecordingRef.current || isStoppingRef.current) return;
 
     try {
-      // Request permission
       setState((prev) => ({ ...prev, status: 'requesting-permission' }));
 
       const permissionResponse = await AudioModule.requestRecordingPermissionsAsync();
 
       if (!permissionResponse.granted) {
-        const permanentlyDenied = !permissionResponse.canAskAgain;
         setState({
           ...INITIAL_STATE,
           permissionDenied: true,
-          permissionDeniedPermanently: permanentlyDenied,
+          permissionDeniedPermanently: !permissionResponse.canAskAgain,
         });
         return;
       }
 
-      // Configure audio mode for recording
       await setAudioModeAsync({
         allowsRecording: true,
         playsInSilentMode: true,
       });
 
-      // Prepare and start recording
       await recorder.prepareToRecordAsync();
       recorder.record();
 
@@ -159,79 +201,40 @@ export function useVoiceRecorder(): UseVoiceRecorderReturn {
         status: 'recording',
         durationMs: 0,
         metering: -160,
+        amplitudeHistory: [],
         isWarning: false,
         permissionDenied: false,
         permissionDeniedPermanently: false,
       });
     } catch (error) {
-      console.error('[useVoiceRecorder] startRecording error:', error);
+      console.error('[useVoiceRecorder] start error:', error);
       isRecordingRef.current = false;
       setState(INITIAL_STATE);
     }
   }, [recorder]);
 
-  // ── Stop Recording ────────────────────────────────────────────
-  const stopRecording = useCallback(async (): Promise<RecordingResult | null> => {
-    if (!isRecordingRef.current || isStoppingRef.current) return null;
+  // ── Stop ─────────────────────────────────────────────────────────────────
+  const stopRecording = useCallback(
+    (): Promise<RecordingResult | null> => stopRecordingInternal(),
+    [stopRecordingInternal],
+  );
 
-    isStoppingRef.current = true;
-
-    try {
-      await recorder.stop();
-      const uri = recorder.uri;
-      const durationMs = recorderState.durationMillis;
-
-      isRecordingRef.current = false;
-
-      // Reset audio mode after recording
-      await setAudioModeAsync({ allowsRecording: false });
-
-      // Minimum duration check — return null if too short
-      if (!uri || durationMs < MIN_DURATION_MS) {
-        setState(INITIAL_STATE);
-        return null;
-      }
-
-      setState((prev) => ({
-        ...prev,
-        status: 'stopped',
-        durationMs,
-      }));
-
-      // Estimate file size from duration and bitrate (128kbps = 16KB/s)
-      const estimatedFileSize = Math.round((durationMs / 1000) * 16_000);
-
-      return {
-        uri,
-        durationMs,
-        fileSize: estimatedFileSize,
-      };
-    } catch (error) {
-      console.error('[useVoiceRecorder] stopRecording error:', error);
-      isRecordingRef.current = false;
-      setState(INITIAL_STATE);
-      return null;
-    } finally {
-      isStoppingRef.current = false;
-    }
-  }, [recorder, recorderState.durationMillis]);
-
-  // ── Cancel Recording ──────────────────────────────────────────
+  // ── Cancel ───────────────────────────────────────────────────────────────
   const cancelRecording = useCallback(async () => {
     if (!isRecordingRef.current) return;
 
     try {
       await recorder.stop();
     } catch (error) {
-      console.error('[useVoiceRecorder] cancelRecording error:', error);
+      console.error('[useVoiceRecorder] cancel error:', error);
     } finally {
       isRecordingRef.current = false;
+      isStoppingRef.current = false;
       await setAudioModeAsync({ allowsRecording: false }).catch(() => {});
       setState({ ...INITIAL_STATE, status: 'cancelled' });
     }
   }, [recorder]);
 
-  // ── Cleanup on unmount ────────────────────────────────────────
   useEffect(() => {
     return () => {
       if (isRecordingRef.current) {
@@ -241,10 +244,5 @@ export function useVoiceRecorder(): UseVoiceRecorderReturn {
     };
   }, [recorder]);
 
-  return {
-    state,
-    startRecording,
-    stopRecording,
-    cancelRecording,
-  };
+  return { state, startRecording, stopRecording, cancelRecording };
 }

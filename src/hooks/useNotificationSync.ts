@@ -12,17 +12,10 @@ import type { AppNotification } from '../context/NotificationContext';
 import { socketClient } from '../realtime/socket';
 import { endpoints, type BackendMessage } from '../api/endpoints';
 import { usePhoneBook } from './usePhoneBook';
-import { normalizePhone } from '../utils/phoneUtils';
-import { endpoints } from '../api/endpoints';
-import type { BackendMessage } from '../api/endpoints';
+import { normalizePhone } from '../utils/phoneUtils';  
 import { muteStore } from '../state/muteStore';
 
 type PushNotificationFn = (n: Omit<AppNotification, 'id' | 'time' | 'read'>) => void;
-
-/** A uid looks like a Firebase uid (long alphanumeric), not a name or phone. */
-function looksLikeUid(s: string): boolean {
-  return /^[A-Za-z0-9]{20,}$/.test(s);
-}
 
 /** A uid looks like a Firebase uid (long alphanumeric), not a name or phone. */
 function looksLikeUid(s: string): boolean {
@@ -57,7 +50,7 @@ export function useNotificationSync(
    *   saved contact name → sender's own display name → phone number → "Someone".
    * Never shows the raw uid.
    */
-  const resolveSenderName = useCallback(async (senderId: string): Promise<string> => {
+  const resolveNameFromUid = useCallback(async (senderId: string): Promise<string> => {
     let profile = profileCache.current.get(senderId);
     if (!profile) {
       try {
@@ -128,7 +121,7 @@ export function useNotificationSync(
         // sender's phone), then the sender's profile name, then — last resort —
         // the raw id. Never show the bare uid when we have anything better.
         const resolve  = resolveNameRef.current;
-        const fallback = p.senderName || await resolveSenderName(msg.senderId);
+        const fallback = p.senderName || await resolveNameFromUid(msg.senderId);
         const person   = resolve ? resolve(p.senderPhone, fallback) : fallback;
         const isGroup  = chat?.type === 'group';
         const title    = isGroup && chat?.groupName ? chat.groupName : person;
@@ -149,7 +142,7 @@ export function useNotificationSync(
       const p = payload as { callId?: string; callerId?: string; type?: string };
       try {
         const callType   = p?.type === 'video' ? 'Video Call' : 'Call';
-        const callerName  = p?.callerId ? await resolveSenderName(p.callerId) : 'Unknown';
+        const callerName  = p?.callerId ? await resolveNameFromUid(p.callerId) : 'Unknown';
         pushNotificationRef.current({
           type:      'call',
           title:     `Missed ${callType}`,
@@ -168,5 +161,5 @@ export function useNotificationSync(
       unsubscribers.current.forEach((u) => u());
       unsubscribers.current = [];
     };
-  }, [userId, resolveSenderName]);
+  }, [userId, resolveNameFromUid]);
 }

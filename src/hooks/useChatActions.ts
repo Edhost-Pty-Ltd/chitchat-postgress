@@ -9,6 +9,8 @@ import type { OrderPayload, ContactPayload, BackendMessage } from '../api/endpoi
 import { mediaService, fileSize, type MediaUploadProgress } from '../services/mediaService';
 import { getFileExtension } from '../utils/fileUtils';
 import { fetchUserPrivacySettings } from './usePrivacySettings';
+import { checkIsOnline } from './useNetworkState';
+import { enqueueOutbox } from './useOutbox';
 
 // ── Create or get existing 1-on-1 chat ───────────────────────────────────────
 // The backend createChat is idempotent for direct chats: it returns the
@@ -68,6 +70,16 @@ export async function sendMessage(
   try {
     const trimmed = text.trim();
     if (!trimmed) return false;
+
+    // When offline, queue the message and return true so the caller shows a
+    // pending bubble. The caller (ChatScreen / useMessages) is responsible for
+    // adding the optimistic bubble before calling this.
+    const online = await checkIsOnline();
+    if (!online) {
+      const clientId = `pending_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+      await enqueueOutbox(chatId, clientId, trimmed);
+      return true;
+    }
 
     const res = await endpoints.sendMessage(chatId, { type: 'text', text: trimmed });
     return res.ok;
