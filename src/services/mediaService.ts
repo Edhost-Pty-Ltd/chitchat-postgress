@@ -46,8 +46,43 @@ export interface MediaUploadProgress {
 
 export type MediaUploadProgressCallback = (progress: MediaUploadProgress) => void;
 
+// Presigned GET URLs are valid for 1 hour server-side (DOWNLOAD_URL_TTL_SEC).
+// Cache resolved URLs well under that so a cached URL is never served past its
+// validity, and so the same object key isn't re-signed on every data reload
+// (messages re-render, status refetches, etc.). This removes the bulk of the
+// /media/download-url round-trips the app was making.
+const DOWNLOAD_URL_CACHE_TTL_MS = 45 * 60 * 1000; // 45 min (< server's 60 min)
+
+interface CachedUrl { url: string; expiresAt: number; }
+
 export class MediaService {
   constructor(private readonly client: ApiClient = apiClient) {}
+
+  /** In-memory cache of objectKey → resolved presigned GET URL. */
+  private readonly urlCache = new Map<string, CachedUrl>();
+
+  /** Return a non-expired cached URL for a key, or null. */
+  private cachedUrl(objectKey: string): string | null {
+    const hit = this.urlCache.get(objectKey);
+    if (!hit) return null;
+    if (hit.expiresAt <= Date.now()) {
+      this.urlCache.delete(objectKey);
+      return null;
+    }
+    return hit.url;
+  }
+
+  private cacheUrls(urls: Record<string, string>): void {
+    const expiresAt = Date.now() + DOWNLOAD_URL_CACHE_TTL_MS;
+    for (const [key, url] of Object.entries(urls)) {
+      if (url) this.urlCache.set(key, { url, expiresAt });
+    }
+  }
+
+  /** Drop a key from the cache (e.g. after the object is replaced/deleted). */
+  invalidateUrl(objectKey: string): void {
+    this.urlCache.delete(objectKey);
+  }
 
   /** Request a presigned upload URL + object key (Req 10.1). */
   async getUploadUrl(category: MediaCategory, localUri: string, params: UploadParams): Promise<UploadTarget> {
@@ -138,21 +173,42 @@ export class MediaService {
   /** Resolve an object key to a short-lived download URL (Req 10.6). */
   async getDownloadUrl(objectKey: string): Promise<string | null> {
     if (!objectKey) return null;
+    const cached = this.cachedUrl(objectKey);
+    if (cached) return cached;
     const res = await this.client.post<{ urls: Record<string, string> }>('/media/download-url', {
       objectKeys: [objectKey],
     });
     if (!res.ok) return null;
+    this.cacheUrls(res.data.urls);
     return res.data.urls[objectKey] ?? null;
   }
 
-  /** Resolve several object keys at once (Req 10.6). */
+  /**
+   * Resolve several object keys at once (Req 10.6). Keys already in the cache
+   * are served from memory; only the cache-misses are requested from the
+   * backend, so repeated reloads of the same media are near-free.
+   */
   async getDownloadUrls(objectKeys: string[]): Promise<Record<string, string>> {
     const keys = objectKeys.filter(Boolean);
     if (keys.length === 0) return {};
+
+    const result: Record<string, string> = {};
+    const misses: string[] = [];
+    for (const key of keys) {
+      const cached = this.cachedUrl(key);
+      if (cached) result[key] = cached;
+      else misses.push(key);
+    }
+    if (misses.length === 0) return result;
+
     const res = await this.client.post<{ urls: Record<string, string> }>('/media/download-url', {
-      objectKeys: keys,
+      objectKeys: misses,
     });
-    return res.ok ? res.data.urls : {};
+    if (res.ok) {
+      this.cacheUrls(res.data.urls);
+      Object.assign(result, res.data.urls);
+    }
+    return result;
   }
 }
 

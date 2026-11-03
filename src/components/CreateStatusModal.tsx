@@ -136,6 +136,7 @@ export function CreateStatusModal({ visible, onClose, onCreate }: CreateStatusMo
 
       const result = await ImagePicker.launchCameraAsync({
         allowsEditing: true,
+        aspect: [1, 1],
         quality: 0.8,
       });
 

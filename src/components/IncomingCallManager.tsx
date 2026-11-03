@@ -46,21 +46,31 @@ export function IncomingCallManager() {
     console.log('[IncomingCallManager] Answering call:', incomingCall.callId, 'Type:', incomingCall.type);
 
     try {
-      // Navigate directly to the call screen. The screen's own setupCall
-      // useEffect will emit call:join (flushing the buffered offer from the
-      // server), subscribe to call:signal events, receive the offer, create an
-      // answer, and complete the WebRTC handshake. Trying to read the offer
-      // from the local Map *before* subscribing always fails because the callee
-      // hasn't joined the call room yet and the offer is still buffered server-
-      // side in Redis.
-      const screen = incomingCall.type === 'video' ? 'VideoCall' : 'AudioCall';
-      navigation.navigate(screen as any, {
-        callId: incomingCall.callId,
-        isOutgoing: false,
-        otherParty: incomingCall.caller,
-      });
+      // Verify the offer is already buffered (useIncomingCalls joined the room
+      // and set up the signal listener, so it should be present).
+      const callDoc = await SignalingService.getCall(incomingCall.callId);
+      if (!callDoc || !callDoc.offer) {
+        console.error('[IncomingCallManager] Call document or offer not found');
+        setIncomingCall(null);
+        return;
+      }
 
-      // Clear incoming call from context after navigation starts
+      // Navigate to the call screen — it handles WebRTC setup (answerCall) to
+      // avoid creating two peer connections when this manager also called it.
+      if (incomingCall.type === 'video') {
+        navigation.navigate('VideoCall', {
+          callId: incomingCall.callId,
+          isOutgoing: false,
+          otherParty: incomingCall.caller,
+        });
+      } else {
+        navigation.navigate('AudioCall', {
+          callId: incomingCall.callId,
+          isOutgoing: false,
+          otherParty: incomingCall.caller,
+        });
+      }
+
       setTimeout(() => setIncomingCall(null), 200);
     } catch (error) {
       console.error('[IncomingCallManager] Error answering call:', error);

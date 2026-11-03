@@ -64,7 +64,9 @@ export function createGateway(httpServer: HttpServer): IOServer {
     }
 
     try {
-      socket.identity = await verifyToken(token);
+      // A new socket connection is infrequent and long-lived, so pay for a
+      // fresh checkRevoked verification rather than trusting the HTTP cache.
+      socket.identity = await verifyToken(token, { useCache: false });
       // Anonymous link-request sessions only use REST polling, never sockets.
       if (socket.identity.isAnonymous) {
         const e = new Error('Sign in to connect') as Error & { data?: unknown };

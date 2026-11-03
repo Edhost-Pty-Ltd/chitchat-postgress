@@ -9,9 +9,15 @@ import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut as firebaseSignOut,
-  User
+  User,
+  type Auth,
 } from 'firebase/auth';
-import { auth as firebaseAuth } from '../config/firebase';
+import { auth as rawAuth } from '../config/firebase';
+
+// `auth` from config/firebase is typed as the union of the native and web auth
+// objects (Module | Auth). This file only runs on web, where it is always the
+// firebase/auth JS SDK's Auth, so narrow it once here.
+const firebaseAuth = rawAuth as Auth;
 import { endpoints } from '../api/endpoints';
 // NOTE: This file is web-only. Authentication uses the firebase/auth JS SDK.
 // Profile creation goes through the Postgres backend (no Firestore writes).

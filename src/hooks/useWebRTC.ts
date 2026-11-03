@@ -43,11 +43,43 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
   
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const statsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // ICE candidates that arrive before remoteDescription is set are queued here
+  // and drained immediately after setRemoteDescription succeeds.
+  const iceCandidateQueueRef = useRef<RTCIceCandidateInit[]>([]);
 
   // ── Initialize peer connection ────────────────────────────────────────────
   const initializePeerConnection = useCallback(async (isVideo: boolean = false) => {
     try {
+      // Idempotent: if a peer connection with a live local stream already
+      // exists (e.g. pre-warmed on screen mount), reuse it instead of
+      // re-acquiring the camera/mic. This lets the callee pre-initialize media
+      // the instant the call screen mounts, in parallel with waiting for the
+      // offer — so remote video appears almost immediately on answer rather
+      // than after a serial getUserMedia round-trip.
+      if (peerConnectionRef.current && localStreamRef.current) {
+        // Reuse only if the existing stream already satisfies the request. A
+        // video call needs a live video track; if the pre-warm acquired
+        // audio-only (isVideo was false) we must NOT silently reuse it, or the
+        // camera would never turn on. In that case fall through and rebuild.
+        const hasVideoTrack = localStreamRef.current.getVideoTracks().length > 0;
+        if (!isVideo || hasVideoTrack) {
+          console.log('[useWebRTC] Reusing pre-warmed peer connection');
+          return peerConnectionRef.current;
+        }
+        console.log('[useWebRTC] Pre-warmed PC lacks video; rebuilding for video call');
+        // Tear down the audio-only PC/stream before rebuilding to avoid leaks.
+        try {
+          localStreamRef.current.getTracks().forEach((t) => t.stop());
+        } catch { /* already stopped */ }
+        localStreamRef.current = null;
+        try { peerConnectionRef.current.close(); } catch { /* already closed */ }
+        peerConnectionRef.current = null;
+      }
+
       console.log('[useWebRTC] Initializing peer connection... Video:', isVideo);
+      
+      // Clear any stale queued candidates from a previous session.
+      iceCandidateQueueRef.current = [];
       
       // Create peer connection
       const pc = new (getRTCPeerConnection())(ICE_SERVERS);
@@ -81,12 +113,20 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
 
       // Handle remote stream
       pcAny.ontrack = (event: any) => {
-        console.log('[useWebRTC] Remote track received:', event.track.kind);
+        console.log('[useWebRTC] Remote track received:', event.track.kind, 'enabled:', event.track.enabled);
+        // Make sure the incoming track is enabled — a disabled remote audio
+        // track produces silence even when everything else is wired correctly.
+        try { if (event.track) event.track.enabled = true; } catch { /* no-op */ }
         if (event.streams && event.streams[0]) {
+          const remote = event.streams[0];
+          // Explicitly enable all audio tracks on the remote stream.
+          try {
+            remote.getAudioTracks?.().forEach((t: any) => { t.enabled = true; });
+          } catch { /* no-op */ }
           // Assign remote stream to ref and trigger UI update
-          remoteStreamRef.current = event.streams[0];
+          remoteStreamRef.current = remote;
           setStreamVersion(v => v + 1);
-          handlers?.onRemoteStream?.(event.streams[0]);
+          handlers?.onRemoteStream?.(remote);
         }
       };
 
@@ -161,6 +201,12 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
         console.log('[useWebRTC] Setting remote description (offer)...');
         await pc.setRemoteDescription(new (getRTCSessionDescription())(offer as any));
 
+        // Drain any ICE candidates that arrived before the remote description was set.
+        const queued = iceCandidateQueueRef.current.splice(0);
+        for (const c of queued) {
+          try { await pc.addIceCandidate(new (getRTCIceCandidate())(c)); } catch { /* ignore stale */ }
+        }
+
         console.log('[useWebRTC] Creating answer...');
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
@@ -187,14 +233,25 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
         const pc = peerConnectionRef.current;
         if (!pc) throw new Error('Peer connection not initialized');
 
-        // Check if we can set remote description
+        // The answer can only be applied once, when the PC is still waiting
+        // for it (have-local-offer). If a duplicate answer arrives after the
+        // connection is already stable, skip it quietly — it's a no-op, not an
+        // error. Throwing here produced noisy "Called in wrong state: stable"
+        // logs when two signaling listeners both delivered the answer.
         if (pc.signalingState !== 'have-local-offer') {
-          console.warn('[useWebRTC] Cannot set remote answer. Current state:', pc.signalingState);
-          throw new Error(`Cannot set remote answer in state: ${pc.signalingState}`);
+          console.log('[useWebRTC] Remote answer already applied (state:', pc.signalingState + '), skipping');
+          return;
         }
 
         console.log('[useWebRTC] Setting remote description (answer)...');
         await pc.setRemoteDescription(new (getRTCSessionDescription())(answer as any));
+
+        // Drain any ICE candidates that arrived before the answer was set.
+        const queued = iceCandidateQueueRef.current.splice(0);
+        for (const c of queued) {
+          try { await pc.addIceCandidate(new (getRTCIceCandidate())(c)); } catch { /* ignore stale */ }
+        }
+
         console.log('[useWebRTC] Remote answer set successfully');
       } catch (error) {
         console.error('[useWebRTC] Failed to set remote answer:', error);
@@ -210,14 +267,15 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
       try {
         const pc = peerConnectionRef.current;
         if (!pc) {
-          console.warn('[useWebRTC] Cannot add ICE candidate: peer connection not initialized');
+          console.warn('[useWebRTC] Cannot add ICE candidate: peer connection not initialized, queuing');
+          iceCandidateQueueRef.current.push(candidate);
           return;
         }
 
         // Check if remote description is set
         if (!pc.remoteDescription) {
           console.warn('[useWebRTC] Remote description not set yet, queuing ICE candidate');
-          // In production, you might want to queue these candidates
+          iceCandidateQueueRef.current.push(candidate);
           return;
         }
 
@@ -409,6 +467,10 @@ export function useWebRTC(handlers?: WebRTCHandlers) {
       peerConnectionRef.current = null;
       console.log('[useWebRTC] Peer connection closed');
     }
+
+    // Drop any ICE candidates still queued from this session so they can't
+    // leak into the next call's peer connection.
+    iceCandidateQueueRef.current = [];
 
     setConnectionState('closed');
     setNetworkQuality('unknown');

@@ -30,6 +30,7 @@ import { SignalingService } from '../services/signalingService';
 import { socketClient } from '../realtime/socket';
 import { mediaService, fileSize } from '../services/mediaService';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
+import { setSpeakerphoneOn } from '../utils/webrtc-platform';
 import { useAudioRecorder, AudioModule, RecordingPresets, setAudioModeAsync } from 'expo-audio';
 import { documentDirectory, copyAsync, getInfoAsync } from 'expo-file-system/legacy';
 import * as Print from 'expo-print';
@@ -334,8 +335,15 @@ export default function VideoCallScreen() {
     { id: 'local', contact: LOCAL_CONTACT, isLocal: true },
   ]);
 
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const unsubscribeCallRef = useRef<(() => void) | null>(null);
+  const timerRef            = useRef<ReturnType<typeof setInterval> | null>(null);
+  const unsubscribeCallRef  = useRef<(() => void) | null>(null);
+  const answerApplied       = useRef(false);
+  const iceApplied          = useRef<Set<string>>(new Set());
+  // Set true just before navigating away to the floating overlay. The live
+  // peer connection lives in the shared CallContext, so when minimizing we must
+  // NOT tear it down on unmount — the overlay keeps the call running. Only a
+  // real end (hang up / remote end) should call cleanupWebRTC().
+  const isMinimizingRef     = useRef(false);
   const remoteStreamRef = useRef<any>(null);
   useEffect(() => { remoteStreamRef.current = remoteStream; }, [remoteStream]);
 
@@ -401,12 +409,13 @@ export default function VideoCallScreen() {
     const setupCall = async () => {
       try {
         if (Platform.OS !== 'web' && !permission?.granted) await requestPermission();
-        await initializePeerConnection(true);
 
-        // Meeting joins don't use a 1:1 call — skip the call signaling.
-        // (The organizer's recording auto-starts in a separate effect once the
-        // room has loaded and we know who the organizer is.)
+        // NOTE: Do NOT call expo-audio's setAudioModeAsync here — WebRTC owns
+        // the iOS AVAudioSession for the call. Overriding it silences audio.
+
+        // Meeting joins use their own fresh peer connection.
         if (isMeeting) {
+          await initializePeerConnection(true);
           setCallStatus('connected');
           timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
           return;
@@ -439,6 +448,26 @@ export default function VideoCallScreen() {
         };
 
         if (isOutgoing) {
+          // ── OUTGOING ─────────────────────────────────────────────────────
+          // The peer connection, offer, and socket room join were all handled
+          // by useOutgoingCall.initiateCall (called from CallsScreen before
+          // navigation). Re-creating them here would destroy that PC and send
+          // a duplicate offer. Only re-attach the signaling listener.
+          unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, async (data) => {
+            if (!data) return;
+            if (
+              data.status === 'ended' ||
+              data.status === 'rejected' ||
+              data.status === 'missed'
+            ) {
+              navigation.goBack();
+              return;
+            }
+
+            // Apply the callee's answer once the peer connection has an offer set.
+            if (data.answer && !answerApplied.current) {
+              answerApplied.current = true;
+              await setRemoteAnswer(data.answer).catch(console.error);
           const offer = await createOffer(true);
           await SignalingService.saveOffer(callId, offer);
           unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, (data) => {
@@ -447,19 +476,48 @@ export default function VideoCallScreen() {
               answerApplied = true;
               setRemoteAnswer(data.answer).catch(console.error);
             }
-            applyRemoteIce(data.calleeIceCandidates);
-            endFromRemote(data);
+
+            // Apply callee ICE candidates (deduplicated).
+            for (const cand of data.calleeIceCandidates ?? []) {
+              const key = `${cand.candidate}-${cand.sdpMLineIndex}`;
+              if (!iceApplied.current.has(key)) {
+                iceApplied.current.add(key);
+                await addIceCandidate(cand).catch(console.error);
+              }
+            }
           });
         } else {
+          // ── INCOMING ─────────────────────────────────────────────────────
+          // Pre-warm the peer connection NOW (acquire camera + mic) so the
+          // slow getUserMedia step happens in parallel with waiting for the
+          // offer — not serially after it. answerCall reuses this pre-warmed
+          // connection (initializePeerConnection is idempotent), so by the time
+          // the offer arrives we only need setRemoteDescription + createAnswer,
+          // and remote video appears almost instantly.
+          await initializePeerConnection(true);
+
           unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, async (data) => {
             if (!data) return;
-            if (data.offer && !offerAnswered) {
-              offerAnswered = true;
-              const answer = await createAnswer(data.offer);
-              await SignalingService.saveAnswer(callId, answer);
+            if (data.status === 'ended') {
+              navigation.goBack();
+              return;
             }
-            if (offerAnswered) applyRemoteIce(data.callerIceCandidates);
-            endFromRemote(data);
+
+            // Set remote desc, create answer, join socket room — exactly once.
+            if (data.offer && !answerApplied.current) {
+              answerApplied.current = true;
+              await answerCall(callId, data.offer, 'video');
+            }
+
+            // Apply caller ICE candidates (answerCall's internal listener
+            // also handles these; dedup ensures no duplicate addIceCandidate).
+            for (const cand of data.callerIceCandidates ?? []) {
+              const key = `${cand.candidate}-${cand.sdpMLineIndex}`;
+              if (!iceApplied.current.has(key)) {
+                iceApplied.current.add(key);
+                await addIceCandidate(cand).catch(console.error);
+              }
+            }
           });
         }
         // 1:1 call duration starts once WebRTC actually connects — see the
@@ -477,7 +535,10 @@ export default function VideoCallScreen() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (unsubscribeCallRef.current) unsubscribeCallRef.current();
-      cleanupWebRTC();
+      // Only tear down the shared peer connection on a real teardown. When
+      // minimizing to the floating overlay the call must keep running, so skip
+      // cleanup — otherwise maximizing shows a dead connection.
+      if (!isMinimizingRef.current) cleanupWebRTC();
     };
   }, []); // eslint-disable-line
 
@@ -485,15 +546,16 @@ export default function VideoCallScreen() {
     if (connectionState === 'connected') startNetworkMonitoring();
   }, [connectionState, startNetworkMonitoring]);
 
-  // Start the 1:1 call-duration timer the moment WebRTC connects, so both
-  // participants' clocks start together instead of drifting apart. (Meetings
-  // start their own timer immediately on join, above — a room has no single
-  // "both sides connected" moment the way a 1:1 call does.)
+  // Apply the output route (loudspeaker vs earpiece) whenever the toggle flips
+  // or the call connects. Done via the native AudioRouteModule — NOT
+  // expo-audio's setAudioModeAsync, which would reconfigure the shared audio
+  // session and silence the live call. For meetings, audio is live as soon as
+  // the peer connection is up, so we also apply once the status is 'connected'.
   useEffect(() => {
-    if (!isMeeting && callStatus === 'connected' && !timerRef.current) {
-      timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
+    if (callStatus === 'connected' || connectionState === 'connected') {
+      setSpeakerphoneOn(speakerOn);
     }
-  }, [isMeeting, callStatus]);
+  }, [speakerOn, connectionState, callStatus]);
 
   // ── React to being muted by organizer ───────────────────────────
   useEffect(() => {
@@ -523,6 +585,7 @@ export default function VideoCallScreen() {
         localIsMain: isLocalMain,
         otherParty,
       });
+      isMinimizingRef.current = true;
       navigation.goBack();
       return true;
     });
@@ -550,6 +613,7 @@ export default function VideoCallScreen() {
           localIsMain: isLocalMain,
           otherParty,
         });
+        isMinimizingRef.current = true;
         navigation.goBack();
       }
     });
@@ -1063,7 +1127,7 @@ export default function VideoCallScreen() {
     navigation.goBack();
   }, [callId, isMeeting, meetingId, isOrganizer, endMeeting, user?.uid, isRecording,
       audioRecorder, recordingMs, setRecordingState, uploadRecording, startAwaitingMinutes,
-      cleanupWebRTC, navigation]);
+      cleanupWebRTC, navigation, duration]);
 
   const hangUp = useCallback(() => {
     if (isMeeting && isOrganizer) {
@@ -1480,9 +1544,9 @@ export default function VideoCallScreen() {
             style={[styles.controlBtn, speakerOn && styles.controlBtnActive]}
             onPress={() => setSpeakerOn((s) => !s)}
           >
-            <AppIcon name={speakerOn ? 'volume-high-outline' : 'volume-mute-outline'} size={24} color="#fff" fixedColor />
+            <AppIcon name={speakerOn ? 'volume-high' : 'ear-outline'} size={24} color="#fff" fixedColor />
           </TouchableOpacity>
-          <AppText fixedColor style={styles.controlLabel}>Speaker</AppText>
+          <AppText fixedColor style={styles.controlLabel}>{speakerOn ? 'Speaker' : 'Earpiece'}</AppText>
         </View>
  
 

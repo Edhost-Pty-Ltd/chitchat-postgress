@@ -1,6 +1,6 @@
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
-import { getEnv } from '../config/env.js';
 import { logger } from '../config/logger.js';
+import { bullConnection } from '../redis/client.js';
 import {
   runStatusCleanup,
   runMessageCleanup,
@@ -9,13 +9,7 @@ import {
 } from './cleanup.js';
 
 function connection(): ConnectionOptions {
-  const url = new URL(getEnv().REDIS_URL);
-  return {
-    host: url.hostname,
-    port: Number(url.port || 6379),
-    password: url.password || undefined,
-    maxRetriesPerRequest: null,
-  };
+  return bullConnection() as ConnectionOptions;
 }
 
 export const QUEUE_CLEANUP = 'cleanup';

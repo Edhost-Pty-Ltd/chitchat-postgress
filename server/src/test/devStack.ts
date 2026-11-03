@@ -64,5 +64,8 @@ export function testEnv(): NodeJS.ProcessEnv {
     FIREBASE_SERVICE_ACCOUNT_JSON: '{"project_id":"test"}',
     FIREBASE_PROJECT_ID: 'test',
     CORS_ORIGINS: 'http://localhost:8081',
+    // Disable token-verification caching in tests so each request exercises the
+    // auth path deterministically.
+    AUTH_TOKEN_CACHE_TTL_SEC: '0',
   };
 }

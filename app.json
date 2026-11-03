@@ -2,8 +2,9 @@
   "expo": {
     "name": "ChitChat Business",
     "slug": "Chit-Chat",
-    "version": "1.3.0",
+    "version": "1.3.1",
     "orientation": "portrait",
+    "jsEngine": "hermes",
     "icon": "./assets/chitchat-logo.png",
     "userInterfaceStyle": "light",
     "experiments": {
@@ -53,11 +54,7 @@
             "useFrameworks": "static",
             "forceStaticLinking": [
               "RNFBApp",
-              "RNFBAuth",
-              "RNFBFunctions",
-              "RNFBFirestore",
-              "RNFBStorage",
-              "WebRTC"
+              "RNFBAuth"
             ]
           },
           "android": {
@@ -67,7 +64,6 @@
         }
       ],
       "@react-native-firebase/app",
-      "@config-plugins/react-native-webrtc",
       "expo-font",
       [
         "expo-audio",
@@ -97,6 +93,8 @@
           "isAccessMediaLocationEnabled": true
         }
       ],
+      "expo-video",
+      [
       "expo-video",
       [
         "expo-notifications",

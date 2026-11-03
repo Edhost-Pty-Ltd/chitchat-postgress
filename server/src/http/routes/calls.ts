@@ -10,6 +10,7 @@ import {
   clearCallHistory,
   markCallsSeen,
   updateCallStatus,
+  isParticipant,
 } from '../../db/repositories/calls.js';
 import { isBlocked } from '../../db/repositories/blocks.js';
 import { notifyIncomingCall } from '../../realtime/handlers/signaling.js';
@@ -80,6 +81,12 @@ export async function registerCallRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: requireAuth },
     async (request) => {
       const { callId } = request.params;
+      // IDOR guard: only a participant (caller or callee) may end the call.
+      // Without this any authenticated user could force-end an arbitrary call
+      // by its id. Mirrors the participant check enforced on the socket path.
+      if (!(await isParticipant(callId, request.identity!.userId))) {
+        throw Errors.forbidden('Not a participant of this call');
+      }
       await updateCallStatus(callId, 'ended');
       return { ok: true };
     },

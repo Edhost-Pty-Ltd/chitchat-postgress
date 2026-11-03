@@ -138,8 +138,10 @@ async function attachViews(statusIds: string[]): Promise<Map<string, string[]>> 
 
 /** The authenticated user's own unexpired statuses. */
 export async function listOwnStatuses(userId: string): Promise<StatusRecord[]> {
+  // Oldest → newest so the viewer plays statuses first-to-recent, matching the
+  // order a viewer sees them in (WhatsApp-style story order).
   const res = await query<StatusDbRow>(
-    `SELECT * FROM statuses WHERE user_id = $1 AND expires_at > now() ORDER BY created_at DESC`,
+    `SELECT * FROM statuses WHERE user_id = $1 AND expires_at > now() ORDER BY created_at ASC`,
     [userId],
   );
   const views = await attachViews(res.rows.map((r) => r.id));
@@ -175,7 +177,9 @@ export async function listVisibleStatuses(viewerId: string): Promise<StatusRecor
                 SELECT 1 FROM status_visibility_users v
                 WHERE v.status_id = s.id AND v.mode = 'only' AND v.user_id = $1))
         )
-      ORDER BY s.created_at DESC`,
+      -- Oldest → newest so each contact's statuses play first-to-recent in the
+      -- viewer (WhatsApp-style story order).
+      ORDER BY s.created_at ASC`,
     [viewerId],
   );
   const views = await attachViews(res.rows.map((r) => r.id));
@@ -197,6 +201,48 @@ export async function getStatusOwner(statusId: string): Promise<string | null> {
     statusId,
   ]);
   return res.rows[0]?.user_id ?? null;
+}
+
+/**
+ * True when the (unexpired) status `statusId` is currently visible to
+ * `viewerId` under the same block + visibility rules as listVisibleStatuses /
+ * canViewStatusMediaKey. Used to gate POST /statuses/:id/view so a user cannot
+ * record a view on (or trigger a "viewed" notification for) a status they are
+ * not allowed to see.
+ */
+export async function canViewStatus(viewerId: string, statusId: string): Promise<boolean> {
+  const res = await query<{ ok: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM statuses s
+        WHERE s.id = $2
+          AND s.expires_at > now()
+          AND (
+            s.user_id = $1
+            OR (
+              NOT EXISTS (
+                SELECT 1 FROM blocked_users b
+                 WHERE (b.blocker_id = $1 AND b.blocked_id = s.user_id)
+                    OR (b.blocker_id = s.user_id AND b.blocked_id = $1)
+              )
+              AND (
+                s.visibility = 'everyone'
+                OR (s.visibility = 'contacts' AND EXISTS (
+                      SELECT 1 FROM chat_members a
+                      JOIN chat_members b2 ON a.chat_id = b2.chat_id
+                      WHERE a.user_id = s.user_id AND b2.user_id = $1))
+                OR (s.visibility = 'except' AND NOT EXISTS (
+                      SELECT 1 FROM status_visibility_users v
+                      WHERE v.status_id = s.id AND v.mode = 'except' AND v.user_id = $1))
+                OR (s.visibility = 'only' AND EXISTS (
+                      SELECT 1 FROM status_visibility_users v
+                      WHERE v.status_id = s.id AND v.mode = 'only' AND v.user_id = $1))
+              )
+            )
+          )
+     ) AS ok`,
+    [viewerId, statusId],
+  );
+  return res.rows[0]?.ok ?? false;
 }
 
 /**

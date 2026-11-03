@@ -3,7 +3,7 @@ import React, { useState, useRef, useMemo, useEffect, useCallback, memo } from '
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
   TextInput, Modal, Pressable, ScrollView, Animated,
-  ActivityIndicator, Image, Platform, Alert,
+  ActivityIndicator, Image, Platform, Alert, Share,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -57,6 +57,7 @@ const ACTION_HINTS: Record<string, string> = {
   pin: 'Keep this chat pinned to the top of your list.',
   more: 'More actions for this chat.',
 };
+const BUSINESS_LINK_BASE = 'https://www.chitchatbusiness.com';
 
 // ─── Chat Label types ────────────────────────────────────────────────────────
 interface ChatLabel {
@@ -102,10 +103,26 @@ function getInitials(name: string): string {
 }
 
 function formatSAPhone(phone: string): string {
-  const digits = phone.replace(/\D/g, '');
+  let digits = phone.replace(/\D/g, '');
+
+  // E.164 SA numbers are stored as +27XXXXXXXXX (country code 27 + 9 national
+  // digits). Convert back to the national 0XX XXX XXXX form the user typed so
+  // the full 10-digit number is shown (previously the leading 0 was dropped
+  // and the string was truncated to 9 digits).
+  if (digits.startsWith('27') && digits.length === 11) {
+    digits = `0${digits.slice(2)}`; // 27XXXXXXXXX → 0XXXXXXXXX
+  }
+
+  // National mobile format: 0XX XXX XXXX (10 digits) → "073 123 4567".
+  if (digits.length === 10) {
+    return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6)}`;
+  }
+
+  // Fallbacks for partial / non-standard inputs — group in 3s, never truncate.
   if (digits.length <= 3) return digits;
   if (digits.length <= 6) return `${digits.slice(0, 3)} ${digits.slice(3)}`;
-  return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6, 9)}`;
+  if (digits.length <= 9) return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6)}`;
+  return `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6, 9)} ${digits.slice(9)}`;
 }
 
 function classifyChat(c: ChatPreview): 'direct' | 'group' {
@@ -695,6 +712,18 @@ function SelectContactSheet({
     ? contacts.filter((c) => c.displayName.toLowerCase().includes(searchQuery.toLowerCase()))
     : contacts;
 
+  // Partition into on-app (sorted A-Z, already sorted by useContacts) and off-app
+  const onApp  = filtered.filter((c) => c.isSaved);
+  const offApp = filtered.filter((c) => !c.isSaved);
+
+  const handleInvite = async (c: AppContact) => {
+    try {
+      await Share.share({
+        message: `Hey ${c.displayName}! I'm using Chit-Chat Business to stay connected. Join me here: https://chitchatbusiness.app`,
+      });
+    } catch { /* dismissed */ }
+  };
+
   if (mode === 'newContact') {
     return <NewContactSheet onBack={() => setMode('select')} onDone={onClose} reloadContacts={reloadContacts} />;
   }
@@ -744,7 +773,6 @@ function SelectContactSheet({
         ) : (
           <View style={{ flex: 1 }}>
             <AppText style={[styles.sheetTitle, { color: textColor }]}>Select contact</AppText>
-            <AppText style={[styles.sheetSub, { color: FG.secondary }]}>{contacts.length} contacts</AppText>
           </View>
         )}
 
@@ -822,20 +850,71 @@ function SelectContactSheet({
         </View>
       ) : (
         <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
-          {filtered.map((c) => (
-            <TouchableOpacity key={c.userId} style={[styles.contactRow, bevel]} activeOpacity={0.75}
-              onPress={() => { setMenuOpen(false); onNavigate(c); }}>
+          {/* ── On Chit-Chat contacts, grouped A-Z ── */}
+          {onApp.length > 0 && (() => {
+            const rows: React.ReactNode[] = [];
+            let lastLetter = '';
+            for (const c of onApp) {
+              const first = c.displayName.trim()[0]?.toUpperCase() ?? '#';
+              const letter = /[A-Z]/.test(first) ? first : '#';
+              if (letter !== lastLetter) {
+                lastLetter = letter;
+                rows.push(
+                  <View key={`letter-${letter}`} style={styles.sheetLetterHeader}>
+                    <AppText style={styles.sheetLetterText}>{letter}</AppText>
+                  </View>
+                );
+              }
+              rows.push(
+                <TouchableOpacity key={c.userId} style={[styles.contactRow, bevel]} activeOpacity={0.75}
+                  onPress={() => { setMenuOpen(false); onNavigate(c); }}>
+                  <ChatAvatar
+                    displayName={c.displayName}
+                    contactPhotoUri={c.photoUri}
+                    firebasePhotoURL={c.firebasePhotoURL}
+                    isSavedContact={c.isSaved}
+                  />
+                  <View style={styles.contactMeta}>
+                    <AppText style={[styles.contactName, { color: textColor }]}>{c.displayName}</AppText>
+                  </View>
+                </TouchableOpacity>
+              );
+            }
+            return rows;
+          })()}
+
+          {/* ── Invite divider ── */}
+          {offApp.length > 0 && (
+            <View style={styles.sheetInviteDivider}>
+              <AppText style={[styles.sheetInviteDividerText, { color: textColor }]}>
+                Invite to Chit-Chat
+              </AppText>
+            </View>
+          )}
+
+          {/* ── Off-app contacts with Invite button ── */}
+          {offApp.map((c) => (
+            <View key={`invite-${c.userId}`} style={[styles.contactRow, bevel]}>
               <ChatAvatar
                 displayName={c.displayName}
                 contactPhotoUri={c.photoUri}
-                firebasePhotoURL={c.firebasePhotoURL}
-                isSavedContact={c.isSaved}
+                firebasePhotoURL={undefined}
+                isSavedContact={false}
               />
               <View style={styles.contactMeta}>
                 <AppText style={[styles.contactName, { color: textColor }]}>{c.displayName}</AppText>
-                <AppText style={[styles.contactSub, { color: FG.secondary }]} numberOfLines={1}>{formatSAPhone(c.phone)}</AppText>
+                <AppText style={[styles.contactSub, { color: FG.secondary }]} numberOfLines={1}>
+                  {formatSAPhone(c.phone)}
+                </AppText>
               </View>
-            </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.sheetInviteBtn}
+                activeOpacity={0.75}
+                onPress={() => handleInvite(c)}
+              >
+                <AppText style={styles.sheetInviteBtnText}>Invite</AppText>
+              </TouchableOpacity>
+            </View>
           ))}
         </ScrollView>
       )}
@@ -1364,7 +1443,7 @@ export default function ChatsScreen() {
   const { bevel, iconButton }     = useGlass();
   const insets = useSafeAreaInsets();
 
-  const { chats, loading: chatsLoading, reload: reloadChats } = useChats(userId);
+  const { chats, loading: chatsLoading, reload: reloadChats, markChatRead } = useChats(userId);
   // useChats returns a fresh `reload` each render; keep the latest in a ref.
   const reloadChatsRef = useRef(reloadChats);
   reloadChatsRef.current = reloadChats;
@@ -1433,11 +1512,20 @@ export default function ChatsScreen() {
     if (sheetOpen) reloadContacts();
   }, [sheetOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Refresh contacts whenever the screen regains focus, so a contact edited or
-  // deleted inside a chat is reflected in the chat list name immediately.
+  // Tracks when contacts were last force-rescanned so we don't do a full
+  // phone-book scan on every navigate-back.
+  const lastContactRescanRef = useRef<number>(0);
+
+  // Refresh contacts when the screen regains focus, but throttle to at most
+  // once per minute. Navigating back quickly (open chat → back) serves the
+  // cache; the rescan only fires after the throttle window.
   useFocusEffect(
     useCallback(() => {
-      reloadContacts();
+      const RESCAN_INTERVAL_MS = 60 * 1000;
+      if (Date.now() - lastContactRescanRef.current > RESCAN_INTERVAL_MS) {
+        lastContactRescanRef.current = Date.now();
+        reloadContacts();
+      }
     }, [reloadContacts])
   );
 
@@ -1843,17 +1931,29 @@ export default function ChatsScreen() {
 
   const handleSelectContact = useCallback(async (contact: AppContact) => {
     if (!userId) return;
-    // Only registered users have a real backend id — a device contact that
-    // never matched a ChitChat account has userId === their phone number,
-    // which the server rejects (no users row), so block that case up front
-    // with a clear message instead of letting the request fail silently.
+
+    // Only registered ChitChat users have a real account id. For an
+    // unregistered device contact `contact.userId` is just their phone number,
+    // which the backend can't make a chat with (chat_members.user_id is a FK to
+    // users). Offer to invite them instead of silently failing.
     if (!contact.isSaved) {
       Alert.alert(
-        'Not on ChitChat',
-        `${contact.displayName} hasn't joined ChitChat yet. Invite them to start chatting.`,
+        `${contact.displayName} isn't on ChitChat yet`,
+        'You can only start a chat with contacts who use ChitChat Business. Invite them to join.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Invite',
+            onPress: () => {
+              const msg = `Let's chat on ChitChat Business: ${BUSINESS_LINK_BASE}`;
+              Share.share({ message: msg }).catch(() => {});
+            },
+          },
+        ],
       );
       return;
     }
+
     setSheetOpen(false);
     try {
       const chatId = await getOrCreateDirectChat(userId, contact.userId);
@@ -2124,13 +2224,16 @@ export default function ChatsScreen() {
           isPinned={isPinned}
           isMuted={isMuted}
           isFavourite={favourites.includes(item.chatId)}
-          onPress={() => navigation.navigate('Chat', {
-            chatId: item.chatId,
-            displayName,
-            isGroup,
-            otherUserId: otherMemberId || undefined,
-            otherUserPhoto: firebasePhotoURL || contactPhotoUri || null,
-          })}
+          onPress={() => {
+            markChatRead(item.chatId);
+            navigation.navigate('Chat', {
+              chatId: item.chatId,
+              displayName,
+              isGroup,
+              otherUserId: otherMemberId || undefined,
+              otherUserPhoto: firebasePhotoURL || contactPhotoUri || null,
+            });
+          }}
           onLongPress={() => setPreviewChat({
             chatId: item.chatId,
             displayName,
@@ -2149,7 +2252,7 @@ export default function ChatsScreen() {
   }, [
     userId, contacts, contactsMap, memberInfoMap, privacyPhotoMap, userStatusMap,
     bevel, textColor, fontFamily, FG.secondary, navigation, openOrCreateDirectChat,
-    pinned, mutedChats, favourites, handleTogglePin, handleMutePress, openChatActions,
+    pinned, mutedChats, favourites, handleTogglePin, handleMutePress, openChatActions, markChatRead,
   ]);
 
   const openPreviewedChat = useCallback(() => {
@@ -2765,14 +2868,6 @@ export default function ChatsScreen() {
 
       {tab === 'Broadcast' ? (
         <BroadcastScreen />
-      ) : (chats.length === 0 && (chatsLoading || !namesReady)) ? (
-        // Only show the spinner when we have nothing cached/loaded yet.
-        // Once there are chats (from cache or the live listener), render the
-        // list immediately — no "Loading chats…" flash on launch.
-        <View style={styles.emptyWrap}>
-          <ActivityIndicator size="large" color={COLORS.blue} />
-          <Text style={styles.emptyText}>Loading chats…</Text>
-        </View>
       ) : (
         <FlatList
           style={{ flex: 1 }}
@@ -2788,6 +2883,13 @@ export default function ChatsScreen() {
           maxToRenderPerBatch={10}
           windowSize={10}
           initialNumToRender={12}
+          ListHeaderComponent={
+            chatsLoading ? (
+              <View style={styles.loadingRow}>
+                <ActivityIndicator size="small" color={COLORS.blue} />
+              </View>
+            ) : null
+          }
           ListEmptyComponent={
             <View style={styles.emptyWrap}>
               <AppIcon
@@ -3096,6 +3198,48 @@ const styles = StyleSheet.create({
   contactMeta: { flex: 1 },
   contactName: { fontSize: 14, fontWeight: '600', color: COLORS.text },
   contactSub:  { fontSize: 12, color: COLORS.sub, marginTop: 2 },
+
+  // ── Letter section header inside the sheet ────────────────────────────────
+  sheetLetterHeader: {
+    paddingHorizontal: 28,
+    paddingTop: 12,
+    paddingBottom: 2,
+  },
+  sheetLetterText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.blue,
+    letterSpacing: 0.6,
+  },
+
+  // ── "Invite to Chit-Chat" divider inside the sheet ────────────────────────
+  sheetInviteDivider: {
+    marginHorizontal: 0,
+    marginTop: 16,
+    marginBottom: 8,
+    paddingVertical: 9,
+    paddingHorizontal: 28,
+    backgroundColor: COLORS.sky2,
+  },
+  sheetInviteDividerText: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+
+  // ── Invite button inside the sheet ───────────────────────────────────────
+  sheetInviteBtn: {
+    paddingHorizontal: 13,
+    paddingVertical: 6,
+    borderRadius: RADIUS.full,
+    backgroundColor: 'rgba(9,178,238,0.10)',
+    borderWidth: 1,
+    borderColor: 'rgba(9,178,238,0.25)',
+  },
+  sheetInviteBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.blue,
+  },
 
   checkbox:   { width: 24, height: 24, borderRadius: 12, borderWidth: 1.5, borderColor: COLORS.sub, alignItems: 'center', justifyContent: 'center' },
   checkboxOn: { backgroundColor: COLORS.blue, borderColor: COLORS.blue },

@@ -1,7 +1,7 @@
 // ─── Notification Context ────────────────────────────────────────────────────
 // Push notification system with native device notifications support.
 import React, {
-  createContext, useContext, useState, useCallback, useRef, useEffect,
+  createContext, useContext, useState, useCallback, useRef, useEffect, useMemo,
 } from 'react';
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
@@ -125,23 +125,12 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       if (toastTimer.current) clearTimeout(toastTimer.current);
       toastTimer.current = setTimeout(() => setToast(null), 4000);
 
-      // Send native device notification
-      try {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: notif.title,
-            body: notif.body,
-            sound: true,
-            data: { 
-              contactId: notif.contactId,
-              type: notif.type,
-            },
-          },
-          trigger: null,
-        });
-      } catch (error) {
-        console.log(`[NotificationContext-${callId}] Failed to send native notification:`, error);
-      }
+      // NOTE: We intentionally do NOT fire a native OS notification here.
+      // The OS-level banner is sent by the server push pipeline
+      // (server/src/push/dispatcher.ts) for every recipient who isn't
+      // actively viewing the chat. Scheduling a local notification on top of
+      // the socket-driven in-app event produced TWO banners for a single
+      // message. This path now owns only the in-app inbox, toast, and badge.
     },
     [],
   );
@@ -176,10 +165,18 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
   const clearAll = useCallback(() => setNotifications([]), []);
 
-  // Calculate counters
-  const unreadCount = notifications.filter((n) => !n.read).length;
-  const messageCount = notifications.filter((n) => !n.read && n.type === 'message').length;
-  const callCount = notifications.filter((n) => !n.read && n.type === 'call').length;
+  // Counters derived from notifications — computed once per change, not per
+  // render, in a single pass.
+  const { unreadCount, messageCount, callCount } = useMemo(() => {
+    let unread = 0, message = 0, call = 0;
+    for (const n of notifications) {
+      if (n.read) continue;
+      unread++;
+      if (n.type === 'message') message++;
+      else if (n.type === 'call') call++;
+    }
+    return { unreadCount: unread, messageCount: message, callCount: call };
+  }, [notifications]);
 
   // Update app badge count
   useEffect(() => {
@@ -188,12 +185,21 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     });
   }, [unreadCount]);
 
+  // Memoize so the provider value identity only changes when the data it
+  // exposes changes — not on every render of this provider. The callbacks are
+  // already stable (useCallback), so this stops notification/toast churn from
+  // re-rendering the whole navigator subtree.
+  const value = useMemo(() => ({
+    notifications, unreadCount, messageCount, callCount, toast,
+    pushNotification, dismissToast,
+    markRead, markAllRead, clearAll,
+  }), [
+    notifications, unreadCount, messageCount, callCount, toast,
+    pushNotification, dismissToast, markRead, markAllRead, clearAll,
+  ]);
+
   return (
-    <NotificationContext.Provider value={{
-      notifications, unreadCount, messageCount, callCount, toast,
-      pushNotification, dismissToast,
-      markRead, markAllRead, clearAll,
-    }}>
+    <NotificationContext.Provider value={value}>
       {children}
     </NotificationContext.Provider>
   );

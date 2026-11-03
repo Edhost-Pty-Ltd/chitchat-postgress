@@ -18,6 +18,9 @@ import {
   ScrollView,
   GestureResponderEvent,
 } from 'react-native';
+// expo-image: disk+memory cached, blurhash/placeholder support, fades the
+// image in instead of popping a spinner. Used for the full-screen status media.
+import { Image as ExpoImage } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -211,51 +214,18 @@ export function StatusViewer({
   }, [isPaused, isVideo]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Reset mediaReady when item changes (images/text) ──────────────────────
-  // For images: check if the URL is already in the RN disk/memory cache.
-  // If it is, skip the loading overlay entirely — image renders in one frame.
+  // expo-image handles caching + a blurred placeholder internally, so there's
+  // no need to probe a cache or block on a network check. Images are treated
+  // as ready immediately: the progress timer starts right away and expo-image
+  // fades the (already-prefetched) full image in over the blurred placeholder.
+  // This makes viewing your own statuses — and any prefetched status — instant.
   useEffect(() => {
     if (isVideo) return; // video handles its own ready state above
     setProgress(0);
     shouldAdvanceRef.current = false;
-
-    if (isText) {
-      // Text has no network load
-      setLoading(false);
-      setMediaReady(true);
-      return;
-    }
-
-    const url = currentStatus?.mediaUrl;
-    if (!url) {
-      setLoading(false);
-      setMediaReady(true);
-      return;
-    }
-
-    // queryCache returns a map of url → cache type ('memory'|'disk'|'disk/memory')
-    // If the entry exists, the image is already decoded — skip the loading state.
-    // Guard: queryCache may be undefined on older RN bridge versions.
-    const qc = Image.queryCache;
-    if (!qc) {
-      setLoading(true);
-      setMediaReady(false);
-      return;
-    }
-    qc([url]).then((result) => {
-      if (result[url]) {
-        // Already cached — show image immediately, no loading overlay
-        setLoading(false);
-        setMediaReady(true);
-      } else {
-        // Not cached yet — show gradient overlay until onLoadEnd fires
-        setLoading(true);
-        setMediaReady(false);
-      }
-    }).catch(() => {
-      // queryCache not supported (Android) — fall back to showing loader
-      setLoading(true);
-      setMediaReady(false);
-    });
+    // Images and text are ready at once — no loading overlay, no spinner.
+    setLoading(false);
+    setMediaReady(true);
   }, [currentIndex, isVideo, isText, currentStatus?.mediaUrl]);
 
   // ── Image / text timer — starts only after mediaReady ─────────────────────
@@ -412,21 +382,43 @@ export function StatusViewer({
               </Text>
             </View>
           ) : currentStatus.mediaType === 'image' && currentStatus.mediaUrl ? (
-            <Image
+            <ExpoImage
               source={{ uri: currentStatus.mediaUrl }}
               style={styles.media}
-              resizeMode="contain"
-              onLoadStart={() => { /* loading state managed by queryCache check */ }}
+              contentFit="contain"
+              // memory-disk cache + prefetch (done in StatusScreen) means the
+              // image is already local → it appears in the first frame.
+              cachePolicy="memory-disk"
+              // Blurred low-res thumbnail as the placeholder: shows a blurred
+              // version of the status instead of a spinner while the full image
+              // decodes. For images without a thumbnail the final image is
+              // usually cached already, so this is rarely visible.
+              placeholder={currentStatus.thumbnailUrl ? { uri: currentStatus.thumbnailUrl } : undefined}
+              placeholderContentFit="contain"
+              // Short cross-fade so cached images feel instant and uncached
+              // ones blend from the blurred placeholder rather than popping.
+              transition={150}
+              recyclingKey={currentStatus.statusId}
               onLoadEnd={() => {
                 setLoading(false);
-                // Only set mediaReady if not already set by queryCache — avoids
-                // restarting the timer on a redundant onLoadEnd from cached images
                 setMediaReady((prev) => prev ? prev : true);
               }}
             />
           ) : currentStatus.mediaType === 'video' && currentStatus.mediaUrl ? (
             /* pointerEvents="none" lets touches pass through to the tapZones above */
             <View style={styles.media} pointerEvents="none">
+              {/* Blurred thumbnail poster behind the video — shown until the
+                  first frame buffers so the viewer sees a blurred preview of
+                  the status instead of a black screen + spinner. */}
+              {currentStatus.thumbnailUrl && loading && (
+                <ExpoImage
+                  source={{ uri: currentStatus.thumbnailUrl }}
+                  style={StyleSheet.absoluteFill}
+                  contentFit="contain"
+                  cachePolicy="memory-disk"
+                  blurRadius={20}
+                />
+              )}
               <VideoView
                 player={player}
                 style={StyleSheet.absoluteFill}
@@ -465,15 +457,17 @@ export function StatusViewer({
           />
         )}
 
-        {/* Loading overlay — gradient placeholder so the viewer never shows pure black.
-            Shown while the image is fetching or the video hasn't sent its first frame. */}
-        {loading && (
+        {/* Loading placeholder — only a soft gradient, and only when there is no
+            blurred preview to show (i.e. video with no thumbnail). Images use
+            expo-image's blurred placeholder; videos use the blurred thumbnail
+            poster above. No spinner — the viewer shows a blurred preview of the
+            status instead. */}
+        {loading && !currentStatus.thumbnailUrl && (
           <View style={styles.loadingOverlay} pointerEvents="none">
             <LinearGradient
               colors={['#0a1628', '#1a3a5c', '#0d2137']}
               style={StyleSheet.absoluteFill}
             />
-            <ActivityIndicator size="large" color="rgba(255,255,255,0.85)" />
           </View>
         )}
 
@@ -505,7 +499,7 @@ export function StatusViewer({
             <View style={styles.userInfo}>
               <View style={styles.avatar}>
                 {currentStatus.photoURL ? (
-                  <Image source={{ uri: currentStatus.photoURL }} style={styles.avatarImage} />
+                  <ExpoImage source={{ uri: currentStatus.photoURL }} style={styles.avatarImage} cachePolicy="memory-disk" />
                 ) : (
                   <View style={[styles.avatarPlaceholder, { backgroundColor: COLORS.blue }]}>
                     <Text style={styles.avatarText}>
@@ -617,7 +611,7 @@ export function StatusViewer({
                   {viewers.map((v) => (
                     <View key={v.userId} style={styles.viewerRow}>
                       {v.photoURL ? (
-                        <Image source={{ uri: v.photoURL }} style={styles.viewerAvatar} />
+                        <ExpoImage source={{ uri: v.photoURL }} style={styles.viewerAvatar} cachePolicy="memory-disk" />
                       ) : (
                         <View style={[styles.viewerAvatar, styles.viewerAvatarFallback]}>
                           <Text style={styles.viewerAvatarInitial}>

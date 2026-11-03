@@ -9,7 +9,7 @@ import { View } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { TabParamList } from '../types';
-import { BottomNav } from '../components';
+import { BottomNav, type TabKey } from '../components';
 
 // ── Screen imports ────────────────────────────────────────────────────────────
 // ChatsScreen is eager (already in the main chunk); the others are lazy so they
@@ -36,7 +36,8 @@ const SettingsScreen = makeLazy(() => import('../screens/SettingsScreen'));
 // ── Custom tab bar ────────────────────────────────────────────────────────────
 // The BottomNav pill handles active state, badges, and theming.
 // We pass onTabPress so it drives the tab navigator directly — not the stack.
-type TabKey = 'chats' | 'calls' | 'status' | 'calendar' | 'settings';
+// TabKey is imported from components so BottomNav's onTabPress signature matches
+// exactly (previously two separate TabKey types caused a type clash).
 const ROUTE_TO_TAB: Record<string, TabKey> = {
   Chats:    'chats',
   Calls:    'calls',
@@ -44,7 +45,9 @@ const ROUTE_TO_TAB: Record<string, TabKey> = {
   Calendar: 'calendar',
   Settings: 'settings',
 };
-const TAB_TO_ROUTE: Record<TabKey, keyof TabParamList> = {
+// Partial: TabKey includes 'dashboard', which this navigator does not host as a
+// bottom tab, so it is intentionally absent here.
+const TAB_TO_ROUTE: Partial<Record<TabKey, keyof TabParamList>> = {
   chats:    'Chats',
   calls:    'Calls',
   status:   'Status',

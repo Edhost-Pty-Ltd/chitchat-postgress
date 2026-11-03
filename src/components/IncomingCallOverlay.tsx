@@ -9,7 +9,6 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
 import { AppText, AppIcon } from '../context/ThemeContext';
 import { Avatar } from '.';
-import { useRingtone } from '../hooks/useRingtone';
 import { COLORS, RADIUS, SHADOW } from '../types/theme';
 import type { IncomingCallData } from '../types/call';
 
@@ -22,7 +21,6 @@ interface IncomingCallOverlayProps {
 
 export function IncomingCallOverlay({ visible, call, onAnswer, onReject }: IncomingCallOverlayProps) {
   const pulseAnim = useRef(new Animated.Value(1)).current;
-  const ringtone = useRingtone();
 
   // Pulse animation for avatar
   useEffect(() => {
@@ -49,33 +47,32 @@ export function IncomingCallOverlay({ visible, call, onAnswer, onReject }: Incom
   // Play ringtone and vibrate when call comes in
   useEffect(() => {
     if (visible && call) {
-      console.log('[IncomingCallOverlay] Starting ringtone and vibration...');
-      
-      // Start ringtone
-      ringtone.play();
-      
+      console.log('[IncomingCallOverlay] Starting vibration...');
+
+      // NOTE: the ringtone is owned by IncomingCallManager's useRingtone.
+      // We intentionally do NOT play it here too — two expo-audio players both
+      // claiming the shared iOS AVAudioSession made the WebRTC audio pipeline
+      // stay silent after answering. This overlay only handles vibration.
+
       // Start vibration pattern (0.5s on, 0.5s off, repeat)
       const vibrationPattern = [0, 500, 500]; // delay, vibrate, pause
       Vibration.vibrate(vibrationPattern, true); // true = repeat
-      
+
       return () => {
-        console.log('[IncomingCallOverlay] Stopping ringtone and vibration...');
-        ringtone.stop();
+        console.log('[IncomingCallOverlay] Stopping vibration...');
         Vibration.cancel();
       };
     }
   }, [visible, call]);
 
-  // Handle answer - stop ringtone and vibration
+  // Handle answer - stop vibration (ringtone handled by IncomingCallManager)
   const handleAnswer = () => {
-    ringtone.stop();
     Vibration.cancel();
     onAnswer();
   };
 
-  // Handle reject - stop ringtone and vibration
+  // Handle reject - stop vibration (ringtone handled by IncomingCallManager)
   const handleReject = () => {
-    ringtone.stop();
     Vibration.cancel();
     onReject();
   };

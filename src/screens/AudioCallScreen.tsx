@@ -1,33 +1,33 @@
 // ─── Screen: Audio Call ──────────────────────────────────────────────────────
-// • Duration preserved when switching to/from VideoCall
-// • Chat button → opens conversation without ending call
-// • Switch to video → VideoCallScreen with same duration (call continues)
-// • Camera toggle shows local PiP (works on mobile + web)
+// Uses the shared CallContext WebRTC peer connection that was initialised by
+// useOutgoingCall (for outgoing) or useIncomingCallAnswer (for incoming).
+// The screen NO LONGER creates its own useWebRTC instance — doing so caused a
+// dual-peer-connection bug where two offers were sent and the answer listener
+// was destroyed when CallsScreen unmounted.
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  View, TouchableOpacity, StyleSheet, Dimensions,
-  Platform, Modal, ScrollView, Pressable, BackHandler,
+  View, TouchableOpacity, StyleSheet,
+  Platform, BackHandler,
 } from 'react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useCallContext } from '../context/CallContext';
+import { useIncomingCallAnswer } from '../hooks/useIncomingCallAnswer';
 import { useAuth } from '../hooks/useAuth';
 import { useFloatingCall } from '../context/FloatingCallContext';
-import { useRingtone } from '../hooks/useRingtone';
+import { endpoints } from '../api/endpoints';
 import { SignalingService } from '../services/signalingService';
 import { getOrCreateDirectChat } from '../hooks/useChatActions';
+import { setSpeakerphoneOn } from '../utils/webrtc-platform';
 
 import { AppText, AppIcon, AppBg, useGlass } from '../context/ThemeContext';
 import { Avatar } from '../components';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
-import { RootStackParamList, Contact } from '../types';
-import { CONTACTS } from '../data/mockData';
+import { RootStackParamList } from '../types';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'AudioCall'>;
 type RouteP  = RouteProp<RootStackParamList, 'AudioCall'>;
-
-const { height } = Dimensions.get('window');
 
 export default function AudioCallScreen() {
   const navigation = useNavigation<NavProp>();
@@ -62,7 +62,8 @@ export default function AudioCallScreen() {
     createAnswer,
     setRemoteAnswer,
     addIceCandidate,
-    toggleMute: toggleMuteWebRTC,
+    initializePeerConnection,
+    toggleMute: toggleMuteCtx,
     startNetworkMonitoring,
     cleanup: cleanupWebRTC,
   } = useCallContext();
@@ -102,23 +103,64 @@ export default function AudioCallScreen() {
   };
 
   const [participants, setParticipants] = useState<Contact[]>([contact]);
+    cleanup: cleanupCtx,
+  } = useCallContext();
 
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const incomingCall = useIncomingCallAnswer();
+
+  const [muted,       setMuted]       = useState(false);
+  // Default to speaker ON for audio calls. iOS routes WebRTC voiceChat audio to
+  // the earpiece by default, which is inaudible unless the phone is held to the
+  // ear. Defaulting to speaker makes the call audible; the user can toggle off.
+  const [speakerOn,   setSpeakerOn]   = useState(true);
+  const [duration,    setDuration]    = useState(0);
+  const [callStatus,  setCallStatus]  = useState<string>(isOutgoing ? 'ringing' : 'connecting');
+
+  const timerRef           = useRef<ReturnType<typeof setInterval> | null>(null);
   const unsubscribeCallRef = useRef<(() => void) | null>(null);
+  const answerApplied      = useRef(false);
+  const iceApplied         = useRef<Set<string>>(new Set());
 
-  // Ringtone — play while connecting (outgoing), stop when connected or screen unmounts
-  const ringtone = useRingtone();
+  // NOTE: This screen intentionally owns no expo-audio player. The ringtone is
+  // owned by IncomingCallManager (callee only). A local useRingtone() instance
+  // here could never stop that ringtone (separate player), and calling its
+  // stop() on mount ran player.pause(), which made expo-audio deactivate the
+  // iOS AVAudioSession right after getUserMedia started WebRTC's audio engine —
+  // silencing the call in both directions.
+
+  // Update floating overlay while minimised
   useEffect(() => {
-    if (isOutgoing) ringtone.play();
-    return () => { ringtone.stop(); };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    updateDuration(fmt(duration));
+  }, [duration, updateDuration]);
 
-  // Stop ringtone the moment the call connects
+  // Track connection state changes from context
   useEffect(() => {
-    if (callStatus === 'connected') ringtone.stop();
-  }, [callStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (connectionState === 'connected') {
+      setCallStatus('connected');
+      startNetworkMonitoring();
+    } else if (connectionState === 'disconnected' || connectionState === 'failed') {
+      setCallStatus('disconnected');
+    }
+  }, [connectionState, startNetworkMonitoring]);
 
-  // Initialize WebRTC and call setup
+  // Apply the output route whenever the speaker toggle changes OR the call
+  // becomes connected (iOS resets the route to the earpiece when the voiceChat
+  // audio engine starts, so we must (re)assert speaker once audio is live).
+  useEffect(() => {
+    if (connectionState === 'connected') {
+      setSpeakerphoneOn(speakerOn);
+    }
+  }, [speakerOn, connectionState]);
+
+  // NOTE: We deliberately do NOT call expo-audio's setAudioModeAsync during the
+  // call. @livekit/react-native-webrtc owns the shared iOS AVAudioSession; any
+  // expo-audio reconfiguration (even to change output routing) reconfigures that
+  // singleton and silences the remote audio track. Output ROUTING is instead
+  // done via the native AudioRouteModule (RTCAudioSession.overrideOutputAudioPort
+  // on iOS, AudioManager on Android), which changes only the route — not the
+  // session category — so it never silences the live call.
+
+  // ── Call setup ─────────────────────────────────────────────────────────────
   useEffect(() => {
     // Tracks signalling we've already acted on so each is handled exactly once.
     let answerApplied = false;
@@ -170,26 +212,78 @@ export default function AudioCallScreen() {
             if (data.status === 'ended' || data.status === 'rejected' || data.status === 'missed') {
               endFromRemote();
             }
-          });
-        } else {
-          console.log('[AudioCall] Answering as callee...');
+          // ── OUTGOING: peer connection & offer already sent by useOutgoingCall.
+          // Re-attach a listener here because the one in CallsScreen was destroyed
+          // when that screen unmounted. We handle answer + ICE directly on context.
           unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, async (data) => {
             if (!data) return;
-            if (data.offer && !offerAnswered) {
-              offerAnswered = true;
-              const answer = await createAnswer(data.offer);
-              await SignalingService.saveAnswer(callId, answer);
-            }
-            // Apply the caller's ICE only after we've answered (remote
-            // description must exist first).
-            if (offerAnswered) applyRemoteIce(data.callerIceCandidates);
+
             if (data.status === 'ended' || data.status === 'rejected' || data.status === 'missed') {
-              endFromRemote();
+              cleanupCtx();
+              setCallStatus('ended');
+              navigation.goBack();
+              return;
+            }
+
+            // Apply the callee's answer once
+            if (data.answer && data.status === 'accepted' && !answerApplied.current) {
+              answerApplied.current = true;
+              try {
+                await setRemoteAnswer(data.answer);
+                setCallStatus('connected');
+              } catch (err) {
+                console.error('[AudioCall] setRemoteAnswer failed:', err);
+              }
+            }
+
+            // Apply callee ICE candidates (deduplicated)
+            for (const cand of data.calleeIceCandidates ?? []) {
+              const key = `${cand.candidate}-${cand.sdpMLineIndex}`;
+              if (!iceApplied.current.has(key)) {
+                iceApplied.current.add(key);
+                await addIceCandidate(cand).catch(console.error);
+              }
+            }
+          });
+        } else {
+          // ── INCOMING: create answer using the shared context peer connection
+          // Pre-warm: acquire the mic now so getUserMedia runs in parallel with
+          // waiting for the offer. answerCall reuses this (initializePeerConnection
+          // is idempotent), so connecting after the offer is near-instant.
+          await initializePeerConnection(false);
+
+          unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, async (data) => {
+            if (!data) return;
+
+            if (data.status === 'ended') {
+              cleanupCtx();
+              setCallStatus('ended');
+              navigation.goBack();
+              return;
+            }
+
+            // Answer once we have the offer
+            if (data.offer && !answerApplied.current) {
+              answerApplied.current = true;
+              const ok = await incomingCall.answerCall(callId, data.offer, 'audio');
+              if (ok) setCallStatus('connected');
+            }
+
+            // Apply caller ICE candidates
+            for (const cand of data.callerIceCandidates ?? []) {
+              const key = `${cand.candidate}-${cand.sdpMLineIndex}`;
+              if (!iceApplied.current.has(key)) {
+                iceApplied.current.add(key);
+                await addIceCandidate(cand).catch(console.error);
+              }
             }
           });
         }
-      } catch (error) {
-        console.error('[AudioCall] Setup failed:', error);
+
+        // Start the duration timer
+        timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
+      } catch (err) {
+        console.error('[AudioCall] Setup failed:', err);
         setCallStatus('failed');
       }
     };
@@ -199,7 +293,6 @@ export default function AudioCallScreen() {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (unsubscribeCallRef.current) unsubscribeCallRef.current();
-      cleanupWebRTC();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -216,117 +309,63 @@ export default function AudioCallScreen() {
 
   // Handle Android back button - minimize call instead of ending it
   useEffect(() => {
-    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
-      // Minimize the call
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       minimizeCall({
         callId,
-        displayName: contact.name,
-        avatar: contact.avatar,
-        color: contact.color,
+        displayName: otherParty.displayName,
+        avatar: otherParty.displayName.split(' ').map((n) => n[0]).join('').toUpperCase(),
+        color: COLORS.blue,
         duration: fmt(duration),
         isVideo: false,
         isOutgoing,
         otherParty,
       });
-      
-      // Navigate back without ending call
       navigation.goBack();
-      return true; // Prevent default back behavior
+      return true;
     });
-
-    return () => backHandler.remove();
-  }, [duration, callId, isOutgoing, otherParty, contact, minimizeCall, navigation]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Update floating call duration while minimized
-  useEffect(() => {
-    updateDuration(fmt(duration));
-  }, [duration, updateDuration]);
+    return () => sub.remove();
+  }, [duration, callId, isOutgoing, otherParty, minimizeCall, navigation]);
 
   const fmt = (s: number) =>
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
   const hangUp = async () => {
-    ringtone.stop();
-    try {
-      // Emit the 'end' signal over the socket. The server relays it to the
-      // other participant (so THEIR screen closes too) and records call history
-      // for both sides: a positive duration = completed, 0 = no-answer/missed.
-      await SignalingService.updateCallStatus(
-        callId,
-        'ended',
-        connectedRef.current ? duration : 0,
-      );
-    } catch (error) {
-      console.error('[AudioCall] Failed to end call:', error);
-    }
-    cleanupWebRTC();
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (unsubscribeCallRef.current) { unsubscribeCallRef.current(); unsubscribeCallRef.current = null; }
+    // Notify the other party over the socket so their screen ends the call.
+    // The REST /end route only updates the DB; it does NOT signal the peer, so
+    // without this the other user's call stays frozen/ongoing.
+    try { await SignalingService.updateCallStatus(callId, 'ended', duration); }
+    catch (err) { console.error('[AudioCall] signal end:', err); }
+    try { await endpoints.endCall(callId); } catch (err) { console.error('[AudioCall] endCall:', err); }
+    cleanupCtx();
     navigation.goBack();
   };
 
   const openChat = async () => {
+    if (!user?.uid) return;
     try {
-      if (!user?.uid) {
-        console.error('[AudioCall] Cannot open chat: user not authenticated');
-        return;
-      }
-      
-      // Get or create the actual chat ID for this conversation
-      const actualChatId = await getOrCreateDirectChat(user.uid, otherParty.userId);
-      
-      // Navigate to chat with the actual chat ID
+      const chatId = await getOrCreateDirectChat(user.uid, otherParty.userId);
       navigation.navigate('Chat', {
-        chatId: actualChatId,
-        displayName: otherParty.displayName,
-        isGroup: false,
-        otherUserId: otherParty.userId,
-        otherUserPhoto: otherParty.photoUrl,
+        chatId, displayName: otherParty.displayName, isGroup: false,
+        otherUserId: otherParty.userId, otherUserPhoto: otherParty.photoUrl,
       });
-    } catch (error) {
-      console.error('[AudioCall] Failed to open chat:', error);
-    }
+    } catch (err) { console.error('[AudioCall] openChat:', err); }
   };
 
-  // Switch to video — cleanly transition while keeping the call alive
-  const switchToVideo = async () => {
+  const switchToVideo = () => {
     if (timerRef.current) clearInterval(timerRef.current);
-    cleanupWebRTC();
+    if (unsubscribeCallRef.current) { unsubscribeCallRef.current(); unsubscribeCallRef.current = null; }
     navigation.replace('VideoCall', { callId, isOutgoing, otherParty });
   };
 
   const handleMuteToggle = () => {
-    const newMuted = !muted;
-    setMuted(newMuted);
-    toggleMuteWebRTC(newMuted);
+    const next = !muted;
+    setMuted(next);
+    toggleMuteCtx(next);
   };
 
-  // Network quality indicator color
-  const getQualityColor = () => {
-    switch (networkQuality) {
-      case 'excellent': return '#10b981';
-      case 'good': return '#3b82f6';
-      case 'fair': return '#f59e0b';
-      case 'poor': return '#ef4444';
-      default: return 'transparent';
-    }
-  };
-
-  const getQualityText = () => {
-    switch (networkQuality) {
-      case 'excellent': return 'Excellent connection';
-      case 'good': return 'Good connection';
-      case 'fair': return 'Fair connection';
-      case 'poor': return 'Poor connection';
-      default: return 'Connecting...';
-    }
-  };
-
-  const addContact = (c: Contact) => {
-    if (participants.some((p) => p.id === c.id)) return;
-    setParticipants((prev) => [...prev, c]);
-    setAddOpen(false);
-  };
-
-  const availableContacts = CONTACTS.filter((c) => !participants.some((p) => p.id === c.id));
+  const initials = otherParty.displayName.split(' ').map((n) => n[0]).join('').toUpperCase() || '??';
 
   return (
     <View style={styles.root}>
@@ -338,82 +377,52 @@ export default function AudioCallScreen() {
         <View style={styles.avatarRing}>
           <Avatar initials={contact.avatar} color={contact.color} size={110} imageUrl={otherParty.photoUrl} />
         </View>
-        <AppText fixedColor style={styles.callerName}>{contact.name}</AppText>
+        <AppText fixedColor style={styles.callerName}>{otherParty.displayName}</AppText>
         <AppText fixedColor style={styles.callStatus}>
-          {callStatus === 'connecting' ? 'Connecting...' : 'Audio call'} · {fmt(duration)}
+          {callStatus === 'ringing' ? 'Ringing…'
+            : callStatus === 'connecting' ? 'Connecting…'
+            : callStatus === 'connected' ? `Audio call · ${fmt(duration)}`
+            : callStatus === 'disconnected' ? 'Reconnecting…'
+            : callStatus === 'ended' ? 'Call ended'
+            : `${callStatus} · ${fmt(duration)}`}
         </AppText>
-        {participants.length > 1 && (
-          <View style={styles.extraRow}>
-            {participants.slice(1).map((p) => (
-              <Avatar key={p.id} initials={p.avatar} color={p.color} size={36} />
-            ))}
-            <AppText fixedColor style={styles.extraLabel}>
-              +{participants.length - 1} on call
-            </AppText>
-          </View>
-        )}
-        {/* Network quality badge */}
-        {networkQuality !== 'unknown' && (
-          <View style={[styles.qualityBadge, { backgroundColor: getQualityColor() }]}>
-            <AppIcon 
-              name={networkQuality === 'excellent' || networkQuality === 'good' ? 'wifi' : 'wifi-outline'} 
-              size={16} 
-              color="#fff" 
-              fixedColor 
-            />
-            <AppText fixedColor style={styles.qualityBadgeText}>{getQualityText()}</AppText>
-          </View>
-        )}
       </View>
-
-      {/* Network quality alert */}
-      {showQuality && (networkQuality === 'poor' || networkQuality === 'fair') && (
-        <View style={[styles.qualityAlert, { backgroundColor: getQualityColor() }]}>
-          <AppIcon name="warning-outline" size={16} color="#fff" fixedColor />
-          <AppText fixedColor style={styles.qualityText}>{getQualityText()}</AppText>
-        </View>
-      )}
 
       {/* ── Top bar ── */}
       <View style={styles.topBar}>
-        <TouchableOpacity onPress={hangUp} style={styles.iconBtn}>
+        <TouchableOpacity onPress={() => {
+          minimizeCall({
+            callId, displayName: otherParty.displayName,
+            avatar: initials, color: COLORS.blue,
+            duration: fmt(duration), isVideo: false, isOutgoing, otherParty,
+          });
+          navigation.goBack();
+        }} style={styles.iconBtn}>
           <AppIcon name="chevron-back" size={26} color="rgba(255,255,255,0.80)" fixedColor />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <AppText fixedColor style={styles.topName}>{contact.name}</AppText>
-          <AppText fixedColor style={styles.topStatus}>
-            {fmt(duration)} · {participants.length} participant{participants.length > 1 ? 's' : ''}
-          </AppText>
+          <AppText fixedColor style={styles.topName}>{otherParty.displayName}</AppText>
+          <AppText fixedColor style={styles.topStatus}>{fmt(duration)}</AppText>
         </View>
-
-        {/* Chat button */}
         <TouchableOpacity style={[styles.iconBtn, styles.iconBtnGlass, bevel]} onPress={openChat}>
           <AppIcon name="chatbubble-outline" size={20} color="#fff" fixedColor />
-        </TouchableOpacity>
-
-        {/* Add person */}
-        <TouchableOpacity style={[styles.iconBtn, styles.iconBtnGlass, bevel]}
-          onPress={() => setAddOpen(true)}>
-          <AppIcon name="person-add-outline" size={20} color="#fff" fixedColor />
         </TouchableOpacity>
       </View>
 
       {/* ── Controls ── */}
       <View style={styles.controls}>
         <View style={styles.controlCol}>
-          <TouchableOpacity style={[styles.controlBtn, muted && styles.controlBtnActive]}
-            onPress={handleMuteToggle}>
+          <TouchableOpacity style={[styles.controlBtn, muted && styles.controlBtnActive]} onPress={handleMuteToggle}>
             <AppIcon name={muted ? 'mic-off' : 'mic-outline'} size={24} color="#fff" fixedColor />
           </TouchableOpacity>
           <AppText fixedColor style={styles.controlLabel}>{muted ? 'Unmute' : 'Mute'}</AppText>
         </View>
 
         <View style={styles.controlCol}>
-          <TouchableOpacity style={[styles.controlBtn, speakerOn && styles.controlBtnActive]}
-            onPress={() => setSpeakerOn((s) => !s)}>
-            <AppIcon name={speakerOn ? 'volume-high-outline' : 'volume-mute-outline'} size={24} color="#fff" fixedColor />
+          <TouchableOpacity style={[styles.controlBtn, speakerOn && styles.controlBtnActive]} onPress={() => setSpeakerOn((s) => !s)}>
+            <AppIcon name={speakerOn ? 'volume-high' : 'ear-outline'} size={24} color="#fff" fixedColor />
           </TouchableOpacity>
-          <AppText fixedColor style={styles.controlLabel}>Speaker</AppText>
+          <AppText fixedColor style={styles.controlLabel}>{speakerOn ? 'Speaker' : 'Earpiece'}</AppText>
         </View>
 
         <View style={styles.controlCol}>
@@ -430,37 +439,6 @@ export default function AudioCallScreen() {
           <AppText fixedColor style={styles.controlLabel}>End</AppText>
         </View>
       </View>
-
-      {/* ── Add person modal ── */}
-      <Modal visible={addOpen} transparent animationType="slide"
-        onRequestClose={() => setAddOpen(false)}>
-        <Pressable style={styles.addOverlay} onPress={() => setAddOpen(false)} />
-        <View style={styles.addSheet}>
-          <View style={styles.addHandle} />
-          <AppText fixedColor style={styles.addTitle}>Add to call</AppText>
-          {availableContacts.length === 0 ? (
-            <AppText fixedColor style={styles.addEmpty}>All contacts are already in the call.</AppText>
-          ) : (
-            <ScrollView showsVerticalScrollIndicator={false}>
-              {availableContacts.map((c) => (
-                <TouchableOpacity key={c.id} style={styles.addContactRow}
-                  onPress={() => addContact(c)} activeOpacity={0.8}>
-                  <Avatar initials={c.avatar} color={c.color} size={46} status={c.status} />
-                  <View style={styles.addContactMeta}>
-                    <AppText fixedColor style={styles.addContactName}>{c.name}</AppText>
-                    <AppText fixedColor style={styles.addContactSub}>
-                      {c.status === 'online' ? 'Online' : 'Tap to add'}
-                    </AppText>
-                  </View>
-                  <LinearGradient colors={GRADIENTS.primary} style={styles.addIconWrap}>
-                    <AppIcon name="call-outline" size={18} color="#fff" fixedColor />
-                  </LinearGradient>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          )}
-        </View>
-      </Modal>
     </View>
   );
 }
@@ -480,8 +458,6 @@ const styles = StyleSheet.create({
   },
   callerName: { fontSize: 26, fontWeight: '700', color: '#fff' },
   callStatus: { fontSize: 15, color: 'rgba(255,255,255,0.65)' },
-  extraRow:   { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 },
-  extraLabel: { fontSize: 13, color: 'rgba(255,255,255,0.65)' },
 
   topBar: {
     position: 'absolute', top: 0, left: 0, right: 0,
@@ -491,13 +467,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.30)', gap: 6,
   },
   iconBtn:      { padding: 8 },
-  iconBtnGlass: {
-    borderRadius: 20,
-  },
-  iconBtnActive: {
-    backgroundColor: 'rgba(9,178,238,0.35)',
-    borderColor: 'rgba(9,178,238,0.55)',
-  },
+  iconBtnGlass: { borderRadius: 20 },
   topName:   { fontSize: 15, fontWeight: '700', color: '#fff' },
   topStatus: { fontSize: 11, color: 'rgba(255,255,255,0.65)', marginTop: 2 },
 
@@ -524,69 +494,5 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     transform: [{ rotate: '135deg' }],
     ...SHADOW.button,
-  },
-
-  addOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.50)' },
-  addSheet: {
-    backgroundColor: '#0d2040',
-    borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    maxHeight: height * 0.65,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 20,
-    paddingHorizontal: 16, paddingTop: 12,
-    ...SHADOW.glow,
-  },
-  addHandle: {
-    width: 40, height: 4, borderRadius: 2,
-    backgroundColor: 'rgba(255,255,255,0.25)',
-    alignSelf: 'center', marginBottom: 14,
-  },
-  addTitle: { fontSize: 17, fontWeight: '700', color: '#fff', marginBottom: 14 },
-  addEmpty: { fontSize: 14, color: 'rgba(255,255,255,0.55)', textAlign: 'center', paddingVertical: 24 },
-  addContactRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 14,
-    paddingVertical: 12,
-    borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.08)',
-  },
-  addContactMeta: { flex: 1 },
-  addContactName: { fontSize: 15, fontWeight: '600', color: '#fff' },
-  addContactSub:  { fontSize: 12, color: 'rgba(255,255,255,0.55)', marginTop: 2 },
-  addIconWrap: {
-    width: 40, height: 40, borderRadius: 20,
-    alignItems: 'center', justifyContent: 'center',
-    ...SHADOW.button,
-  },
-
-  // Network quality indicator
-  qualityBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: RADIUS.full,
-    marginTop: 8,
-    ...SHADOW.card,
-  },
-  qualityBadgeText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#fff',
-  },
-  qualityAlert: {
-    position: 'absolute',
-    top: Platform.OS === 'ios' ? 100 : 82,
-    left: 12, right: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: RADIUS.md,
-    ...SHADOW.card,
-  },
-  qualityText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#fff',
   },
 });

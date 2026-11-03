@@ -1,6 +1,12 @@
 import { getAdminAuth } from './firebaseAdmin.js';
 import { backfillPhoneIfRegistered } from '../db/repositories/users.js';
 import { query } from '../db/pool.js';
+import {
+  getCachedDecoded,
+  cacheDecoded,
+  wasRecentlyUpserted,
+  markUpserted,
+} from './tokenCache.js';
 
 /** Identity resolved from a verified Firebase ID token (Req 2.4). */
 export interface AuthedIdentity {
@@ -108,11 +114,21 @@ export async function verifyToken(
     verify?: (t: string) => Promise<DecodedToken>;
     syncPhone?: (id: string, phone: string | null) => Promise<void>;
     isLinked?: (ownerId: string, deviceId: string) => Promise<boolean>;
+    /**
+     * Whether the decoded-token cache and recent-upsert cache may be used
+     * (default true). The socket handshake passes false so every new
+     * connection does a fresh checkRevoked verification.
+     */
+    useCache?: boolean;
   } = {},
 ): Promise<AuthedIdentity> {
   if (!token || typeof token !== 'string' || token.trim() === '') {
     throw new AuthError('AUTH_TOKEN_MISSING', 'Missing authentication token');
   }
+
+  // The cache is only consulted on the real verification path (no injected
+  // deps) so unit tests with a stub `verify` always exercise it directly.
+  const cacheable = useCacheEnabled(deps);
 
   const verify =
     deps.verify ??
@@ -130,10 +146,16 @@ export async function verifyToken(
     });
 
   let decoded: DecodedToken;
-  try {
-    decoded = await verify(token);
-  } catch (err) {
-    throw mapFirebaseError(err);
+  const cached = cacheable ? getCachedDecoded(token) : undefined;
+  if (cached) {
+    decoded = cached;
+  } else {
+    try {
+      decoded = await verify(token);
+    } catch (err) {
+      throw mapFirebaseError(err);
+    }
+    if (cacheable) cacheDecoded(token, decoded);
   }
 
   const isAnonymous = decoded.provider === 'anonymous';
@@ -142,7 +164,8 @@ export async function verifyToken(
 
   if (isCompanion) {
     // A companion must carry the device id it was linked with, and that device
-    // must still be linked to the owner.
+    // must still be linked to the owner. This check is NEVER cached so a device
+    // removal takes effect on the companion's very next request.
     const isLinked = deps.isLinked ?? companionStillLinked;
     if (!deviceId || !(await isLinked(decoded.uid, deviceId))) {
       throw new AuthError('AUTH_TOKEN_REVOKED', 'This companion device has been removed');
@@ -151,8 +174,12 @@ export async function verifyToken(
 
   const phoneNumber = decoded.phone_number ?? null;
   if (!isAnonymous) {
-    const syncPhone = deps.syncPhone ?? backfillPhoneIfRegistered;
-    await syncPhone(decoded.uid, phoneNumber);
+    const upsert = deps.upsert ?? upsertUserOnFirstContact;
+    // Skip the per-request write when this uid was upserted within the TTL.
+    if (!(cacheable && wasRecentlyUpserted(decoded.uid))) {
+      await upsert(decoded.uid, phoneNumber);
+      if (cacheable) markUpserted(decoded.uid);
+    }
   }
 
   return {
@@ -163,6 +190,22 @@ export async function verifyToken(
     deviceId,
     isAnonymous,
   };
+}
+
+/**
+ * The caches are only safe to use on the real verification path: when the
+ * caller injects a custom `verify` or `upsert` (unit tests) we must always run
+ * them directly, and when `useCache: false` (socket handshake) we force a fresh
+ * verify.
+ */
+function useCacheEnabled(deps: {
+  verify?: unknown;
+  upsert?: unknown;
+  useCache?: boolean;
+}): boolean {
+  if (deps.useCache === false) return false;
+  if (deps.verify || deps.upsert) return false;
+  return true;
 }
 
 /** Extract a bearer token from an Authorization header value. */

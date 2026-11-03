@@ -1,9 +1,11 @@
 // ─── useUnreadCount Hook ──────────────────────────────────────────────────────
-// Real-time unread message counts via the backend REST + socket path.
-// Fetches totals from GET /chats on mount and refreshes on any message or read
-// socket event, matching the shape previously sourced from Firestore.
+// App-wide unread totals for the bottom-nav badge, via the backend REST + socket
+// path. The total is seeded from GET /chats once, then kept live INCREMENTALLY:
+// an inbound message from someone else bumps the total immediately, while read
+// receipts trigger a debounced resync (bursts collapse into one refetch) so the
+// badge stays accurate without a full /chats fetch on every single event.
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { endpoints } from '../api/endpoints';
 import { socketClient } from '../realtime/socket';
 
@@ -16,6 +18,32 @@ export function useUnreadCount(userId: string | null): {
   const [unreadByChat, setUnreadByChat] = useState<Map<string, number>>(new Map());
   const [loading,      setLoading]      = useState(true);
   const activeRef = useRef(true);
+  const userIdRef = useRef<string | null>(userId);
+  userIdRef.current = userId;
+  const resyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const load = useCallback(async () => {
+    const res = await endpoints.listChats();
+    if (!activeRef.current) return;
+    if (!res.ok) { setLoading(false); return; }
+    const map = new Map<string, number>();
+    for (const chat of res.data.chats) {
+      const count = chat.unreadCount ?? 0;
+      if (count > 0) map.set(chat.chatId, count);
+    }
+    setUnreadByChat(map);
+    setTotalUnread(res.data.totalUnread);
+    setLoading(false);
+  }, []);
+
+  // Collapse bursts of read/delivery events into a single refetch.
+  const scheduleResync = useCallback(() => {
+    if (resyncTimer.current) return;
+    resyncTimer.current = setTimeout(() => {
+      resyncTimer.current = null;
+      void load();
+    }, 400);
+  }, [load]);
 
   useEffect(() => {
     activeRef.current = true;
@@ -27,45 +55,43 @@ export function useUnreadCount(userId: string | null): {
       return;
     }
 
-    async function load() {
-      const res = await endpoints.listChats();
-      if (!activeRef.current) return;
-
-      if (!res.ok) {
-        setLoading(false);
-        return;
+    // Inbound message from another user → bump immediately (no network).
+    const onNew = (payload: unknown) => {
+      const message = (payload as { message?: { id?: string; chatId?: string; senderId?: string } })?.message;
+      if (!message?.chatId || message.senderId === userIdRef.current) return;
+      const { chatId } = message;
+      // Acknowledge delivery for any inbound message, even when the recipient
+      // isn't viewing that chat. This advances the sender's tick to the grey
+      // double-tick ("delivered"). Reads are emitted separately from the open
+      // chat screen (useMessages) and turn the tick blue.
+      if (message.id) {
+        socketClient.emit('message:delivered', { chatId, messageId: message.id });
       }
-
-      const map = new Map<string, number>();
-      let total = res.data.totalUnread;
-      for (const chat of res.data.chats) {
-        const count = chat.unreadCount ?? 0;
-        if (count > 0) map.set(chat.chatId, count);
-      }
-      setUnreadByChat(map);
-      setTotalUnread(total);
-      setLoading(false);
-    }
+      setUnreadByChat((prev) => {
+        const next = new Map(prev);
+        next.set(chatId, (next.get(chatId) ?? 0) + 1);
+        return next;
+      });
+      setTotalUnread((t) => t + 1);
+    };
 
     void socketClient.connect().then(load).catch(() => { if (activeRef.current) setLoading(false); });
 
     // Refresh on any delivery/read/new-message event.
-    // `client:read` is a synthetic local event fired by markAsRead in useMessages
-    // when the user opens a chat — the server doesn't echo read receipts back to
-    // the reader, so without this the badge would stay stale until the next
-    // message:new triggers a re-fetch.
     const unsubs = [
-      socketClient.subscribe('message:new',  () => void load()),
-      socketClient.subscribe('message:read', () => void load()),
-      socketClient.subscribe('message:delivered', () => void load()),
-      socketClient.subscribe('client:read',  () => void load()),
+      socketClient.subscribe('message:new', onNew),
+      // Reads/deliveries change counts on the reader's side; resync debounced.
+      socketClient.subscribe('message:read', scheduleResync),
+      socketClient.subscribe('message:delivered', scheduleResync),
+      socketClient.subscribe('client:reconnect', () => void load()),
     ];
 
     return () => {
       activeRef.current = false;
+      if (resyncTimer.current) { clearTimeout(resyncTimer.current); resyncTimer.current = null; }
       unsubs.forEach((u) => u());
     };
-  }, [userId]);
+  }, [userId, load, scheduleResync]);
 
   return { totalUnread, unreadByChat, loading };
 }

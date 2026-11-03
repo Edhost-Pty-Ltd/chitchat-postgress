@@ -122,6 +122,8 @@ export interface Contact {
   time: string;
   unread: number;
   pinned?: boolean;
+  /** For group contacts in mock/demo data: the member contacts. */
+  members?: Contact[];
 }
 
 export interface Message {
@@ -132,6 +134,12 @@ export interface Message {
   voice?: boolean;
   time: string;
   type: MessageType;
+  /** Rich "phone number changed" system message payload (mock/demo threads). */
+  numberChange?: {
+    oldNumber: string;
+    newNumber: string;
+    displayName: string;
+  };
 }
 
 // ─── Real-time Chat Message ───────────────────────────────────────────────────

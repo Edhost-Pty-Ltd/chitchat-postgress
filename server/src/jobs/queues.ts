@@ -1,22 +1,15 @@
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
-import { getEnv } from '../config/env.js';
 import { logger } from '../config/logger.js';
+import { bullConnection } from '../redis/client.js';
 import { dispatchMessagePush, type PushMessageJob } from '../push/dispatcher.js';
 import { getCall, updateCallStatus } from '../db/repositories/calls.js';
 import { recordHistory } from '../realtime/handlers/signaling.js';
 import { emitToUser } from '../realtime/emitter.js';
 import { deleteObject } from '../media/presign.js';
 
-/** BullMQ connection built from REDIS_URL. */
+/** BullMQ connection built from REDIS_URL (with TLS when configured). */
 function connection(): ConnectionOptions {
-  const url = new URL(getEnv().REDIS_URL);
-  return {
-    host: url.hostname,
-    port: Number(url.port || 6379),
-    password: url.password || undefined,
-    // BullMQ requires this to be null.
-    maxRetriesPerRequest: null,
-  };
+  return bullConnection() as ConnectionOptions;
 }
 
 export const QUEUE_PUSH = 'push';

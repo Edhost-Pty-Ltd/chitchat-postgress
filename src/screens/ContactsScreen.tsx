@@ -1,40 +1,101 @@
 ﻿// ─── Screen: Contacts ────────────────────────────────────────────────────────
-import React, { useState } from 'react';
-import { View, FlatList, TouchableOpacity, StyleSheet, TextInput, Alert, ActivityIndicator } from 'react-native';
+import React, { useState, useMemo } from 'react';
+import {
+  View,
+  FlatList,
+  TouchableOpacity,
+  StyleSheet,
+  TextInput,
+  Alert,
+  ActivityIndicator,
+  Share,
+  ListRenderItemInfo,
+} from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Avatar } from '../components';
-import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
+import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
 import { useContacts, AppContact } from '../hooks/useContacts';
 import { useAuth } from '../hooks/useAuth';
 import { useOutgoingCall } from '../hooks/useOutgoingCall';
-import { useCallContext } from '../context/CallContext';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'Contacts'>;
 
-// Helper to get initials from display name
+// ── List row types ────────────────────────────────────────────────────────────
+type LetterRow    = { kind: 'letter';       letter: string };
+type ContactRow   = { kind: 'contact';      contact: AppContact };
+type DividerRow   = { kind: 'divider' };
+type InviteRow    = { kind: 'invite';       contact: AppContact };
+
+type ListRow = LetterRow | ContactRow | DividerRow | InviteRow;
+
+function rowKey(item: ListRow, index: number): string {
+  switch (item.kind) {
+    case 'letter':  return `letter-${item.letter}`;
+    case 'contact': return `contact-${item.contact.userId}`;
+    case 'divider': return 'divider';
+    case 'invite':  return `invite-${item.contact.userId}-${index}`;
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function getInitials(name: string): string {
   const parts = name.trim().split(/\s+/);
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
   return name.slice(0, 2).toUpperCase();
 }
 
-// Helper to get avatar color based on userId
-function getAvatarColor(userId: string): string {
-  const colors = [COLORS.blue, COLORS.blueDark, COLORS.green, COLORS.amber, COLORS.missed];
-  const index = userId.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) % colors.length;
-  return colors[index];
+function getAvatarColor(seed: string): string {
+  const palette = [COLORS.blue, COLORS.blueDark, COLORS.green, COLORS.amber, COLORS.missed];
+  const idx = seed.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % palette.length;
+  return palette[idx];
 }
+
+function sectionLetter(name: string): string {
+  const first = name.trim()[0]?.toUpperCase() ?? '#';
+  return /[A-Z]/.test(first) ? first : '#';
+}
+
+// Build a flat list of rows from partitioned contacts
+function buildRows(
+  onApp: AppContact[],
+  offApp: AppContact[],
+): ListRow[] {
+  const rows: ListRow[] = [];
+
+  // ── On-app contacts grouped by letter ──────────────────────────────────
+  let lastLetter = '';
+  for (const c of onApp) {
+    const letter = sectionLetter(c.displayName);
+    if (letter !== lastLetter) {
+      rows.push({ kind: 'letter', letter });
+      lastLetter = letter;
+    }
+    rows.push({ kind: 'contact', contact: c });
+  }
+
+  // ── Invite divider + off-app contacts ──────────────────────────────────
+  if (offApp.length > 0) {
+    rows.push({ kind: 'divider' });
+    for (const c of offApp) {
+      rows.push({ kind: 'invite', contact: c });
+    }
+  }
+
+  return rows;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export default function ContactsScreen() {
   const navigation = useNavigation<NavProp>();
   const { user } = useAuth();
   const { contacts, loading, error, hasPermission } = useContacts();
   const outgoingCall = useOutgoingCall();
-  
+
   const { FG } = useForeground();
   const { fontFamily, textColor } = useTypography();
   const { bevel } = useGlass();
@@ -42,36 +103,34 @@ export default function ContactsScreen() {
   const [calling, setCalling] = useState(false);
   const [callingContactId, setCallingContactId] = useState<string | null>(null);
 
-  // Filter contacts based on search query
-  const data = query.trim()
-    ? contacts.filter((c) => 
-        c.displayName.toLowerCase().includes(query.toLowerCase()) ||
-        c.phone.includes(query)
-      )
-    : contacts;
+  // ── Partition, filter, then flatten into a renderable row list ───────────
+  const rows = useMemo<ListRow[]>(() => {
+    const q = query.trim().toLowerCase();
 
-  // Handle call button press
+    const filtered = q
+      ? contacts.filter(
+          (c) =>
+            c.displayName.toLowerCase().includes(q) ||
+            c.phone.includes(query.trim()),
+        )
+      : contacts;
+
+    // onApp is already sorted A-Z by useContacts; offApp keeps the same order
+    const onApp  = filtered.filter((c) => c.isSaved);
+    const offApp = filtered.filter((c) => !c.isSaved);
+
+    return buildRows(onApp, offApp);
+  }, [contacts, query]);
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
   const handleCall = async (contact: AppContact) => {
     if (!user) {
       Alert.alert('Error', 'You must be logged in to make calls');
       return;
     }
-
-    if (!contact.isSaved) {
-      Alert.alert(
-        'Contact Not on Chit-Chat',
-        `${contact.displayName} is not registered on Chit-Chat yet.`,
-        [{ text: 'OK' }]
-      );
-      return;
-    }
-
     setCalling(true);
     setCallingContactId(contact.userId);
-
     try {
-      console.log('[ContactsScreen] Initiating call to:', contact.displayName);
-      
       const callId = await outgoingCall.initiateCall(
         user.uid,
         contact.userId,
@@ -84,11 +143,9 @@ export default function ContactsScreen() {
           userId: contact.userId,
           displayName: contact.displayName,
           photoUrl: contact.firebasePhotoURL || null,
-        }
+        },
       );
-
       if (callId) {
-        // Navigate to call screen
         navigation.navigate('AudioCall', {
           callId,
           isOutgoing: true,
@@ -110,77 +167,115 @@ export default function ContactsScreen() {
     }
   };
 
-  // Handle chat navigation
   const handleChat = (contact: AppContact) => {
-    // For now, contacts must be on the app to chat
-    if (!contact.isSaved) {
-      Alert.alert(
-        'Contact Not Available',
-        `${contact.displayName} is not on Chit-Chat yet.`
-      );
-      return;
-    }
-
-    // Navigate to chat (implementation depends on your chat system)
-    // You might need to create or find an existing chat first
     Alert.alert('Chat', `Opening chat with ${contact.displayName}`);
   };
 
-  const renderItem = ({ item }: { item: AppContact }) => {
-    const isCurrentlyCalling = calling && callingContactId === item.userId;
-    const canCall = item.isSaved; // Only registered users can be called
-
-    return (
-      <TouchableOpacity
-        style={[styles.contactCard, bevel]}
-        activeOpacity={0.75}
-        onPress={() => handleChat(item)}
-        disabled={!canCall}
-      >
-        <Avatar 
-          initials={getInitials(item.displayName)} 
-          color={getAvatarColor(item.userId)} 
-          size={48} 
-        />
-        <View style={styles.contactMeta}>
-          <AppText style={[styles.contactName, { color: textColor, fontFamily }]}>
-            {item.displayName}
-          </AppText>
-          <AppText style={[styles.contactSub, { color: FG.secondary }]} numberOfLines={1}>
-            {canCall ? 'On Chit-Chat' : 'Not on Chit-Chat'}
-          </AppText>
-        </View>
-        
-        {/* Call button - only enabled for registered users */}
-        {canCall ? (
-          <TouchableOpacity 
-            activeOpacity={0.85}
-            onPress={() => handleCall(item)}
-            disabled={calling}
-          >
-            {isCurrentlyCalling ? (
-              <View style={styles.callBtn}>
-                <ActivityIndicator size="small" color="#fff" />
-              </View>
-            ) : (
-              <LinearGradient colors={GRADIENTS.primary} style={styles.callBtn}>
-                <AppIcon name="call" size={15} color="#fff" fixedColor />
-              </LinearGradient>
-            )}
-          </TouchableOpacity>
-        ) : (
-          <View style={styles.callBtnDisabled}>
-            <AppIcon name="call" size={15} color={COLORS.sub} />
-          </View>
-        )}
-      </TouchableOpacity>
-    );
+  const handleInvite = async (contact: AppContact) => {
+    try {
+      await Share.share({
+        message: `Hey ${contact.displayName}! I'm using Chit-Chat Business to stay connected. Join me here: https://chitchatbusiness.app`,
+      });
+    } catch {
+      // share sheet dismissed — no-op
+    }
   };
 
+  // ── Row renderers ──────────────────────────────────────────────────────────
+  const renderRow = ({ item, index }: ListRenderItemInfo<ListRow>) => {
+    switch (item.kind) {
+
+      case 'letter':
+        return (
+          <View style={styles.letterHeader}>
+            <AppText style={[styles.letterText, { fontFamily }]}>{item.letter}</AppText>
+          </View>
+        );
+
+      case 'contact': {
+        const c = item.contact;
+        const isCurrentlyCalling = calling && callingContactId === c.userId;
+        return (
+          <TouchableOpacity
+            style={[styles.contactCard, bevel]}
+            activeOpacity={0.75}
+            onPress={() => handleChat(c)}
+          >
+            <Avatar
+              initials={getInitials(c.displayName)}
+              color={getAvatarColor(c.userId)}
+              size={48}
+            />
+            <View style={styles.contactMeta}>
+              <AppText style={[styles.contactName, { color: textColor, fontFamily }]}>
+                {c.displayName}
+              </AppText>
+              <AppText style={[styles.contactSub, { color: COLORS.green }]} numberOfLines={1}>
+                On Chit-Chat
+              </AppText>
+            </View>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={() => handleCall(c)}
+              disabled={calling}
+            >
+              {isCurrentlyCalling ? (
+                <View style={styles.callBtn}>
+                  <ActivityIndicator size="small" color="#fff" />
+                </View>
+              ) : (
+                <LinearGradient colors={GRADIENTS.primary} style={styles.callBtn}>
+                  <AppIcon name="call" size={15} color="#fff" fixedColor />
+                </LinearGradient>
+              )}
+            </TouchableOpacity>
+          </TouchableOpacity>
+        );
+      }
+
+      case 'divider':
+        return (
+          <View style={styles.inviteDivider}>
+            <AppText style={[styles.inviteDividerText, { fontFamily }]}>
+              Invite to Chit-Chat
+            </AppText>
+          </View>
+        );
+
+      case 'invite': {
+        const c = item.contact;
+        return (
+          <View style={[styles.contactCard, bevel]}>
+            <View style={styles.avatarPlaceholder}>
+              <AppIcon name="person-outline" size={22} color={COLORS.sub} />
+            </View>
+            <View style={styles.contactMeta}>
+              <AppText style={[styles.contactName, { color: textColor, fontFamily }]}>
+                {c.displayName}
+              </AppText>
+              <AppText style={[styles.contactSub, { color: FG.secondary }]} numberOfLines={1}>
+                {c.phone}
+              </AppText>
+            </View>
+            <TouchableOpacity
+              style={styles.inviteBtn}
+              activeOpacity={0.75}
+              onPress={() => handleInvite(c)}
+            >
+              <AppText style={styles.inviteBtnText}>Invite</AppText>
+            </TouchableOpacity>
+          </View>
+        );
+      }
+    }
+  };
+
+  // ── Main render ────────────────────────────────────────────────────────────
   return (
     <View style={styles.root}>
       <AppBg />
 
+      {/* Header */}
       <View style={styles.header}>
         <AppText style={[styles.title, { color: textColor, fontFamily }]}>Contacts</AppText>
         <TouchableOpacity activeOpacity={0.85}>
@@ -190,7 +285,7 @@ export default function ContactsScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Glass search bar */}
+      {/* Search bar */}
       <View style={styles.searchWrap}>
         <AppIcon name="search-outline" size={16} color={COLORS.sub} />
         <TextInput
@@ -203,7 +298,7 @@ export default function ContactsScreen() {
         />
       </View>
 
-      {/* Loading state */}
+      {/* States */}
       {loading ? (
         <View style={styles.centerWrap}>
           <ActivityIndicator size="large" color={COLORS.blue} />
@@ -224,30 +319,42 @@ export default function ContactsScreen() {
           </AppText>
         </View>
       ) : (
-        <FlatList
-          data={data}
-          keyExtractor={(item) => item.userId}
-          renderItem={renderItem}
+        <FlatList<ListRow>
+          data={rows}
+          keyExtractor={rowKey}
+          renderItem={renderRow}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.listContent}
-          ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
-          ListEmptyComponent={
-            <View style={styles.emptyWrap}>
-              <AppIcon name="people-outline" size={48} color={COLORS.sub} />
-              <AppText style={styles.emptyText}>No contacts found</AppText>
-              {query.trim() && (
-                <AppText style={styles.hintText}>Try a different search</AppText>
-              )}
-            </View>
-          }
+          removeClippedSubviews
+          maxToRenderPerBatch={20}
+          windowSize={10}
+          initialNumToRender={25}
+          ItemSeparatorComponent={({ leadingItem }) => {
+            // No gap between letter header and the first contact below it,
+            // no gap before/after the invite divider
+            if (
+              leadingItem.kind === 'letter' ||
+              leadingItem.kind === 'divider'
+            ) return null;
+            return <View style={{ height: 10 }} />;
+          }}
           ListHeaderComponent={
             contacts.length > 0 ? (
               <View style={styles.headerInfo}>
                 <AppText style={styles.headerInfoText}>
-                  {contacts.filter(c => c.isSaved).length} of {contacts.length} on Chit-Chat
+                  {contacts.filter((c) => c.isSaved).length} of {contacts.length} on Chit-Chat
                 </AppText>
               </View>
             ) : null
+          }
+          ListEmptyComponent={
+            <View style={styles.emptyWrap}>
+              <AppIcon name="people-outline" size={48} color={COLORS.sub} />
+              <AppText style={styles.emptyText}>No contacts found</AppText>
+              {query.trim() ? (
+                <AppText style={styles.hintText}>Try a different search</AppText>
+              ) : null}
+            </View>
           }
         />
       )}
@@ -256,7 +363,9 @@ export default function ContactsScreen() {
       {calling && (
         <View style={styles.callingOverlay}>
           <ActivityIndicator size="large" color="#fff" />
-          <AppText fixedColor style={styles.callingText}>Starting call...</AppText>
+          <AppText fixedColor style={styles.callingText}>
+            Starting call...
+          </AppText>
         </View>
       )}
     </View>
@@ -267,47 +376,72 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: COLORS.sky1 },
 
   header: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingHorizontal: 20, paddingTop: 56, paddingBottom: 10,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 56,
+    paddingBottom: 10,
   },
   title:  { fontSize: 26, fontWeight: '800', color: COLORS.text },
-  addBtn: { 
-    width: 34, 
-    height: 34, 
-    borderRadius: RADIUS.sm, 
-    alignItems: 'center', 
-    justifyContent: 'center', 
+  addBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: RADIUS.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
     ...SHADOW.button,
   },
 
   searchWrap: {
-    flexDirection: 'row', 
-    alignItems: 'center', 
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 8,
-    marginHorizontal: 14, 
+    marginHorizontal: 14,
     marginBottom: 10,
     backgroundColor: 'rgba(9,178,238,0.06)',
     borderWidth: 1,
     borderColor: 'rgba(9,178,238,0.18)',
     borderRadius: RADIUS.full,
-    paddingHorizontal: 14, 
+    paddingHorizontal: 14,
     paddingVertical: 10,
   },
   searchInput: { flex: 1, fontSize: 14, color: COLORS.text, padding: 0 },
 
-  headerInfo: {
+  // ── Letter section headers ────────────────────────────────────────────────
+  letterHeader: {
+    paddingHorizontal: 18,
+    paddingTop: 14,
+    paddingBottom: 4,
+  },
+  letterText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.blue,
+    letterSpacing: 0.6,
+  },
+
+  // ── "Invite to Chit-Chat" divider ─────────────────────────────────────────
+  inviteDivider: {
+    marginHorizontal: 0,
+    marginTop: 20,
     marginBottom: 10,
-    paddingHorizontal: 4,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    backgroundColor: COLORS.sky2,
   },
-  headerInfoText: {
-    fontSize: 12,
-    color: COLORS.sub,
-    fontWeight: '600',
+  inviteDividerText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.text,
   },
 
-  listContent: { paddingHorizontal: 14, paddingBottom: 20 },
+  headerInfo: { marginBottom: 6, paddingHorizontal: 18 },
+  headerInfoText: { fontSize: 12, color: COLORS.sub, fontWeight: '600' },
 
-  // Glass card per contact with blue-tinted glassmorphism
+  listContent: { paddingHorizontal: 14, paddingBottom: 30, paddingTop: 4 },
+
+  // ── Contact / invite card ─────────────────────────────────────────────────
   contactCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -319,11 +453,23 @@ const styles = StyleSheet.create({
   contactMeta: { flex: 1 },
   contactName: { fontSize: 14, fontWeight: '700', color: COLORS.text },
   contactSub:  { fontSize: 12, color: COLORS.sub, marginTop: 3 },
-  callBtn: { 
-    width: 34, 
-    height: 34, 
-    borderRadius: RADIUS.sm, 
-    alignItems: 'center', 
+
+  // Grey circle avatar for non-app contacts
+  avatarPlaceholder: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.sky2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  // ── Call button ───────────────────────────────────────────────────────────
+  callBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: RADIUS.sm,
+    alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#09B2EE',
     shadowOffset: { width: 0, height: 4 },
@@ -331,17 +477,23 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     elevation: 10,
   },
-  callBtnDisabled: { 
-    width: 34, 
-    height: 34, 
-    borderRadius: RADIUS.sm, 
-    alignItems: 'center', 
-    justifyContent: 'center',
-    backgroundColor: 'rgba(9,178,238,0.08)',
+
+  // ── Invite button ─────────────────────────────────────────────────────────
+  inviteBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: RADIUS.full,
+    backgroundColor: 'rgba(9,178,238,0.10)',
     borderWidth: 1,
-    borderColor: 'rgba(9,178,238,0.15)',
+    borderColor: 'rgba(9,178,238,0.25)',
+  },
+  inviteBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.blue,
   },
 
+  // ── States ────────────────────────────────────────────────────────────────
   centerWrap: { alignItems: 'center', paddingTop: 80, gap: 12, paddingHorizontal: 40 },
   centerText: { fontSize: 15, color: COLORS.sub, fontWeight: '600', textAlign: 'center' },
   errorText:  { fontSize: 13, color: COLORS.missed, textAlign: 'center' },
@@ -351,7 +503,7 @@ const styles = StyleSheet.create({
   emptyText: { fontSize: 15, color: COLORS.sub, fontWeight: '600' },
 
   callingOverlay: {
-    ...StyleSheet.absoluteFill,
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.8)',
     alignItems: 'center',
     justifyContent: 'center',

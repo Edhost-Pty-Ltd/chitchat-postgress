@@ -1,0 +1,88 @@
+name: deploy-backend
+
+on:
+  push:
+    branches: [ChitchatBusiness_postgress]
+    paths: ["server/**", ".github/workflows/deploy-backend.yml"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: DEBUG show OIDC claims
+        run: |
+          python3 - <<'PY'
+          import os, json, base64, urllib.request
+          url = os.environ['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&audience=sts.amazonaws.com'
+          req = urllib.request.Request(url, headers={'Authorization': 'bearer ' + os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
+          tok = json.load(urllib.request.urlopen(req))['value']
+          p = tok.split('.')[1]
+          p += '=' * (-len(p) % 4)
+          c = json.loads(base64.urlsafe_b64decode(p))
+          print({k: c.get(k) for k in ('sub', 'aud', 'repository', 'ref', 'iss')})
+          PY
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/Github-actions-chitchat
+
+      - id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        run: |
+          IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${GITHUB_SHA::7}"
+          docker build -t "$IMAGE" ./server
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Deploy to ECS Express Mode
+        id: deploy
+        uses: aws-actions/amazon-ecs-deploy-express-service@v1
+        with:
+          service-name: chitchat-backend
+          image: ${{ env.IMAGE }}
+          execution-role-arn: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/ecsTaskExecutionRole
+          infrastructure-role-arn: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/ecsInfrastructureRoleForExpressServices
+          container-port: 4000
+          health-check-path: /health
+          cpu: '512'
+          memory: '1024'
+          min-task-count: 1
+          max-task-count: 2
+          auto-scaling-metric: AVERAGE_CPU
+          auto-scaling-target-value: 70
+          subnets: ${{ vars.PUBLIC_SUBNET_IDS }}
+          security-groups: ${{ vars.APP_SG_ID }}
+          environment-variables: |
+            [
+              {"name": "NODE_ENV", "value": "production"},
+              {"name": "PORT", "value": "4000"},
+              {"name": "DATABASE_SSL", "value": "require"},
+              {"name": "S3_REGION", "value": "${{ vars.AWS_REGION }}"},
+              {"name": "S3_ENDPOINT", "value": "https://s3.${{ vars.AWS_REGION }}.amazonaws.com"},
+              {"name": "S3_BUCKET", "value": "chitchatbusiness-media-prod"},
+              {"name": "S3_FORCE_PATH_STYLE", "value": "false"},
+              {"name": "CORS_ORIGINS", "value": "https://app.chitchat.com"},
+              {"name": "FIREBASE_PROJECT_ID", "value": "chitchatbusiness-880ce"}
+            ]
+          secrets: |
+            [
+              {"name": "DATABASE_URL", "valueFrom": "${{ vars.SECRET_ARN }}:DATABASE_URL::"},
+              {"name": "REDIS_URL", "valueFrom": "${{ vars.SECRET_ARN }}:REDIS_URL::"},
+              {"name": "S3_ACCESS_KEY_ID", "valueFrom": "${{ vars.SECRET_ARN }}:S3_ACCESS_KEY_ID::"},
+              {"name": "S3_SECRET_ACCESS_KEY", "valueFrom": "${{ vars.SECRET_ARN }}:S3_SECRET_ACCESS_KEY::"},
+              {"name": "FIREBASE_SERVICE_ACCOUNT_JSON", "valueFrom": "${{ vars.SECRET_ARN }}:FIREBASE_SERVICE_ACCOUNT_JSON::"}
+            ]
+
+      - name: Show the service URL
+        run: |
+          echo "Service ARN: ${{ steps.deploy.outputs.service-arn }}"
+          echo "Endpoint:    ${{ steps.deploy.outputs.endpoint }}"

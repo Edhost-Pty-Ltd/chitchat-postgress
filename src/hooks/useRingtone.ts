@@ -2,33 +2,29 @@
 // Manages ringtone playback for incoming calls using expo-audio
 
 import { useEffect, useRef, useState } from 'react';
-import { useAudioPlayer, AudioModule } from 'expo-audio';
-import { Platform } from 'react-native';
+import { useAudioPlayer } from 'expo-audio';
 
 export function useRingtone() {
   const [isPlaying, setIsPlaying] = useState(false);
   const beepIntervalRef = useRef<NodeJS.Timeout | null>(null);
   
-  // Create audio player for ringtone
-  const player = useAudioPlayer();
+  // Create audio player for ringtone.
+  //
+  // keepAudioSessionActive MUST be true. By default expo-audio (iOS) calls
+  // AVAudioSession.setActive(false) ~100ms after any player.pause() or
+  // playback completion, as long as no *expo-audio* player is playing. It has
+  // no knowledge of WebRTC's audio engine, so stopping the ringtone right as a
+  // call starts deactivated the shared session underneath the live WebRTC
+  // AVAudioEngine — killing both mic capture and remote playout (no audio in
+  // either direction, even though the peer connection reports "connected").
+  const player = useAudioPlayer(null, { keepAudioSessionActive: true });
 
-  // Configure audio mode for ringtone playback
-  useEffect(() => {
-    const configureAudio = async () => {
-      try {
-        await AudioModule.setAudioModeAsync({
-          playsInSilentModeIOS: true,
-          allowsRecordingIOS: false,
-          staysActiveInBackground: true,
-        });
-        console.log('[useRingtone] Audio mode configured');
-      } catch (error) {
-        console.error('[useRingtone] Error configuring audio:', error);
-      }
-    };
-
-    configureAudio();
-  }, []);
+  // IMPORTANT: this hook must NEVER call AudioModule.setAudioModeAsync.
+  // expo-audio and @livekit/react-native-webrtc share the single app-wide iOS
+  // AVAudioSession. Any setAudioModeAsync call reconfigures that session and
+  // silences an in-progress WebRTC call's audio (the caller plays a ringback
+  // tone via this hook while WebRTC is already live). We let expo-audio use its
+  // default session for the ringtone and leave the category entirely to WebRTC.
 
   // Start playing ringtone
   const play = async () => {
@@ -108,6 +104,9 @@ export function useRingtone() {
         clearInterval(beepIntervalRef.current);
         beepIntervalRef.current = null;
       }
+
+      // Do NOT call setAudioModeAsync here — see the note at the top of the hook.
+      // Reconfiguring the shared AVAudioSession on stop silences live WebRTC audio.
 
       setIsPlaying(false);
       console.log('[useRingtone] Ringtone stopped');

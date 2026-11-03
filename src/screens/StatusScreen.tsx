@@ -1,6 +1,7 @@
 ﻿// ─── Screen: Status ──────────────────────────────────────────────────────────
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, FlatList, TouchableOpacity, StyleSheet, Platform, ActivityIndicator, Image } from 'react-native';
+import { View, FlatList, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect } from '@react-navigation/native';
 import { UserAvatar, StatusViewer, CreateStatusModal, BottomNav } from '../components';
@@ -88,16 +89,21 @@ export default function StatusScreen() {
       ...contactStatuses.flatMap((g) => g.statuses),
     ];
     allStatuses.forEach((s) => {
-      // Prefetch the main media URL for images, and the thumbnail for videos
+      // Warm the expo-image cache so the viewer renders instantly:
+      //  - image: full media URL + its thumbnail (blurred placeholder)
+      //  - video: thumbnail (blurred poster shown while the video buffers)
+      //  - avatar for the header
       const urls = [
         s.mediaType === 'image'  ? s.mediaUrl       : null,
+        s.mediaType === 'image'  ? s.thumbnailUrl   : null,
         s.mediaType === 'video'  ? s.thumbnailUrl   : null,
         s.photoURL,                                          // avatar
       ].filter((u): u is string => !!u && !prefetchedRef.current.has(u));
 
       urls.forEach((url) => {
         prefetchedRef.current.add(url);
-        Image.prefetch(url).catch(() => {}); // silent — cache is best-effort
+        // expo-image prefetch → fills the same memory-disk cache the viewer reads.
+        Image.prefetch(url, { cachePolicy: 'memory-disk' }).catch(() => {});
       });
     });
   }, [myStatuses, contactStatuses]);
@@ -249,29 +255,64 @@ export default function StatusScreen() {
     const color = stringToColor(name);
     const initials = getInitials(name);
 
+    // Find the latest status's media for thumbnail preview (newest first)
+    const sorted   = [...item.statuses].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    const latest   = sorted[0];
+    // Prefer explicit thumbnail, fall back to mediaUrl for images, null for text-only
+    const thumbUrl =
+      (latest?.thumbnailUrl && /^https?:/.test(latest.thumbnailUrl) ? latest.thumbnailUrl : null) ??
+      (latest?.mediaType === 'image' && latest.mediaUrl && /^https?:/.test(latest.mediaUrl)
+        ? latest.mediaUrl
+        : null);
+    const isTextStatus = latest?.mediaType === 'text';
+    const textBg = latest?.backgroundColor ?? color;
+
     return (
       <TouchableOpacity
         style={[styles.statusCard, bevel]}
         activeOpacity={0.75}
         onPress={() => handleViewContactStatus(item)}
       >
-        {/* Avatar with gradient ring */}
+        {/* ── Thumbnail ring (WhatsApp-style) ─────────────────────────── */}
         <LinearGradient
-          colors={item.hasUnviewed ? [color, COLORS.blue] : ['#888888', '#666666']}
+          colors={item.hasUnviewed ? [color, COLORS.blue] : ['#C7C7CC', '#AEAEB2']}
           style={styles.ring}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
         >
           <View style={styles.ringInner}>
-            {visiblePhoto ? (
-              <Image source={{ uri: visiblePhoto }} style={styles.avatarImage} />
+            {thumbUrl ? (
+              /* Media thumbnail fills the circle */
+              <Image
+                source={{ uri: thumbUrl }}
+                style={styles.avatarImage}
+                contentFit="cover"
+              />
+            ) : isTextStatus ? (
+              /* Text status — show coloured background with first letter of caption */
+              <View style={[styles.avatarCircle, { backgroundColor: textBg }]}>
+                <AppText style={styles.avatarText} numberOfLines={2}>
+                  {latest.caption?.slice(0, 2) ?? 'T'}
+                </AppText>
+              </View>
+            ) : visiblePhoto ? (
+              /* No media yet (URL still resolving) — fall back to profile photo */
+              <Image source={{ uri: visiblePhoto }} style={styles.avatarImage} contentFit="cover" />
             ) : (
+              /* Final fallback: initials */
               <View style={[styles.avatarCircle, { backgroundColor: color }]}>
                 <AppText style={styles.avatarText}>{initials}</AppText>
               </View>
             )}
           </View>
         </LinearGradient>
+
+        {/* Small profile-photo badge overlaid on the bottom-right of the ring */}
+        {visiblePhoto && thumbUrl && (
+          <View style={styles.badgeWrap}>
+            <Image source={{ uri: visiblePhoto }} style={styles.badgeImage} contentFit="cover" />
+          </View>
+        )}
 
         <View style={styles.statusMeta}>
           <AppText style={[styles.statusName, { color: textColor, fontFamily }]}>
@@ -323,7 +364,7 @@ export default function StatusScreen() {
           <AppText style={[styles.myCardTitle, { color: FG.primary }]}>My Status</AppText>
           <AppText style={[styles.myCardSub, { color: FG.secondary }]}>
             {myStatuses.length > 0
-              ? `${formatTimeAgo(myStatuses[0].createdAt)} • Tap to view`
+              ? `${formatTimeAgo(myStatuses.reduce((latest, s) => (s.createdAt > latest ? s.createdAt : latest), myStatuses[0].createdAt))} • Tap to view`
               : 'Tap to add status update'}
           </AppText>
         </View>
@@ -339,12 +380,7 @@ export default function StatusScreen() {
       </TouchableOpacity>
 
       {/* Loading / Error / Empty states */}
-      {loading ? (
-        <View style={styles.centerContainer}>
-          <ActivityIndicator size="large" color={COLORS.blue} />
-          <AppText style={[styles.emptyText, { color: FG.secondary }]}>Loading statuses...</AppText>
-        </View>
-      ) : error ? (
+      {loading && visibleContactStatuses.length === 0 && !error ? null : error ? (
         <View style={styles.centerContainer}>
           <AppIcon name="alert-circle-outline" size={52} color={COLORS.sub} />
           <AppText style={[styles.emptyText, { color: FG.secondary }]}>{error}</AppText>
@@ -375,6 +411,10 @@ export default function StatusScreen() {
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.listContent}
             ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
+            removeClippedSubviews
+            maxToRenderPerBatch={10}
+            windowSize={8}
+            initialNumToRender={10}
           />
         </>
       )}
@@ -481,9 +521,27 @@ const styles = StyleSheet.create({
     borderRadius: 22,
   },
   avatarText: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
     color: '#ffffff',
+    textAlign: 'center',
+  },
+  // Small profile photo badge overlaid on the thumbnail ring
+  badgeWrap: {
+    position: 'absolute',
+    left: 40,   // right edge of the ~54px ring minus badge overlap
+    top: 38,    // bottom edge of the ring minus badge overlap
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: COLORS.sky1,
+    overflow: 'hidden',
+    zIndex: 2,
+  },
+  badgeImage: {
+    width: '100%',
+    height: '100%',
   },
   statusMeta: { flex: 1 },
   statusName: { fontSize: 14, fontWeight: '700', color: COLORS.text },
