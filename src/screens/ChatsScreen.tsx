@@ -10,7 +10,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { BottomNav } from '../components';
+import { BottomNav, ScreenLayout } from '../components';
 import { useAuth } from '../context/AuthContext';
 import { useChats, ChatPreview } from '../hooks/useChats';
 import { useContacts, AppContact } from '../hooks/useContacts';
@@ -2468,6 +2468,7 @@ export default function ChatsScreen() {
   const isOnCustomLabel = !!currentLabel;
 
   return (
+    <ScreenLayout active="chats">
     <View style={styles.root}>
       <AppBg />
 
@@ -2925,7 +2926,7 @@ export default function ChatsScreen() {
             <>
               <FaceSetupPrompt />
               {chatsLoading && (
-                <View style={styles.loadingRow}>
+                <View >
                   <ActivityIndicator size="small" color={COLORS.blue} />
                 </View>
               )}
@@ -2985,12 +2986,11 @@ export default function ChatsScreen() {
         </TouchableOpacity>
       )}
 
-      <BottomNav active="chats" />
     </View>
+    </ScreenLayout>
   );
+
 }
-
-
 // ─── Styles ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: COLORS.sky1 },
@@ -3004,6 +3004,7 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
     paddingHorizontal: 12,
   },
+
   offlineBannerText: {
     fontSize: 12,
     color: '#fff',
@@ -3022,16 +3023,17 @@ const styles = StyleSheet.create({
     elevation: 3,
     overflow: 'hidden',
   },
+
   avatarImage: {
     width: '100%',
     height: '100%',
   },
+
   avatarText: { 
     color: '#fff', 
     fontWeight: '700', 
     fontSize: 18 
   }, 
-  
   header: {
     flexDirection: 'column',
     paddingHorizontal: 14,
@@ -3043,12 +3045,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
+
   appName: {
     fontSize: 22,
     fontWeight: '800',
    
     color: COLORS.text, letterSpacing: -0.5,
   },
+
   searchBubble: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: 'rgba(30,156,240,0.06)',
@@ -3063,6 +3067,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14, height: 42,
     overflow: 'hidden',
   },
+
   searchInput: { flex: 1, fontSize: 14, color: COLORS.text, padding: 0 },
 
   tabBarOuter: {

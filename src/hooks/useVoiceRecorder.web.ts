@@ -1,167 +1,191 @@
 // ─── useVoiceRecorder Hook (Web Implementation) ──────────────────────────────
-// Web implementation using MediaRecorder API
+// Matches the native hook's public API exactly so ChatScreen compiles and
+// runs identically on web. Uses the browser's MediaRecorder API.
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 
+// ─── Re-use the same interface names that the native version exports ──────────
+export interface RecordingState {
+  status: 'idle' | 'requesting-permission' | 'recording' | 'cancelled' | 'stopped';
+  durationMs: number;
+  metering: number;
+  amplitudeHistory: number[];
+  isWarning: boolean;
+  permissionDenied: boolean;
+  permissionDeniedPermanently: boolean;
+}
+
 export interface RecordingResult {
   uri: string;
-  duration: number;
-  size: number;
+  durationMs: number;
+  fileSize: number;
+  metering: number;
 }
 
 export interface UseVoiceRecorderReturn {
-  isRecording: boolean;
-  duration: number;
-  isWarning: boolean;
-  error: string | null;
+  state: RecordingState;
   startRecording: () => Promise<void>;
   stopRecording: () => Promise<RecordingResult | null>;
+  cancelRecording: () => void;
 }
 
-const MAX_DURATION_MS = 120000; // 120 seconds
-const WARNING_DURATION_MS = 110000; // 110 seconds
+const MAX_DURATION_MS = 120_000;
+const WARNING_DURATION_MS = 110_000;
+const TICK_MS = 100;
+const HISTORY_LEN = 50;
+
+const INITIAL_STATE: RecordingState = {
+  status: 'idle',
+  durationMs: 0,
+  metering: -160,
+  amplitudeHistory: [],
+  isWarning: false,
+  permissionDenied: false,
+  permissionDeniedPermanently: false,
+};
 
 export function useVoiceRecorder(): UseVoiceRecorderReturn {
-  const [isRecording, setIsRecording] = useState(false);
-  const [duration, setDuration] = useState(0);
-  const [isWarning, setIsWarning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [state, setState] = useState<RecordingState>(INITIAL_STATE);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const startTimeRef = useRef<number>(0);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const audioChunksRef   = useRef<Blob[]>([]);
+  const startTimeRef     = useRef<number>(0);
+  const intervalRef      = useRef<ReturnType<typeof setInterval> | null>(null);
+  const analyserRef      = useRef<AnalyserNode | null>(null);
+  const audioCtxRef      = useRef<AudioContext | null>(null);
+
+  const clearTimer = () => {
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+  };
 
   const startRecording = useCallback(async () => {
+    setState({ ...INITIAL_STATE, status: 'requesting-permission' });
+
+    let stream: MediaStream;
     try {
-      console.log('[useVoiceRecorder-Web] Starting recording...');
-      setError(null);
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err: any) {
+      // Permission denied — canAskAgain is not available in browsers
+      setState({
+        ...INITIAL_STATE,
+        status: 'idle',
+        permissionDenied: true,
+        // Treat NotAllowedError as permanently denied (browser won't prompt again
+        // in the same session once denied via the permission chip).
+        permissionDeniedPermanently: err?.name === 'NotAllowedError',
+      });
+      return;
+    }
 
-      // Request microphone permission
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Optional: hook up an AnalyserNode for metering
+    try {
+      const ctx = new AudioContext();
+      const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      src.connect(analyser);
+      audioCtxRef.current = ctx;
+      analyserRef.current = analyser;
+    } catch { /* metering is optional */ }
 
-      // Create MediaRecorder
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'audio/webm',
+    audioChunksRef.current = [];
+
+    // Prefer webm/opus; fall back gracefully
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : '';
+
+    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+    recorder.onstop = () => stream.getTracks().forEach((t) => t.stop());
+    recorder.start();
+    mediaRecorderRef.current = recorder;
+    startTimeRef.current = Date.now();
+
+    setState({ ...INITIAL_STATE, status: 'recording' });
+
+    const buf = new Uint8Array(analyserRef.current?.frequencyBinCount ?? 0);
+
+    intervalRef.current = setInterval(() => {
+      const elapsed = Date.now() - startTimeRef.current;
+
+      // Read metering
+      let metering = -160;
+      let normalised = 0;
+      if (analyserRef.current) {
+        analyserRef.current.getByteFrequencyData(buf);
+        const avg = buf.reduce((s, v) => s + v, 0) / buf.length;
+        normalised = avg / 255;
+        metering = avg > 0 ? (20 * Math.log10(avg / 255)) : -160;
+      }
+
+      setState((prev) => {
+        const history = [...prev.amplitudeHistory, normalised].slice(-HISTORY_LEN);
+        return {
+          ...prev,
+          durationMs: elapsed,
+          metering,
+          amplitudeHistory: history,
+          isWarning: elapsed >= WARNING_DURATION_MS,
+        };
       });
 
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorder.onstop = () => {
-        // Stop all tracks
-        stream.getTracks().forEach(track => track.stop());
-      };
-
-      mediaRecorder.start();
-      mediaRecorderRef.current = mediaRecorder;
-
-      startTimeRef.current = Date.now();
-      setIsRecording(true);
-      setDuration(0);
-      setIsWarning(false);
-
-      // Start duration timer
-      intervalRef.current = setInterval(() => {
-        const elapsed = Date.now() - startTimeRef.current;
-        setDuration(Math.floor(elapsed / 1000));
-
-        // Show warning near max duration
-        if (elapsed >= WARNING_DURATION_MS) {
-          setIsWarning(true);
-        }
-
-        // Auto-stop at max duration
-        if (elapsed >= MAX_DURATION_MS) {
-          console.log('[useVoiceRecorder-Web] Max duration reached, auto-stopping');
-          stopRecording();
-        }
-      }, 100);
-
-      console.log('[useVoiceRecorder-Web] Recording started');
-    } catch (err: any) {
-      console.error('[useVoiceRecorder-Web] Failed to start recording:', err);
-      setError(err.message || 'Failed to start recording');
-      setIsRecording(false);
-    }
+      if (elapsed >= MAX_DURATION_MS) {
+        // Auto-stop — will trigger stopRecording path below
+        mediaRecorderRef.current?.stop();
+        clearTimer();
+      }
+    }, TICK_MS);
   }, []);
 
   const stopRecording = useCallback(async (): Promise<RecordingResult | null> => {
-    try {
-      console.log('[useVoiceRecorder-Web] Stopping recording...');
+    clearTimer();
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) return null;
 
-      // Clear interval
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
+    return new Promise<RecordingResult | null>((resolve) => {
+      const originalOnStop = recorder.onstop;
+      recorder.onstop = (e) => {
+        // Run existing cleanup (stream track stop)
+        if (typeof originalOnStop === 'function') (originalOnStop as any)(e);
 
-      if (!mediaRecorderRef.current) {
-        console.warn('[useVoiceRecorder-Web] No active recorder');
-        return null;
-      }
+        const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        const uri  = URL.createObjectURL(blob);
+        const durationMs = Date.now() - startTimeRef.current;
 
-      // Stop recording
-      return new Promise<RecordingResult>((resolve) => {
-        const recorder = mediaRecorderRef.current!;
-
-        recorder.onstop = () => {
-          // Create blob from chunks
-          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-          
-          // Create object URL
-          const uri = URL.createObjectURL(audioBlob);
-          
-          const durationSec = Math.floor((Date.now() - startTimeRef.current) / 1000);
-          const size = audioBlob.size;
-
-          console.log('[useVoiceRecorder-Web] Recording stopped:', { uri, duration: durationSec, size });
-
-          setIsRecording(false);
-          setDuration(0);
-          setIsWarning(false);
-
-          resolve({
-            uri,
-            duration: durationSec,
-            size,
-          });
-        };
-
-        recorder.stop();
+        // Tear down audio context
+        try { audioCtxRef.current?.close(); } catch {}
+        audioCtxRef.current = null;
+        analyserRef.current = null;
         mediaRecorderRef.current = null;
-      });
-    } catch (err: any) {
-      console.error('[useVoiceRecorder-Web] Failed to stop recording:', err);
-      setError(err.message || 'Failed to stop recording');
-      setIsRecording(false);
-      return null;
-    }
+
+        setState({ ...INITIAL_STATE, status: 'stopped' });
+        resolve({ uri, durationMs, fileSize: blob.size, metering: -30 });
+      };
+      recorder.stop();
+    });
+  }, []);
+
+  const cancelRecording = useCallback(() => {
+    clearTimer();
+    try { mediaRecorderRef.current?.stop(); } catch {}
+    try { audioCtxRef.current?.close(); } catch {}
+    audioCtxRef.current = null;
+    analyserRef.current = null;
+    mediaRecorderRef.current = null;
+    setState({ ...INITIAL_STATE, status: 'cancelled' });
   }, []);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        mediaRecorderRef.current.stop();
-      }
+      clearTimer();
+      try { mediaRecorderRef.current?.stop(); } catch {}
+      try { audioCtxRef.current?.close(); } catch {}
     };
   }, []);
 
-  return {
-    isRecording,
-    duration,
-    isWarning,
-    error,
-    startRecording,
-    stopRecording,
-  };
+  return { state, startRecording, stopRecording, cancelRecording };
 }

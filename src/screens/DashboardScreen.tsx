@@ -21,7 +21,7 @@ import Svg, {
 import { endpoints } from '../api/endpoints';
 import { useAuth } from '../context/AuthContext';
 import { useChats } from '../hooks/useChats';
-import { BottomNav } from '../components';
+import { BottomNav, ScreenLayout } from '../components';
 import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import {
@@ -281,6 +281,7 @@ export default function DashboardScreen() {
     .split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
 
   return (
+    <ScreenLayout active="dashboard">
     <View style={styles.root}>
       <AppBg />
 
@@ -575,8 +576,8 @@ export default function DashboardScreen() {
           </FadeSlideIn>
         </ScrollView>
 
-      <BottomNav active="dashboard" />
     </View>
+    </ScreenLayout>
   );
 }
 

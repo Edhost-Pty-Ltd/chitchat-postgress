@@ -1502,9 +1502,24 @@ export default function ChatScreen() {
   const handleVoiceUploadAndSend = useCallback(async (result: RecordingResult) => {
     if (!userId) return;
 
-    // Local id used only for upload bookkeeping; the backend assigns the real
-    // message id on send.
-    const messageId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    // Stable client id shared between the optimistic bubble and the outbox.
+    const clientId = `voice_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+
+    // ── 1. Show an optimistic bubble immediately ─────────────────
+    // The bubble appears right as the upload starts so the user always sees
+    // their voice note. voiceUrl is set to the local file URI so the waveform
+    // renders, and uploadStatus:'uploading' drives the loading indicator.
+    addOptimisticMessage({
+      messageId: clientId,
+      clientId,
+      senderId: userId,
+      type: 'voice',
+      voiceUrl: result.uri,       // local URI — renders the waveform placeholder
+      duration: result.durationMs,
+      timestamp: new Date(),
+      uploadStatus: 'uploading',
+      uploadProgress: 0,
+    });
 
     setIsUploading(true);
     setUploadProgress(0);
@@ -1515,13 +1530,35 @@ export default function ChatScreen() {
       const uploadResult = await uploadVoiceNote(
         result.uri,
         chatId,
-        messageId,
+        clientId,
         (progress: UploadProgress) => {
           setUploadProgress(progress.percentage);
+          // Keep the bubble's progress indicator in sync.
+          updateOptimisticMessage(clientId, {
+            uploadProgress: progress.percentage,
+          });
         },
       );
 
-      await sendVoiceMessage(chatId, userId, uploadResult.downloadUrl, result.durationMs);
+      // ── 2. Upload done — mark as 'sending' while REST call runs ─
+      updateOptimisticMessage(clientId, { uploadStatus: 'sending', uploadProgress: 100 });
+
+      const res = await endpoints.sendMessage(chatId, {
+        clientId,
+        type: 'voice',
+        mediaObjectKey: uploadResult.downloadUrl,
+        durationMs: result.durationMs,
+      });
+
+      if (res.ok) {
+        // ── 3. Server confirmed — replace optimistic bubble ────────
+        await reconcileBackendMessage(res.data.message);
+      } else {
+        updateOptimisticMessage(clientId, {
+          uploadStatus: 'failed',
+          uploadError: 'Failed to send. Tap to retry.',
+        }, true);
+      }
 
       setIsUploading(false);
       setUploadProgress(0);
@@ -1536,6 +1573,14 @@ export default function ChatScreen() {
         error.code === 'storage/retry-limit-exceeded' ||
         error.code === 'storage/canceled';
 
+      // Flip the bubble to failed so the user sees the error inline.
+      updateOptimisticMessage(clientId, {
+        uploadStatus: 'failed',
+        uploadError: isNetworkError && retryCount < MAX_UPLOAD_RETRIES - 1
+          ? 'Upload failed. Tap to retry.'
+          : 'Upload could not be completed.',
+      }, true);
+
       if (isNetworkError && retryCount < MAX_UPLOAD_RETRIES - 1) {
         setUploadError('Upload failed. Tap to retry.');
       } else {
@@ -1543,7 +1588,7 @@ export default function ChatScreen() {
         pendingRecordingRef.current = null;
       }
     }
-  }, [userId, chatId, retryCount, checkAndTriggerAutoResponder]);
+  }, [userId, chatId, retryCount, checkAndTriggerAutoResponder, addOptimisticMessage, updateOptimisticMessage, reconcileBackendMessage]);
 
   // ── Retry upload handler ────────────────────────────────────────
   const handleRetryUpload = useCallback(() => {
@@ -3005,25 +3050,39 @@ export default function ChatScreen() {
           )
         )}
         {isOut && (
-          item.type === 'voice' && item.voiceUrl && item.duration ? (
-            <VoiceMessageBubble
-              messageId={item.messageId}
-              voiceUrl={item.voiceUrl}
-              durationMs={item.duration}
-              isOutgoing={true}
-              playerState={player.state}
-              onPlay={() => {
-                if (player.state.activeMessageId === item.messageId && player.state.status === 'paused') {
-                  player.resume();
-                } else {
-                  player.play(item.voiceUrl!, item.messageId, item.duration!);
+          item.type === 'voice' && (item.voiceUrl || item.uploadStatus) && item.duration ? (
+            <View style={{ opacity: item.uploadStatus === 'uploading' || item.uploadStatus === 'sending' ? 0.75 : 1 }}>
+              <VoiceMessageBubble
+                messageId={item.messageId}
+                voiceUrl={item.voiceUrl ?? ''}
+                durationMs={item.duration}
+                isOutgoing={true}
+                playerState={
+                  // Prevent playback on a bubble that is still uploading
+                  item.uploadStatus ? { ...player.state, activeMessageId: null } : player.state
                 }
-              }}
-              onPause={() => player.pause()}
-              onSeek={(positionMs) => player.seek(positionMs)}
-              timestamp={item.timestamp}
-              tickIcon={tickIcon}
-            />
+                onPlay={() => {
+                  if (item.uploadStatus) return; // can't play until upload done
+                  if (player.state.activeMessageId === item.messageId && player.state.status === 'paused') {
+                    player.resume();
+                  } else {
+                    player.play(item.voiceUrl!, item.messageId, item.duration!);
+                  }
+                }}
+                onPause={() => player.pause()}
+                onSeek={(positionMs) => player.seek(positionMs)}
+                timestamp={item.timestamp}
+                tickIcon={
+                  item.uploadStatus === 'uploading' || item.uploadStatus === 'sending'
+                    ? { icon: 'checkmark', color: 'transparent' } // placeholder — hide ticks while uploading
+                    : item.uploadStatus === 'failed'
+                      ? { icon: 'checkmark', color: COLORS.sub }
+                      : tickIcon
+                }
+                uploadStatus={item.uploadStatus}
+                uploadProgress={item.uploadProgress}
+              />
+            </View>
           ) : item.type === 'file' && item.fileUrl && item.fileName ? (
             <FileMessageBubble
               fileName={item.fileName!}
@@ -6180,7 +6239,6 @@ function CartSheet({ onClose, onSendOrder }: { onClose: () => void; onSendOrder:
             </LinearGradient>
           </TouchableOpacity>
         </View>
-        <BottomNav active='chats'/>
       </View>
     </View>
   );

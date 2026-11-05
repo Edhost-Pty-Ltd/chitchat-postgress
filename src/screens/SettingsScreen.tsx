@@ -5,7 +5,7 @@ import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons'; // kept for IoniconName type
-import { Avatar, BottomNav, UserAvatar } from '../components';
+import { Avatar, BottomNav, UserAvatar, ScreenLayout } from '../components';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
 import { useAuth } from '../context/AuthContext';
@@ -86,10 +86,9 @@ export default function SettingsScreen() {
   };
 
   return (
+    <ScreenLayout active="settings">
     <View style={styles.root}>
       <AppBg />
-
-      <View style={[styles.header, { paddingTop: insets.top + 14 }]}>
         <AppText style={[styles.title, { color: textColor, fontFamily }]}>Settings</AppText>
       </View>
 
@@ -159,9 +158,8 @@ export default function SettingsScreen() {
       </ScrollView>
  
  
-         <BottomNav active='settings'/>
-
-    </View>
+        
+    </ScreenLayout>
   );
 }
 

@@ -140,8 +140,26 @@ export async function presignUpload(objectKey: string, contentType: string): Pro
   const env = getEnv();
   // Sign with the public client so the URL hostname matches what the device
   // will send in the Host header — a hostname mismatch breaks the signature.
+  //
+  // AWS SDK v3.670+ adds a CRC32 checksum to presigned PUTs by default.
+  // That checksum is computed at sign-time against an empty body, so when the
+  // device uploads real bytes MinIO rejects with "Checksum mismatch" or
+  // "AccessDenied: headers not signed". We build a one-off client here with
+  // requestChecksumCalculation disabled so the URL is clean.
+  const baseConfig = {
+    region: env.S3_REGION,
+    endpoint: env.S3_PUBLIC_ENDPOINT ?? env.S3_ENDPOINT,
+    forcePathStyle: env.S3_FORCE_PATH_STYLE,
+    credentials: {
+      accessKeyId: env.S3_ACCESS_KEY_ID,
+      secretAccessKey: env.S3_SECRET_ACCESS_KEY,
+    },
+    requestChecksumCalculation: 'WHEN_REQUIRED' as const,
+    responseChecksumValidation: 'WHEN_REQUIRED' as const,
+  };
+  const presignClient = new S3Client(baseConfig);
   const url = await getSignedUrl(
-    s3Public(),
+    presignClient,
     new PutObjectCommand({ Bucket: env.S3_BUCKET, Key: objectKey, ContentType: contentType }),
     { expiresIn: UPLOAD_URL_TTL_SEC },
   );

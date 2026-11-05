@@ -14,16 +14,44 @@ import React, {
 } from 'react';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import {
-  getAuth, onAuthStateChanged, signOut as fbSignOut,
-  signInWithCustomToken,
-} from '@react-native-firebase/auth';
 import { endpoints } from '../api/endpoints';
 import { mediaService } from '../services/mediaService';
 import { socketClient } from '../realtime/socket';
 import { startStatusCleanupService, stopStatusCleanupService } from '../services/statusCleanupService';
 import { writePresence } from '../hooks/usePresence';
-import { FirebaseAuthTypes } from '@react-native-firebase/auth';
+
+// ── Platform-aware Firebase Auth ──────────────────────────────────────────────
+// @react-native-firebase/auth only works on iOS/Android. On Web we use the
+// firebase/auth JS SDK. Both are tree-shaken at bundle time; the right branch
+// is selected at runtime via Platform.OS.
+let _getAuth:               () => any;
+let _onAuthStateChanged:    (auth: any, cb: (u: any) => void) => () => void;
+let _fbSignOut:             (auth: any) => Promise<void>;
+let _signInWithCustomToken: (auth: any, token: string) => Promise<any>;
+
+if (Platform.OS === 'web') {
+  const w = require('firebase/auth');
+  const webApp = require('../config/firebase').default;   // already-initialised FirebaseApp
+  _getAuth               = () => w.getAuth(webApp);
+  _onAuthStateChanged    = (auth, cb) => w.onAuthStateChanged(auth, cb);
+  _fbSignOut             = (auth) => w.signOut(auth);
+  _signInWithCustomToken = (auth, token) => w.signInWithCustomToken(auth, token);
+} else {
+  const n   = require('@react-native-firebase/auth');
+  const mod = n.default ?? n;
+  _getAuth               = () => (mod.getAuth ? mod.getAuth() : mod());
+  _onAuthStateChanged    = (auth, cb) => auth.onAuthStateChanged(cb);
+  _fbSignOut             = (auth) => (mod.signOut ? mod.signOut(auth) : auth.signOut());
+  _signInWithCustomToken = (auth, token) =>
+    mod.signInWithCustomToken
+      ? mod.signInWithCustomToken(auth, token)
+      : auth.signInWithCustomToken(token);
+}
+
+const getAuth               = _getAuth;
+const onAuthStateChanged    = (auth: any, cb: (u: any) => void) => _onAuthStateChanged(auth, cb);
+const fbSignOut             = (auth: any) => _fbSignOut(auth);
+const signInWithCustomToken = (auth: any, token: string) => _signInWithCustomToken(auth, token);
 import {
   DEVICE_OWNER_KEY,
   registerCurrentDevice,
@@ -52,7 +80,8 @@ interface AuthContextValue {
   signOut:      () => Promise<void>;
   refreshActivity: () => void;
   loading:      boolean;
-  user:         FirebaseAuthTypes.User | null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  user:         any | null;
   authUid:      string | null;
   ownerUid:     string | null;
   userId:       string | null;   // alias of ownerUid for existing screens
@@ -85,7 +114,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [displayName,   setDisplayNameState]  = useState('');
   const [avatarUri,     setAvatarUriState]    = useState<string | null>(null);
   const [loading,       setLoading]           = useState(true);
-  const [user,          setUser]              = useState<FirebaseAuthTypes.User | null>(null);
+  const [user,          setUser]              = useState<any | null>(null);
   const [isCompanion,   setIsCompanion]       = useState(false);
   const [companionOwnerUid, setCompanionOwnerUidState] = useState<string | null>(null);
   const webTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

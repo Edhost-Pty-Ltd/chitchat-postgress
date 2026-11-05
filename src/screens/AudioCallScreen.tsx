@@ -1,4 +1,4 @@
-// ─── Screen: Audio Call ──────────────────────────────────────────────────────
+// ─── AudioCallScreen ──────────────────────────────────────────────────────────
 // Uses the shared CallContext WebRTC peer connection that was initialised by
 // useOutgoingCall (for outgoing) or useIncomingCallAnswer (for incoming).
 // The screen NO LONGER creates its own useWebRTC instance — doing so caused a
@@ -11,7 +11,6 @@ import {
 } from 'react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { LinearGradient } from 'expo-linear-gradient';
 import { useCallContext } from '../context/CallContext';
 import { useIncomingCallAnswer } from '../hooks/useIncomingCallAnswer';
 import { useAuth } from '../hooks/useAuth';
@@ -23,7 +22,7 @@ import { setSpeakerphoneOn } from '../utils/webrtc-platform';
 
 import { AppText, AppIcon, AppBg, useGlass } from '../context/ThemeContext';
 import { Avatar } from '../components';
-import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
+import { COLORS, SHADOW, GRADIENTS } from '../types/theme';
 import { RootStackParamList } from '../types';
 
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'AudioCall'>;
@@ -37,21 +36,20 @@ export default function AudioCallScreen() {
   const { minimizeCall, updateDuration } = useFloatingCall();
   const { bevel } = useGlass();
 
-  const [muted,        setMuted]        = useState(false);
-  const [speakerOn,    setSpeakerOn]    = useState(false);
-  const [duration,     setDuration]     = useState(0);
-  const [addOpen,      setAddOpen]      = useState(false);
-  const [callStatus,   setCallStatus]   = useState<string>('connecting');
-  const [showQuality,  setShowQuality]  = useState(false);
+  const [muted,       setMuted]      = useState(false);
+  // Default to speaker ON for audio calls. iOS routes WebRTC voiceChat audio to
+  // the earpiece by default, which is inaudible unless the phone is held to the
+  // ear. Defaulting to speaker makes the call audible; the user can toggle off.
+  const [speakerOn,   setSpeakerOn]  = useState(true);
+  const [duration,    setDuration]   = useState(0);
+  const [callStatus,  setCallStatus] = useState<string>(isOutgoing ? 'ringing' : 'connecting');
 
-  // Whether WebRTC media has actually connected (used to end the ringtone,
-  // start the timer, and decide the call outcome on hang-up).
-  const connectedRef = useRef(false);
+  const timerRef           = useRef<ReturnType<typeof setInterval> | null>(null);
+  const unsubscribeCallRef = useRef<(() => void) | null>(null);
+  const answerApplied      = useRef(false);
+  const iceApplied         = useRef<Set<string>>(new Set());
 
-  // Shared WebRTC instance from CallContext. CallContext already wires outgoing
-  // ICE candidates to SignalingService.addIceCandidate (using the caller/callee
-  // flag set via setIsCaller below), so using the shared instance means a
-  // SINGLE peer connection per call and ICE flowing automatically.
+  // Shared WebRTC instance from CallContext.
   const {
     connectionState,
     networkQuality,
@@ -62,64 +60,12 @@ export default function AudioCallScreen() {
     createAnswer,
     setRemoteAnswer,
     addIceCandidate,
-    initializePeerConnection,
     toggleMute: toggleMuteCtx,
     startNetworkMonitoring,
     cleanup: cleanupWebRTC,
   } = useCallContext();
 
-  // Tell CallContext whether this device is the caller so outgoing ICE
-  // candidates are tagged correctly (caller vs callee) for the relay.
-  useEffect(() => { setIsCaller(isOutgoing); }, [isOutgoing, setIsCaller]);
-
-  useEffect(() => {
-    if (connectionState === 'connected') {
-      connectedRef.current = true;
-      setCallStatus('connected');
-      startNetworkMonitoring();
-    } else if (connectionState === 'disconnected' || connectionState === 'failed') {
-      setCallStatus('disconnected');
-    }
-  }, [connectionState]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (networkQuality === 'poor' || networkQuality === 'fair') {
-      setShowQuality(true);
-      const t = setTimeout(() => setShowQuality(false), 3000);
-      return () => clearTimeout(t);
-    }
-  }, [networkQuality]);
-
-  // Build contact from otherParty
-  const contact: Contact = {
-    id: parseInt(otherParty.userId) || -2,
-    name: otherParty.displayName,
-    avatar: otherParty.displayName.split(' ').map((n) => n[0]).join('').toUpperCase(),
-    color: COLORS.blue,
-    status: 'online',
-    lastMsg: '',
-    time: '',
-    unread: 0,
-  };
-
-  const [participants, setParticipants] = useState<Contact[]>([contact]);
-    cleanup: cleanupCtx,
-  } = useCallContext();
-
   const incomingCall = useIncomingCallAnswer();
-
-  const [muted,       setMuted]       = useState(false);
-  // Default to speaker ON for audio calls. iOS routes WebRTC voiceChat audio to
-  // the earpiece by default, which is inaudible unless the phone is held to the
-  // ear. Defaulting to speaker makes the call audible; the user can toggle off.
-  const [speakerOn,   setSpeakerOn]   = useState(true);
-  const [duration,    setDuration]    = useState(0);
-  const [callStatus,  setCallStatus]  = useState<string>(isOutgoing ? 'ringing' : 'connecting');
-
-  const timerRef           = useRef<ReturnType<typeof setInterval> | null>(null);
-  const unsubscribeCallRef = useRef<(() => void) | null>(null);
-  const answerApplied      = useRef(false);
-  const iceApplied         = useRef<Set<string>>(new Set());
 
   // NOTE: This screen intentionally owns no expo-audio player. The ringtone is
   // owned by IncomingCallManager (callee only). A local useRingtone() instance
@@ -127,6 +73,10 @@ export default function AudioCallScreen() {
   // stop() on mount ran player.pause(), which made expo-audio deactivate the
   // iOS AVAudioSession right after getUserMedia started WebRTC's audio engine —
   // silencing the call in both directions.
+
+  // Tell CallContext whether this device is the caller so outgoing ICE
+  // candidates are tagged correctly (caller vs callee) for the relay.
+  useEffect(() => { setIsCaller(isOutgoing); }, [isOutgoing, setIsCaller]);
 
   // Update floating overlay while minimised
   useEffect(() => {
@@ -152,26 +102,14 @@ export default function AudioCallScreen() {
     }
   }, [speakerOn, connectionState]);
 
-  // NOTE: We deliberately do NOT call expo-audio's setAudioModeAsync during the
-  // call. @livekit/react-native-webrtc owns the shared iOS AVAudioSession; any
-  // expo-audio reconfiguration (even to change output routing) reconfigures that
-  // singleton and silences the remote audio track. Output ROUTING is instead
-  // done via the native AudioRouteModule (RTCAudioSession.overrideOutputAudioPort
-  // on iOS, AudioManager on Android), which changes only the route — not the
-  // session category — so it never silences the live call.
-
   // ── Call setup ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    // Tracks signalling we've already acted on so each is handled exactly once.
-    let answerApplied = false;
-    let offerAnswered = false;
-    const appliedIce = new Set<string>();
     let ended = false;
+    const appliedIce = new Set<string>();
 
     const endFromRemote = () => {
       if (ended) return;
       ended = true;
-      ringtone.stop();
       cleanupWebRTC();
       navigation.goBack();
     };
@@ -188,40 +126,18 @@ export default function AudioCallScreen() {
 
     const setupCall = async () => {
       try {
-        // Register the active call so CallContext tags outgoing ICE candidates
-        // with the right callId, and so a reconnect re-joins the call room.
         setActiveCallId(callId);
         await SignalingService.joinCall(callId);
 
-        // Initialize the shared peer connection for audio only.
-        await initializePeerConnection(false);
-
         if (isOutgoing) {
-          console.log('[AudioCall] Creating offer as caller...');
-          const offer = await createOffer(false);
-          await SignalingService.saveOffer(callId, offer);
-
-          // Listen for the callee's answer + their ICE candidates.
-          unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, (data) => {
-            if (!data) return;
-            if (data.answer && !answerApplied) {
-              answerApplied = true;
-              setRemoteAnswer(data.answer).catch(console.error);
-            }
-            applyRemoteIce(data.calleeIceCandidates);
-            if (data.status === 'ended' || data.status === 'rejected' || data.status === 'missed') {
-              endFromRemote();
-            }
           // ── OUTGOING: peer connection & offer already sent by useOutgoingCall.
           // Re-attach a listener here because the one in CallsScreen was destroyed
-          // when that screen unmounted. We handle answer + ICE directly on context.
+          // when that screen unmounted. Handle answer + ICE directly on context.
           unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, async (data) => {
             if (!data) return;
 
             if (data.status === 'ended' || data.status === 'rejected' || data.status === 'missed') {
-              cleanupCtx();
-              setCallStatus('ended');
-              navigation.goBack();
+              endFromRemote();
               return;
             }
 
@@ -236,29 +152,19 @@ export default function AudioCallScreen() {
               }
             }
 
-            // Apply callee ICE candidates (deduplicated)
-            for (const cand of data.calleeIceCandidates ?? []) {
-              const key = `${cand.candidate}-${cand.sdpMLineIndex}`;
-              if (!iceApplied.current.has(key)) {
-                iceApplied.current.add(key);
-                await addIceCandidate(cand).catch(console.error);
-              }
-            }
+            applyRemoteIce(data.calleeIceCandidates);
           });
         } else {
-          // ── INCOMING: create answer using the shared context peer connection
+          // ── INCOMING: create answer using the shared context peer connection.
           // Pre-warm: acquire the mic now so getUserMedia runs in parallel with
-          // waiting for the offer. answerCall reuses this (initializePeerConnection
-          // is idempotent), so connecting after the offer is near-instant.
+          // waiting for the offer. initializePeerConnection is idempotent.
           await initializePeerConnection(false);
 
           unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, async (data) => {
             if (!data) return;
 
             if (data.status === 'ended') {
-              cleanupCtx();
-              setCallStatus('ended');
-              navigation.goBack();
+              endFromRemote();
               return;
             }
 
@@ -269,45 +175,33 @@ export default function AudioCallScreen() {
               if (ok) setCallStatus('connected');
             }
 
-            // Apply caller ICE candidates
-            for (const cand of data.callerIceCandidates ?? []) {
-              const key = `${cand.candidate}-${cand.sdpMLineIndex}`;
-              if (!iceApplied.current.has(key)) {
-                iceApplied.current.add(key);
-                await addIceCandidate(cand).catch(console.error);
-              }
-            }
+            applyRemoteIce(data.callerIceCandidates);
           });
         }
-
-        // Start the duration timer
-        timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
       } catch (err) {
         console.error('[AudioCall] Setup failed:', err);
         setCallStatus('failed');
       }
     };
 
-    setupCall();
+    void setupCall();
 
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
       if (unsubscribeCallRef.current) unsubscribeCallRef.current();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Start the call-duration timer the moment WebRTC actually connects, so both
-  // participants' clocks start together — not whenever each device's own
-  // signaling round-trip happens to finish (which used to make the two sides
-  // drift apart). connectionState reaching 'connected' is a real event shared
-  // by both peers, unlike "my setupCall() function reached this line".
+  // Start the call-duration timer the moment WebRTC actually connects
   useEffect(() => {
     if (callStatus === 'connected' && !timerRef.current) {
       timerRef.current = setInterval(() => setDuration((d) => d + 1), 1000);
     }
+    return () => {
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    };
   }, [callStatus]);
 
-  // Handle Android back button - minimize call instead of ending it
+  // Handle Android back button — minimize call instead of ending it
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       minimizeCall({
@@ -326,19 +220,16 @@ export default function AudioCallScreen() {
     return () => sub.remove();
   }, [duration, callId, isOutgoing, otherParty, minimizeCall, navigation]);
 
+  // ── helpers ─────────────────────────────────────────────────────────────────
   const fmt = (s: number) =>
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
   const hangUp = async () => {
-    if (timerRef.current) clearInterval(timerRef.current);
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (unsubscribeCallRef.current) { unsubscribeCallRef.current(); unsubscribeCallRef.current = null; }
-    // Notify the other party over the socket so their screen ends the call.
-    // The REST /end route only updates the DB; it does NOT signal the peer, so
-    // without this the other user's call stays frozen/ongoing.
-    try { await SignalingService.updateCallStatus(callId, 'ended', duration); }
-    catch (err) { console.error('[AudioCall] signal end:', err); }
-    try { await endpoints.endCall(callId); } catch (err) { console.error('[AudioCall] endCall:', err); }
-    cleanupCtx();
+    try { await SignalingService.updateCallStatus(callId, 'ended', duration); } catch {}
+    try { await endpoints.endCall(callId); } catch {}
+    cleanupWebRTC();
     navigation.goBack();
   };
 
@@ -354,7 +245,7 @@ export default function AudioCallScreen() {
   };
 
   const switchToVideo = () => {
-    if (timerRef.current) clearInterval(timerRef.current);
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (unsubscribeCallRef.current) { unsubscribeCallRef.current(); unsubscribeCallRef.current = null; }
     navigation.replace('VideoCall', { callId, isOutgoing, otherParty });
   };
@@ -367,6 +258,7 @@ export default function AudioCallScreen() {
 
   const initials = otherParty.displayName.split(' ').map((n) => n[0]).join('').toUpperCase() || '??';
 
+  // ── render ──────────────────────────────────────────────────────────────────
   return (
     <View style={styles.root}>
       <AppBg />
@@ -375,15 +267,15 @@ export default function AudioCallScreen() {
       {/* ── Main area ── */}
       <View style={styles.mainArea}>
         <View style={styles.avatarRing}>
-          <Avatar initials={contact.avatar} color={contact.color} size={110} imageUrl={otherParty.photoUrl} />
+          <Avatar initials={initials} color={COLORS.blue} size={110} imageUrl={otherParty.photoUrl} />
         </View>
         <AppText fixedColor style={styles.callerName}>{otherParty.displayName}</AppText>
         <AppText fixedColor style={styles.callStatus}>
-          {callStatus === 'ringing' ? 'Ringing…'
+          {callStatus === 'ringing'      ? 'Ringing…'
             : callStatus === 'connecting' ? 'Connecting…'
-            : callStatus === 'connected' ? `Audio call · ${fmt(duration)}`
+            : callStatus === 'connected'  ? `Audio call · ${fmt(duration)}`
             : callStatus === 'disconnected' ? 'Reconnecting…'
-            : callStatus === 'ended' ? 'Call ended'
+            : callStatus === 'ended'      ? 'Call ended'
             : `${callStatus} · ${fmt(duration)}`}
         </AppText>
       </View>
@@ -443,6 +335,7 @@ export default function AudioCallScreen() {
   );
 }
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   root:    { flex: 1 },
   overlay: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.55)' },
@@ -468,8 +361,8 @@ const styles = StyleSheet.create({
   },
   iconBtn:      { padding: 8 },
   iconBtnGlass: { borderRadius: 20 },
-  topName:   { fontSize: 15, fontWeight: '700', color: '#fff' },
-  topStatus: { fontSize: 11, color: 'rgba(255,255,255,0.65)', marginTop: 2 },
+  topName:      { fontSize: 15, fontWeight: '700', color: '#fff' },
+  topStatus:    { fontSize: 11, color: 'rgba(255,255,255,0.65)', marginTop: 2 },
 
   controls: {
     position: 'absolute', bottom: 0, left: 0, right: 0,

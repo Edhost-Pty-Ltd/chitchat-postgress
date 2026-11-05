@@ -370,17 +370,19 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
       const optimistic = optimisticSnapshot.find(
         (candidate) =>
           candidate.senderId === message.senderId &&
-          candidate.clientId === message.clientId &&
-          !!candidate.localMediaUri,
+          candidate.clientId === message.clientId,
       );
-      return optimistic
-        ? {
-            ...message,
-            localMediaUri: optimistic.localMediaUri,
-            mediaWidth: optimistic.mediaWidth,
-            mediaHeight: optimistic.mediaHeight,
-          }
-        : message;
+      if (!optimistic) return message;
+      return {
+        ...message,
+        // Retain local image/video preview URI until the remote URL is ready.
+        localMediaUri: optimistic.localMediaUri ?? message.localMediaUri,
+        mediaWidth: optimistic.mediaWidth ?? message.mediaWidth,
+        mediaHeight: optimistic.mediaHeight ?? message.mediaHeight,
+        // For voice messages, fall back to the local file URI when the signed
+        // download URL isn't ready yet — the bubble stays visible and playable.
+        voiceUrl: message.voiceUrl ?? (message.type === 'voice' ? optimistic.voiceUrl : null),
+      };
     });
     messagesRef.current = withLocalPreview;
     setMessages(withLocalPreview);

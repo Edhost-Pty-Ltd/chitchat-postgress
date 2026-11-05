@@ -29,6 +29,10 @@ export interface VoiceMessageBubbleProps {
     icon: 'checkmark' | 'checkmark-done';
     color: string;
   };
+  /** Present while the file is uploading/sending. Disables play and shows a spinner. */
+  uploadStatus?: 'pending' | 'preparing' | 'uploading' | 'sending' | 'failed';
+  /** 0–100 upload progress shown inside the play button. */
+  uploadProgress?: number;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -82,8 +86,13 @@ export function VoiceMessageBubble({
   onSeek,
   timestamp,
   tickIcon,
+  uploadStatus,
+  uploadProgress = 0,
 }: VoiceMessageBubbleProps) {
-  const isActive = playerState.activeMessageId === messageId;
+  const isUploading = uploadStatus === 'uploading' || uploadStatus === 'sending' || uploadStatus === 'preparing' || uploadStatus === 'pending';
+  const isFailed    = uploadStatus === 'failed';
+
+  const isActive = !isUploading && playerState.activeMessageId === messageId;
   const status   = isActive ? playerState.status : 'idle';
   const posMs    = isActive ? playerState.positionMs : 0;
 
@@ -123,22 +132,11 @@ export function VoiceMessageBubble({
     onSeek(Math.floor(ratio * effectiveDuration));
   };
 
-  // ── Error state ──────────────────────────────────────────────────
-  if (status === 'error') {
-    return (
-      <BubbleWrapper isOutgoing={isOutgoing}>
-        <View style={styles.row}>
-          <TouchableOpacity
-            style={[styles.playBtn, { backgroundColor: playBtnBg }]}
-            onPress={onPlay}
-          >
-            <Ionicons name="refresh" size={20} color={playIconColor} />
-          </TouchableOpacity>
-          <Text style={[styles.duration, { color: durationColor }]}>Failed</Text>
-        </View>
-      </BubbleWrapper>
-    );
-  }
+  // ── Error state — keep the normal bubble, show error icon in play button ──
+  // Don't replace the whole bubble with a bare retry row: that makes a
+  // jarring layout shift during transient errors (e.g. second play on web).
+  // Instead we fall through to the normal render; the play-button branch
+  // below handles isFailed / status==='error' with a retry icon in-place.
 
   // ── Playhead dot left offset ─────────────────────────────────────
   const dotLeft = waveWidth > 0 ? progress * waveWidth - 5 : -999;
@@ -148,11 +146,31 @@ export function VoiceMessageBubble({
       {/* ── Main row: play btn │ waveform only ── */}
       <View style={styles.row}>
 
-        {/* Play / Pause / Loading */}
-        {status === 'loading' ? (
+        {/* Play / Pause / Loading / Uploading */}
+        {isUploading ? (
           <View style={[styles.playBtn, { backgroundColor: playBtnBg }]}>
             <ActivityIndicator size="small" color={playIconColor} />
           </View>
+        ) : isFailed ? (
+          <TouchableOpacity
+            style={[styles.playBtn, { backgroundColor: playBtnBg }]}
+            onPress={onPlay}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="alert-circle-outline" size={20} color="#ef4444" />
+          </TouchableOpacity>
+        ) : status === 'loading' ? (
+          <View style={[styles.playBtn, { backgroundColor: playBtnBg }]}>
+            <ActivityIndicator size="small" color={playIconColor} />
+          </View>
+        ) : status === 'error' ? (
+          <TouchableOpacity
+            style={[styles.playBtn, { backgroundColor: playBtnBg }]}
+            onPress={onPlay}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="refresh" size={20} color={playIconColor} />
+          </TouchableOpacity>
         ) : (
           <TouchableOpacity
             style={[styles.playBtn, { backgroundColor: playBtnBg }]}
@@ -209,10 +227,14 @@ export function VoiceMessageBubble({
       {/* ── Bottom row: duration left │ timestamp + ticks right ── */}
       <View style={styles.metaRow}>
         <Text style={[styles.duration, { color: durationColor }]}>
-          {displayTime}
+          {isUploading
+            ? (uploadProgress > 0 && uploadProgress < 100 ? `${Math.round(uploadProgress)}%` : 'Sending…')
+            : isFailed
+              ? 'Failed'
+              : displayTime}
         </Text>
 
-        {timestamp && (
+        {!isUploading && !isFailed && timestamp && (
           <View style={styles.timeRow}>
             <Text style={[styles.time, { color: durationColor }]}>
               {formatTime(timestamp)}

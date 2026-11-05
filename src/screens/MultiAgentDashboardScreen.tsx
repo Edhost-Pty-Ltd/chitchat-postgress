@@ -29,7 +29,7 @@ import Svg, {
   Stop,
 } from 'react-native-svg';
 
-import { BottomNav } from '../components';
+import { BottomNav, ScreenLayout } from '../components';
 import AgentRegistrationSheet from '../components/AgentRegistrationSheet';
 import AgentDashboardSheet from '../components/AgentDashboardSheet';
 import { AppBg, AppIcon, AppText, useForeground, useGlass, useTypography } from '../context/ThemeContext';
@@ -180,6 +180,7 @@ export default function MultiAgentDashboardScreen() {
   const scheduleSummary = dashboard ? formatScheduleSummary(dashboard.company.workSchedule) : null;
 
   return (
+    <ScreenLayout active="dashboard">
     <View style={styles.root}>
       <AppBg />
       <View style={[styles.header, { paddingTop: insets.top + 10, backgroundColor: FG.glassBg, borderBottomColor: FG.glassBorder }]}>
@@ -400,8 +401,8 @@ export default function MultiAgentDashboardScreen() {
           void load();
         }}
       />
-      <BottomNav active="dashboard" />
     </View>
+    </ScreenLayout>
   );
 }
 

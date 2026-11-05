@@ -1,159 +1,250 @@
-// ─── useVoicePlayer Hook (Web Implementation) ────────────────────────────────
-// Web implementation using HTML5 Audio API
+// ─── useVoicePlayer Hook (Web) ────────────────────────────────────────────────
+// Matches the native expo-audio hook's public API exactly so VoiceMessageBubble
+// and VoiceNotePlayer work identically on web.
+// Uses the HTML5 <audio> element — no extra dependencies.
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 
-export interface UseVoicePlayerReturn {
-  isPlaying: boolean;
-  currentTime: number;
-  duration: number;
-  isBuffering: boolean;
+export type PlaybackRate = 1 | 1.5 | 2;
+export const PLAYBACK_RATES: PlaybackRate[] = [1, 1.5, 2];
+
+export interface PlaybackState {
+  activeMessageId: string | null;
+  status: 'idle' | 'loading' | 'playing' | 'paused' | 'error';
+  positionMs: number;
+  durationMs: number;
   error: string | null;
-  play: (uri: string) => Promise<void>;
-  pause: () => void;
-  stop: () => void;
-  seekTo: (positionMs: number) => void;
+  playbackRate: PlaybackRate;
 }
 
-export function useVoicePlayer(sourceUri?: string): UseVoicePlayerReturn {
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [isBuffering, setIsBuffering] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+export interface UseVoicePlayerReturn {
+  state: PlaybackState;
+  play: (voiceUrl: string, messageId: string, durationMs: number) => Promise<void>;
+  pause: () => Promise<void>;
+  resume: () => Promise<void>;
+  stop: () => Promise<void>;
+  seek: (positionMs: number) => Promise<void>;
+  setPlaybackRate: (rate: PlaybackRate) => void;
+  cyclePlaybackRate: () => void;
+}
 
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+const INITIAL_STATE: PlaybackState = {
+  activeMessageId: null,
+  status: 'idle',
+  positionMs: 0,
+  durationMs: 0,
+  error: null,
+  playbackRate: 1,
+};
 
-  const play = useCallback(async (uri: string) => {
-    try {
-      console.log('[useVoicePlayer-Web] Playing:', uri);
-      setError(null);
-      setIsBuffering(true);
+const LOADING_TIMEOUT_MS = 15_000;
+const TICK_MS = 80; // progress update interval
 
-      // Stop current playback if any
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
+export function useVoicePlayer(): UseVoicePlayerReturn {
+  const [state, setState] = useState<PlaybackState>(INITIAL_STATE);
+
+  const audioRef         = useRef<HTMLAudioElement | null>(null);
+  const tickRef          = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timeoutRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeIdRef      = useRef<string | null>(null);
+  const playbackRateRef  = useRef<PlaybackRate>(1);
+  // Incremented every time play() is called; each Audio element captures its
+  // own generation so stale event handlers from a previous play session can
+  // detect they are outdated and silently ignore their callbacks.
+  const generationRef    = useRef<number>(0);
+
+  // ── helpers ─────────────────────────────────────────────────────────────────
+  const clearTick = () => {
+    if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
+  };
+  const clearTimeout_ = () => {
+    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+  };
+
+  const startTick = (audio: HTMLAudioElement) => {
+    clearTick();
+    tickRef.current = setInterval(() => {
+      if (!audio.paused) {
+        setState((prev) => ({
+          ...prev,
+          positionMs: Math.round(audio.currentTime * 1000),
+        }));
       }
+    }, TICK_MS);
+  };
 
-      // Create new audio element
-      const audio = new Audio(uri);
+  // Tears down the current audio element without touching activeIdRef or state.
+  // Bumping generationRef here ensures all pending event callbacks from the
+  // old element see themselves as stale.
+  const teardown = () => {
+    clearTick();
+    clearTimeout_();
+    generationRef.current += 1; // invalidate all callbacks from the old element
+    if (audioRef.current) {
+      const old = audioRef.current;
+      audioRef.current = null;
+      // Strip all handlers BEFORE clearing src so none of them fire during teardown
+      old.onloadedmetadata = null;
+      old.onplaying        = null;
+      old.onpause          = null;
+      old.onended          = null;
+      old.onerror          = null;
+      old.pause();
+      old.src = '';
+      old.load(); // ensures the browser releases the resource
+    }
+  };
+
+  // ── play ────────────────────────────────────────────────────────────────────
+  const play = useCallback(async (voiceUrl: string, messageId: string, durationMs: number) => {
+    // Tear down any existing audio FIRST, then capture the new generation id
+    teardown();
+    const myGen = generationRef.current; // unique token for this play session
+    activeIdRef.current = messageId;
+
+    setState((prev) => ({
+      ...prev,
+      activeMessageId: messageId,
+      status: 'loading',
+      positionMs: 0,
+      durationMs,
+      error: null,
+    }));
+
+    // Loading timeout
+    timeoutRef.current = setTimeout(() => {
+      if (generationRef.current !== myGen) return; // superseded
+      teardown();
+      activeIdRef.current = null;
+      setState((prev) =>
+        prev.activeMessageId === messageId
+          ? { ...prev, status: 'error', error: 'Voice note unavailable — network timeout' }
+          : prev,
+      );
+    }, LOADING_TIMEOUT_MS);
+
+    try {
+      const audio = new Audio(voiceUrl);
+      audio.playbackRate = playbackRateRef.current;
       audioRef.current = audio;
 
-      // Set up event listeners
+      // Wire up events — each handler checks myGen before touching state
       audio.onloadedmetadata = () => {
-        setDuration(Math.floor(audio.duration * 1000)); // Convert to ms
-        setIsBuffering(false);
+        if (generationRef.current !== myGen) return;
+        clearTimeout_();
+        setState((prev) =>
+          prev.activeMessageId === messageId
+            ? { ...prev, durationMs: Math.round(audio.duration * 1000) || durationMs }
+            : prev,
+        );
       };
 
-      audio.onplay = () => {
-        setIsPlaying(true);
+      audio.onplaying = () => {
+        if (generationRef.current !== myGen) return;
+        clearTimeout_();
+        setState((prev) =>
+          prev.activeMessageId === messageId
+            ? { ...prev, status: 'playing' }
+            : prev,
+        );
+        startTick(audio);
       };
 
       audio.onpause = () => {
-        setIsPlaying(false);
+        if (generationRef.current !== myGen) return;
+        clearTick();
+        setState((prev) =>
+          prev.activeMessageId === messageId && prev.status === 'playing'
+            ? { ...prev, status: 'paused', positionMs: Math.round(audio.currentTime * 1000) }
+            : prev,
+        );
       };
 
       audio.onended = () => {
-        setIsPlaying(false);
-        setCurrentTime(0);
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current);
-          intervalRef.current = null;
-        }
+        if (generationRef.current !== myGen) return;
+        clearTick();
+        clearTimeout_();
+        activeIdRef.current = null;
+        setState((prev) =>
+          prev.activeMessageId === messageId
+            ? { ...prev, status: 'idle', positionMs: 0 }
+            : prev,
+        );
       };
 
-      audio.onerror = (err) => {
-        console.error('[useVoicePlayer-Web] Playback error:', err);
-        setError('Failed to play audio');
-        setIsBuffering(false);
-        setIsPlaying(false);
+      audio.onerror = () => {
+        if (generationRef.current !== myGen) return;
+        clearTick();
+        clearTimeout_();
+        activeIdRef.current = null;
+        setState((prev) =>
+          prev.activeMessageId === messageId
+            ? { ...prev, status: 'error', error: 'Failed to play voice note' }
+            : prev,
+        );
       };
 
-      // Start playback
       await audio.play();
-
-      // Start progress tracker
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-      intervalRef.current = setInterval(() => {
-        if (audio && !audio.paused) {
-          setCurrentTime(Math.floor(audio.currentTime * 1000)); // Convert to ms
-        }
-      }, 100);
-
-      console.log('[useVoicePlayer-Web] Playback started');
     } catch (err: any) {
-      console.error('[useVoicePlayer-Web] Failed to play:', err);
-      setError(err.message || 'Failed to play audio');
-      setIsBuffering(false);
-      setIsPlaying(false);
+      if (generationRef.current !== myGen) return;
+      clearTick();
+      clearTimeout_();
+      activeIdRef.current = null;
+      setState((prev) =>
+        prev.activeMessageId === messageId
+          ? { ...prev, status: 'error', error: err?.message ?? 'Playback failed' }
+          : prev,
+      );
     }
   }, []);
 
-  const pause = useCallback(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      console.log('[useVoicePlayer-Web] Paused');
-    }
+  // ── pause ───────────────────────────────────────────────────────────────────
+  const pause = useCallback(async () => {
+    clearTick();
+    audioRef.current?.pause();
+    // onpause handler will update the state
   }, []);
 
-  const stop = useCallback(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-      audioRef.current = null;
-      console.log('[useVoicePlayer-Web] Stopped');
-    }
-
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-
-    setIsPlaying(false);
-    setCurrentTime(0);
+  // ── resume ──────────────────────────────────────────────────────────────────
+  const resume = useCallback(async () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.playbackRate = playbackRateRef.current;
+    await audio.play().catch(() => {});
+    // onplaying handler will flip status → 'playing' and restart the tick
   }, []);
 
-  const seekTo = useCallback((positionMs: number) => {
-    if (audioRef.current) {
-      audioRef.current.currentTime = positionMs / 1000; // Convert to seconds
-      setCurrentTime(positionMs);
-      console.log('[useVoicePlayer-Web] Seeked to:', positionMs);
-    }
+  // ── stop ────────────────────────────────────────────────────────────────────
+  const stop = useCallback(async () => {
+    const savedRate = playbackRateRef.current;
+    teardown();
+    activeIdRef.current = null;
+    setState({ ...INITIAL_STATE, playbackRate: savedRate });
   }, []);
 
-  // Auto-play if sourceUri provided
-  useEffect(() => {
-    if (sourceUri) {
-      play(sourceUri);
-    }
-  }, [sourceUri, play]);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
-    };
+  // ── seek ────────────────────────────────────────────────────────────────────
+  const seek = useCallback(async (positionMs: number) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.currentTime = positionMs / 1000;
+    setState((prev) => ({ ...prev, positionMs }));
   }, []);
 
-  return {
-    isPlaying,
-    currentTime,
-    duration,
-    isBuffering,
-    error,
-    play,
-    pause,
-    stop,
-    seekTo,
-  };
+  // ── playback rate ────────────────────────────────────────────────────────────
+  const setPlaybackRate = useCallback((rate: PlaybackRate) => {
+    playbackRateRef.current = rate;
+    if (audioRef.current) audioRef.current.playbackRate = rate;
+    setState((prev) => ({ ...prev, playbackRate: rate }));
+  }, []);
+
+  const cyclePlaybackRate = useCallback(() => {
+    const idx  = PLAYBACK_RATES.indexOf(playbackRateRef.current);
+    const next = PLAYBACK_RATES[(idx + 1) % PLAYBACK_RATES.length];
+    setPlaybackRate(next);
+  }, [setPlaybackRate]);
+
+  // ── cleanup on unmount ───────────────────────────────────────────────────────
+  useEffect(() => () => teardown(), []);
+
+  return { state, play, pause, resume, stop, seek, setPlaybackRate, cyclePlaybackRate };
 }

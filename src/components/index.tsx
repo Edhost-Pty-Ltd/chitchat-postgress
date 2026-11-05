@@ -9,7 +9,7 @@ export * from './NotificationTestButton';
 
 import React from 'react';
 import {
-  View, TouchableOpacity, StyleSheet, ViewStyle, Image,
+  View, TouchableOpacity, StyleSheet, ViewStyle, Image, useWindowDimensions, Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
@@ -18,11 +18,14 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, RADIUS, SHADOW, GRADIENTS, GLASS } from '../types/theme';
 import { RootStackParamList, ContactStatus } from '../types';
-import { AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
+import { AppText, AppIcon, useForeground, useTypography, useGlass, AppBg } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { useUnreadCount } from '../hooks/useUnreadCount';
 import { useUnviewedStatus } from '../hooks/useUnviewedStatus';
 import { useMissedCalls } from '../hooks/useMissedCalls';
+
+// Breakpoint: ≥ this width → sidebar replaces the bottom nav bar
+const SIDEBAR_BREAKPOINT = 768;
 
 type NavProp = NativeStackNavigationProp<RootStackParamList>;
 
@@ -90,23 +93,369 @@ interface BottomNavProps {
 }
 
 export function BottomNav({ active, onTabPress }: BottomNavProps) {
+  const { width: screenWidth } = useWindowDimensions();
+  const isSidebar = screenWidth >= SIDEBAR_BREAKPOINT;
+
+  return isSidebar
+    ? <SidebarNav active={active} onTabPress={onTabPress} />
+    : <BottomNavBar active={active} onTabPress={onTabPress} />;
+}
+
+// ─── Sidebar (large screens ≥ 768 px) ────────────────────────────────────────
+function SidebarNav({ active, onTabPress }: BottomNavProps) {
   const navigation = useNavigation<NavProp>();
-  const { FG } = useForeground();
+  const { FG, isDark }  = useForeground();
+  const { fontFamily }  = useTypography();
+  const insets          = useSafeAreaInsets();
+  const { userId, avatarUri, displayName, phone } = useAuth();
+  const [collapsed, setCollapsed] = React.useState(false);
+
+  const { totalUnread }      = useUnreadCount(userId);
+  const { hasUnviewedStatus } = useUnviewedStatus(userId);
+  const { missedCount }      = useMissedCalls(userId);
+
+  const sidebarBg    = isDark ? 'rgba(20,20,30,0.96)'  : 'rgba(255,255,255,0.97)';
+  const activeBg     = isDark ? 'rgba(9,178,238,0.18)' : 'rgba(9,178,238,0.10)';
+  const borderColor  = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.07)';
+  const dividerColor = isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)';
+
+  const handlePress = (t: typeof TABS[number]) =>
+    onTabPress ? onTabPress(t.id) : navigation.navigate(t.screen as any);
+
+  // return (
+  //   <View
+  //     style={[
+  //       sidebarStyles.sidebar,
+  //       collapsed && sidebarStyles.sidebarCollapsed,
+  //       {
+  //         backgroundColor: sidebarBg,
+  //         borderRightColor: borderColor,
+  //         paddingTop: Math.max(insets.top, 20),
+  //         paddingBottom: Math.max(insets.bottom, 20),
+  //       },
+  //     ]}
+  //   >
+  //     {/* ── Logo / brand ─────────────────────────────────────────────── */}
+  //     <View style={[sidebarStyles.brand, collapsed && sidebarStyles.brandCollapsed]}>
+  //       <LinearGradient colors={GRADIENTS.primary} style={sidebarStyles.brandIcon}>
+  //         <AppIcon name="chatbubbles" size={20} color="#fff" fixedColor />
+  //       </LinearGradient>
+  //       {!collapsed && (
+  //         <View>
+  //           <AppText style={[sidebarStyles.brandName, { fontFamily }]} fixedColor>
+  //             ChitChat
+  //           </AppText>
+  //           <AppText style={[sidebarStyles.brandSub, { color: FG.secondary, fontFamily }]} fixedColor>
+  //             Business
+  //           </AppText>
+  //         </View>
+  //       )}
+  //     </View>
+
+  //     {/* ── Collapse / expand toggle ──────────────────────────────────── */}
+  //     <TouchableOpacity
+  //       onPress={() => setCollapsed((c) => !c)}
+  //       style={[sidebarStyles.collapseBtn, collapsed && sidebarStyles.collapseBtnCenter]}
+  //       activeOpacity={0.7}
+  //     >
+  //       <AppIcon
+  //         name={collapsed ? 'chevron-forward' : 'chevron-back'}
+  //         size={16}
+  //         color={FG.secondary}
+  //       />
+  //     </TouchableOpacity>
+
+  //     {/* ── Divider ──────────────────────────────────────────────────── */}
+  //     <View style={[sidebarStyles.divider, { backgroundColor: dividerColor }]} />
+
+  //     {/* ── Nav items ────────────────────────────────────────────────── */}
+  //     <View style={sidebarStyles.navList}>
+  //       {TABS.map((t) => {
+  //         const isActive        = active === t.id;
+  //         const showChatsBadge  = t.id === 'chats'  && totalUnread > 0;
+  //         const showCallsBadge  = t.id === 'calls'  && missedCount > 0;
+  //         const showStatusDot   = t.id === 'status' && hasUnviewedStatus;
+  //         const badgeCount      = showChatsBadge ? totalUnread : showCallsBadge ? missedCount : 0;
+
+  //         return (
+  //           <TouchableOpacity
+  //             key={t.id}
+  //             style={[
+  //               sidebarStyles.navItem,
+  //               collapsed && sidebarStyles.navItemCollapsed,
+  //               isActive && { backgroundColor: activeBg },
+  //             ]}
+  //             activeOpacity={0.75}
+  //             onPress={() => handlePress(t)}
+  //           >
+  //             {/* Icon tile */}
+  //             <View style={sidebarStyles.iconWrap}>
+  //               {t.id === 'settings' ? (
+  //                 <View style={[
+  //                   sidebarStyles.avatarTile,
+  //                   isActive && { borderColor: COLORS.blue, borderWidth: 2 },
+  //                 ]}>
+  //                   {avatarUri ? (
+  //                     <Image source={{ uri: avatarUri }} style={sidebarStyles.sidebarAvatar} />
+  //                   ) : (
+  //                     <View style={[sidebarStyles.avatarFallback, { backgroundColor: COLORS.blue }]}>
+  //                       <AppText style={sidebarStyles.avatarInitials} fixedColor>
+  //                         {(displayName || 'You').split(' ').map((w: string) => w[0]).join('').toUpperCase().slice(0, 2)}
+  //                       </AppText>
+  //                     </View>
+  //                   )}
+  //                 </View>
+  //               ) : isActive ? (
+  //                 <LinearGradient colors={GRADIENTS.primary} style={sidebarStyles.iconTileActive}>
+  //                   <AppIcon name={t.iconActive} size={18} color="#fff" fixedColor />
+  //                 </LinearGradient>
+  //               ) : (
+  //                 <View style={sidebarStyles.iconTileInactive}>
+  //                   <AppIcon name={t.icon} size={18} color={FG.secondary} />
+  //                 </View>
+  //               )}
+
+  //               {/* Badge */}
+  //               {badgeCount > 0 && (
+  //                 <View style={sidebarStyles.badge}>
+  //                   <AppText style={sidebarStyles.badgeText} fixedColor>
+  //                     {badgeCount > 99 ? '99+' : badgeCount}
+  //                   </AppText>
+  //                 </View>
+  //               )}
+  //               {showStatusDot && badgeCount === 0 && (
+  //                 <View style={sidebarStyles.statusDot} />
+  //               )}
+  //             </View>
+
+  //             {/* Label — hidden when collapsed */}
+  //             {!collapsed && (
+  //               <View style={sidebarStyles.labelWrap}>
+  //                 <AppText
+  //                   numberOfLines={1}
+  //                   style={[
+  //                     sidebarStyles.label,
+  //                     { color: isActive ? COLORS.blue : FG.secondary, fontFamily },
+  //                     isActive && sidebarStyles.labelActive,
+  //                   ]}
+  //                   fixedColor
+  //                 >
+  //                   {t.label}
+  //                 </AppText>
+  //               </View>
+  //             )}
+
+  //             {/* Active indicator bar */}
+  //             {isActive && <View style={sidebarStyles.activeBar} />}
+  //           </TouchableOpacity>
+  //         );
+  //       })}
+  //     </View>
+
+  //     {/* ── Spacer pushes profile to bottom ──────────────────────────── */}
+  //     <View style={{ flex: 1 }} />
+
+  //     {/* ── Divider ──────────────────────────────────────────────────── */}
+  //     <View style={[sidebarStyles.divider, { backgroundColor: dividerColor }]} />
+
+  //     {/* ── User footer ──────────────────────────────────────────────── */}
+  //     <TouchableOpacity
+  //       style={[sidebarStyles.userFooter, collapsed && sidebarStyles.userFooterCollapsed]}
+  //       activeOpacity={0.75}
+  //       onPress={() => navigation.navigate('Settings' as any)}
+  //     >
+  //       {avatarUri ? (
+  //         <Image source={{ uri: avatarUri }} style={sidebarStyles.footerAvatar} />
+  //       ) : (
+  //         <View style={[sidebarStyles.footerAvatarFallback, { backgroundColor: COLORS.blue }]}>
+  //           <AppText style={sidebarStyles.footerInitials} fixedColor>
+  //             {(displayName || 'You').split(' ').map((w: string) => w[0]).join('').toUpperCase().slice(0, 2)}
+  //           </AppText>
+  //         </View>
+  //       )}
+  //       {!collapsed && (
+  //         <>
+  //           <View style={sidebarStyles.footerText}>
+  //             <AppText style={[sidebarStyles.footerName, { fontFamily }]} numberOfLines={1} fixedColor>
+  //               {displayName || 'You'}
+  //             </AppText>
+  //             <AppText style={[sidebarStyles.footerPhone, { color: FG.secondary, fontFamily }]} numberOfLines={1} fixedColor>
+  //               {phone || ''}
+  //             </AppText>
+  //           </View>
+  //           <AppIcon name="ellipsis-horizontal" size={16} color={FG.secondary} />
+  //         </>
+  //       )}
+  //     </TouchableOpacity>
+  //   </View>
+  // );
+
+
+  return (
+    <View
+      style={[
+        sidebarStyles.sidebar,
+        {
+          backgroundColor: sidebarBg,
+          borderRightColor: borderColor,
+          paddingTop: Math.max(insets.top, 20),
+          paddingBottom: Math.max(insets.bottom, 20),
+        },
+      ]}
+    >
+      {/* ── Logo / brand ─────────────────────────────────────────────── */}
+      <View style={sidebarStyles.brand}>
+        <LinearGradient colors={GRADIENTS.primary} style={sidebarStyles.brandIcon}>
+          <AppIcon name="chatbubbles" size={20} color="#fff" fixedColor />
+        </LinearGradient>
+        <View>
+          <AppText style={[sidebarStyles.brandName, { fontFamily }]} fixedColor>
+            ChitChat
+          </AppText>
+          <AppText style={[sidebarStyles.brandSub, { color: FG.secondary, fontFamily }]} fixedColor>
+            Business
+          </AppText>
+        </View>
+      </View>
+
+      {/* ── Divider ──────────────────────────────────────────────────── */}
+      <View style={[sidebarStyles.divider, { backgroundColor: dividerColor }]} />
+
+      {/* ── Nav items ────────────────────────────────────────────────── */}
+      <View style={sidebarStyles.navList}>
+        {TABS.map((t) => {
+          const isActive        = active === t.id;
+          const showChatsBadge  = t.id === 'chats'  && totalUnread > 0;
+          const showCallsBadge  = t.id === 'calls'  && missedCount > 0;
+          const showStatusDot   = t.id === 'status' && hasUnviewedStatus;
+          const badgeCount      = showChatsBadge ? totalUnread : showCallsBadge ? missedCount : 0;
+
+          return (
+            <TouchableOpacity
+              key={t.id}
+              style={[
+                sidebarStyles.navItem,
+                isActive && { backgroundColor: activeBg },
+              ]}
+              activeOpacity={0.75}
+              onPress={() => handlePress(t)}
+            >
+              {/* Icon tile */}
+              <View style={sidebarStyles.iconWrap}>
+                {t.id === 'settings' ? (
+                  <View style={[
+                    sidebarStyles.avatarTile,
+                    isActive && { borderColor: COLORS.blue, borderWidth: 2 },
+                  ]}>
+                    {avatarUri ? (
+                      <Image source={{ uri: avatarUri }} style={sidebarStyles.sidebarAvatar} />
+                    ) : (
+                      <View style={[sidebarStyles.avatarFallback, { backgroundColor: COLORS.blue }]}>
+                        <AppText style={sidebarStyles.avatarInitials} fixedColor>
+                          {(displayName || 'You').split(' ').map((w: string) => w[0]).join('').toUpperCase().slice(0, 2)}
+                        </AppText>
+                      </View>
+                    )}
+                  </View>
+                ) : isActive ? (
+                  <LinearGradient colors={GRADIENTS.primary} style={sidebarStyles.iconTileActive}>
+                    <AppIcon name={t.iconActive} size={18} color="#fff" fixedColor />
+                  </LinearGradient>
+                ) : (
+                  <View style={sidebarStyles.iconTileInactive}>
+                    <AppIcon name={t.icon} size={18} color={FG.secondary} />
+                  </View>
+                )}
+
+                {/* Badge */}
+                {badgeCount > 0 && (
+                  <View style={sidebarStyles.badge}>
+                    <AppText style={sidebarStyles.badgeText} fixedColor>
+                      {badgeCount > 99 ? '99+' : badgeCount}
+                    </AppText>
+                  </View>
+                )}
+                {showStatusDot && badgeCount === 0 && (
+                  <View style={sidebarStyles.statusDot} />
+                )}
+              </View>
+
+              {/* Label */}
+              <View style={sidebarStyles.labelWrap}>
+                <AppText
+                  numberOfLines={1}
+                  style={[
+                    sidebarStyles.label,
+                    { color: isActive ? COLORS.blue : FG.secondary, fontFamily },
+                    isActive && sidebarStyles.labelActive,
+                  ]}
+                  fixedColor
+                >
+                  {t.label}
+                </AppText>
+              </View>
+
+              {/* Active indicator bar */}
+              {isActive && <View style={sidebarStyles.activeBar} />}
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+
+      {/* ── Spacer pushes profile to bottom ──────────────────────────── */}
+      <View style={{ flex: 1 }} />
+
+      {/* ── Divider ──────────────────────────────────────────────────── */}
+      <View style={[sidebarStyles.divider, { backgroundColor: dividerColor }]} />
+
+      {/* ── User footer ──────────────────────────────────────────────── */}
+      <TouchableOpacity
+        style={sidebarStyles.userFooter}
+        activeOpacity={0.75}
+        onPress={() => navigation.navigate('Settings' as any)}
+      >
+        {avatarUri ? (
+          <Image source={{ uri: avatarUri }} style={sidebarStyles.footerAvatar} />
+        ) : (
+          <View style={[sidebarStyles.footerAvatarFallback, { backgroundColor: COLORS.blue }]}>
+            <AppText style={sidebarStyles.footerInitials} fixedColor>
+              {(displayName || 'You').split(' ').map((w: string) => w[0]).join('').toUpperCase().slice(0, 2)}
+            </AppText>
+          </View>
+        )}
+        <View style={sidebarStyles.footerText}>
+          <AppText style={[sidebarStyles.footerName, { fontFamily }]} numberOfLines={1} fixedColor>
+            {displayName || 'You'}
+          </AppText>
+          <AppText style={[sidebarStyles.footerPhone, { color: FG.secondary, fontFamily }]} numberOfLines={1} fixedColor>
+            {phone || ''}
+          </AppText>
+        </View>
+        <AppIcon name="ellipsis-horizontal" size={16} color={FG.secondary} />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+// ─── Bottom pill (mobile < 768 px) ────────────────────────────────────────────
+function BottomNavBar({ active, onTabPress }: BottomNavProps) {
+  const navigation = useNavigation<NavProp>();
+  const { FG }     = useForeground();
   const { fontFamily } = useTypography();
-  const { bevel } = useGlass();
-  const insets = useSafeAreaInsets();
+  const { bevel }  = useGlass();
+  const insets     = useSafeAreaInsets();
   const { userId, avatarUri, displayName } = useAuth();
 
-  const { totalUnread } = useUnreadCount(userId);
+  const { totalUnread }      = useUnreadCount(userId);
   const { hasUnviewedStatus } = useUnviewedStatus(userId);
-  const { missedCount } = useMissedCalls(userId);
+  const { missedCount }      = useMissedCalls(userId);
 
   const bottomSpace = Math.max(insets.bottom, 10) + 8;
 
   return (
     <View style={[styles.navBar, bevel, { marginBottom: bottomSpace }]}>
       {TABS.map((t) => {
-        const isActive = active === t.id;
+        const isActive       = active === t.id;
         const showChatsBadge = t.id === 'chats' && totalUnread > 0;
         const showCallsBadge = t.id === 'calls' && missedCount > 0;
         const showStatusDot  = t.id === 'status' && hasUnviewedStatus;
@@ -120,17 +469,13 @@ export function BottomNav({ active, onTabPress }: BottomNavProps) {
           >
             <View>
               {t.id === 'settings' ? (
-                // "You" tab — show the user's profile picture
                 <View style={[styles.iconTileInactive, isActive && styles.avatarActiveRing]}>
                   {avatarUri ? (
-                    <Image
-                      source={{ uri: avatarUri }}
-                      style={styles.navAvatarImg}
-                    />
+                    <Image source={{ uri: avatarUri }} style={styles.navAvatarImg} />
                   ) : (
                     <View style={styles.navAvatarFallback}>
                       <AppText style={styles.navAvatarInitials} fixedColor>
-                        {(displayName || 'You').split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2)}
+                        {(displayName || 'You').split(' ').map((w: string) => w[0]).join('').toUpperCase().slice(0, 2)}
                       </AppText>
                     </View>
                   )}
@@ -175,6 +520,38 @@ export function BottomNav({ active, onTabPress }: BottomNavProps) {
           </TouchableOpacity>
         );
       })}
+    </View>
+  );
+}
+
+// ─── ScreenLayout ─────────────────────────────────────────────────────────────
+// Wraps a main tab screen so the sidebar sits beside the content on large
+// screens and the bottom nav sits below it on small screens.
+// Usage: replace the root <View style={{flex:1}}> + <BottomNav> pair with:
+//   <ScreenLayout active="chats"><YourContent /></ScreenLayout>
+interface ScreenLayoutProps {
+  active: TabKey;
+  children: React.ReactNode;
+  onTabPress?: (tabId: TabKey) => void;
+}
+
+export function ScreenLayout({ active, children, onTabPress }: ScreenLayoutProps) {
+  const { width } = useWindowDimensions();
+  const isSidebar = width >= SIDEBAR_BREAKPOINT;
+
+  if (isSidebar) {
+    return (
+      <View style={{ flex: 1, flexDirection: 'row' }}>
+        <BottomNav active={active} onTabPress={onTabPress} />
+        <View style={{ flex: 1 }}>{children}</View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={{ flex: 1 }}>
+      {children}
+      <BottomNav active={active} onTabPress={onTabPress} />
     </View>
   );
 }
@@ -231,6 +608,226 @@ export function AppHeader({ title, showBack, rightIcon, onRightPress }: AppHeade
     </View>
   );
 }
+
+// ─── Sidebar styles ───────────────────────────────────────────────────────────
+const sidebarStyles = StyleSheet.create({
+  sidebar: {
+    width: 240,
+    height: '100%',
+    flexDirection: 'column',
+    borderRightWidth: 1,
+    ...(Platform.OS === 'web' ? ({ backdropFilter: 'blur(20px)' } as any) : {}),
+  },
+  sidebarCollapsed: {
+    width: 64,
+  },
+
+  brand: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+  },
+  brandCollapsed: {
+    paddingHorizontal: 14,
+    justifyContent: 'center',
+  },
+  brandIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...SHADOW.button,
+  },
+  brandName: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: COLORS.text,
+    letterSpacing: 0.3,
+  },
+  brandSub: {
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
+    marginTop: 1,
+  },
+
+  divider: {
+    height: 1,
+    marginHorizontal: 16,
+    marginVertical: 4,
+  },
+
+  navList: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 2,
+  },
+
+  navItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: RADIUS.md,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  navItemCollapsed: {
+    justifyContent: 'center',
+    paddingHorizontal: 0,
+  },
+
+  collapseBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+  },
+  collapseBtnCenter: {
+    justifyContent: 'center',
+  },
+
+  iconWrap: {
+    position: 'relative',
+    marginRight: 12,
+  },
+
+  iconTileActive: {
+    width: 36,
+    height: 36,
+    borderRadius: RADIUS.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...SHADOW.button,
+  },
+  iconTileInactive: {
+    width: 36,
+    height: 36,
+    borderRadius: RADIUS.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  avatarTile: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sidebarAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+  },
+  avatarFallback: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarInitials: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#fff',
+  },
+
+  labelWrap: { flex: 1 },
+  label: {
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  labelActive: {
+    fontWeight: '700',
+  },
+
+  activeBar: {
+    position: 'absolute',
+    right: 0,
+    top: 8,
+    bottom: 8,
+    width: 3,
+    borderRadius: 2,
+    backgroundColor: COLORS.blue,
+  },
+
+  badge: {
+    position: 'absolute',
+    top: -5,
+    right: -5,
+    backgroundColor: '#ef4444',
+    borderRadius: 10,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.9)',
+  },
+  badgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  statusDot: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#10b981',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.9)',
+  },
+
+  userFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  userFooterCollapsed: {
+    justifyContent: 'center',
+    paddingHorizontal: 0,
+  },
+  footerAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+  },
+  footerAvatarFallback: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  footerInitials: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  footerText: { flex: 1, minWidth: 0 },
+  footerName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  footerPhone: {
+    fontSize: 11,
+    marginTop: 1,
+  },
+});
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({

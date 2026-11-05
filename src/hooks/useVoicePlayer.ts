@@ -63,7 +63,7 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
   useEffect(() => {
     if (!player) return;
     try {
-      player.playbackRate = playbackRateRef.current;
+      player.setPlaybackRate(playbackRateRef.current, 'high');
     } catch {
       /* player not ready yet — retried when playing starts */
     }
@@ -96,8 +96,9 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
       wasPlayingRef.current = true;
       // Re-apply rate — survives player recreation.
       try {
-        if (player) player.playbackRate = playbackRateRef.current;
+        if (player) player.setPlaybackRate(playbackRateRef.current, 'high');
       } catch {}
+      
       setState((prev) => ({
         ...prev,
         status: 'playing',
@@ -138,7 +139,7 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
   useEffect(() => {
     if (!currentSource || !player || !activeMessageIdRef.current) return;
     try {
-      player.playbackRate = playbackRateRef.current;
+      player.setPlaybackRate(playbackRateRef.current, 'high');
       player.play();
     } catch (err) {
       console.error('[useVoicePlayer] auto-play error:', err);
@@ -180,8 +181,10 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
       try {
         await setAudioModeAsync({
           playsInSilentMode: true,
-          interruptionMode: 'duckOthers',
-          allowsRecording: false,
+          interruptionMode: 'doNotMix',
+          allowsRecording: false,  
+          allowsBackgroundRecording:true,
+          shouldPlayInBackground:true,
         });
       } catch {
         setState((prev) => ({
@@ -204,7 +207,7 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
       try {
         if (currentSource === voiceUrl && player) {
           player.seekTo(0);
-          player.playbackRate = playbackRateRef.current;
+          player.setPlaybackRate(playbackRateRef.current, 'high');
           player.play();
           clearLoadingTimeout();
           wasPlayingRef.current = true;
@@ -240,7 +243,7 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
   const resume = useCallback(async () => {
     try {
       if (player) {
-        player.playbackRate = playbackRateRef.current;
+        player.setPlaybackRate(playbackRateRef.current, 'high');
         player.play();
       }
       wasPlayingRef.current = true;
@@ -286,7 +289,7 @@ export function useVoicePlayer(): UseVoicePlayerReturn {
       playbackRateRef.current = rate;
       setState((prev) => ({ ...prev, playbackRate: rate }));
       try {
-        if (player) player.playbackRate = rate;
+        if (player) player.setPlaybackRate(rate, 'high');
       } catch (err) {
         console.error('[useVoicePlayer] setRate error:', err);
       }

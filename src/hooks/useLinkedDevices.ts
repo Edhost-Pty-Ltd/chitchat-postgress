@@ -29,10 +29,44 @@
 import { useState, useEffect, useRef } from 'react';
 import { Platform, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getAuth, signOut as fbSignOut } from '@react-native-firebase/auth';
 import { endpoints } from '../api/endpoints';
 import type { ApiError, NetworkError } from '../api/errors';
 import { socketClient } from '../realtime/socket';
+
+// ── Platform-aware Firebase Auth helpers ──────────────────────────────────────
+// @react-native-firebase/auth works on iOS/Android only; the firebase/auth JS
+// SDK is used on Web. Import the correct one so this module works on all
+// platforms without crashing.
+
+let _getAuth: () => any;
+let _fbSignOut: (auth: any) => Promise<void>;
+let _signInAnonymously: (auth: any) => Promise<any>;
+
+if (Platform.OS === 'web') {
+  const webAuth = require('firebase/auth');
+  // firebase.ts already initialises the JS SDK app and exports it as default.
+  const webApp = require('../config/firebase').default;
+
+  _getAuth = () => webAuth.getAuth(webApp);
+  _fbSignOut = (auth: any) => webAuth.signOut(auth);
+  _signInAnonymously = (auth: any) => webAuth.signInAnonymously(auth);
+} else {
+  const nativeAuth = require('@react-native-firebase/auth');
+  const mod = nativeAuth.default ?? nativeAuth;
+  _getAuth = () => mod.getAuth ? mod.getAuth() : mod();
+  _fbSignOut = (auth: any) => mod.signOut ? mod.signOut(auth) : (mod().signOut ? auth.signOut() : auth.signOut());
+  _signInAnonymously = async (auth: any) => {
+    // @react-native-firebase/auth v7+ exports signInAnonymously as a function
+    if (typeof mod.signInAnonymously === 'function') return mod.signInAnonymously(auth);
+    // Older shape: auth object has the method directly
+    if (typeof auth.signInAnonymously === 'function') return auth.signInAnonymously();
+    throw new Error('signInAnonymously not found in @react-native-firebase/auth');
+  };
+}
+
+const getAuth         = _getAuth;
+const fbSignOut       = (auth: any) => _fbSignOut(auth);
+const _doSignInAnon   = (auth: any) => _signInAnonymously(auth);
 
 export const DEVICE_OWNER_KEY   = 'linked_device_owner_uid';
 export const DEVICE_ID_KEY      = 'linked_device_id';
@@ -183,8 +217,7 @@ export async function createLinkRequest(): Promise<LinkRequest | null> {
     if (existing && existing.isAnonymous) {
       requesterUid = existing.uid;
     } else {
-      const { signInAnonymously } = require('@react-native-firebase/auth');
-      const cred = await signInAnonymously(auth);
+      const cred = await _doSignInAnon(auth);
       requesterUid = cred.user?.uid ?? null;
     }
   } catch (err) {
@@ -395,7 +428,7 @@ async function requireOwnerSession(ownerUid: string, action: string) {
 
   if (!currentUser) {
     await new Promise<void>((resolve) => {
-      const unsub = auth.onAuthStateChanged((u) => {
+      const unsub = auth.onAuthStateChanged((u: any) => {
         unsub();
         currentUser = u;
         resolve();

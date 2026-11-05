@@ -1,10 +1,13 @@
 ﻿// ─── Screen: Status ──────────────────────────────────────────────────────────
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, FlatList, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+import {
+  View, FlatList, TouchableOpacity, StyleSheet, Platform,
+  Animated,
+} from 'react-native';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect } from '@react-navigation/native';
-import { UserAvatar, StatusViewer, CreateStatusModal, BottomNav } from '../components';
+import { UserAvatar, StatusViewer, CreateStatusModal, ScreenLayout } from '../components';
 import { endpoints } from '../api/endpoints';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import { useAuth } from '../hooks/useAuth';
@@ -13,52 +16,190 @@ import { useStatus, type StatusGroup } from '../hooks/useStatus';
 import { usePhoneBook } from '../hooks/usePhoneBook';
 import { isVisibleTo } from '../hooks/usePrivacySettings';
 import type { FireStatus } from '../types';
-import { AppBg, AppText, AppIcon, useForeground, useTypography, useGlass } from '../context/ThemeContext';
+import {
+  AppBg, AppText, AppIcon, useForeground, useTypography, useGlass,
+} from '../context/ThemeContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-// ─── Helper Functions ─────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function formatTimeAgo(date: Date): string {
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
+  const diffMs   = Date.now() - date.getTime();
   const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-
-  if (diffMins < 1) return 'Just now';
+  const diffHrs  = Math.floor(diffMs / 3600000);
+  if (diffMins < 1)  return 'Just now';
   if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffHrs  < 24) return `${diffHrs}h ago`;
   return 'Today';
 }
 
 function getInitials(name: string): string {
   const parts = name.trim().split(/\s+/);
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return name.slice(0, 2).toUpperCase();
+  return parts.length >= 2
+    ? (parts[0][0] + parts[1][0]).toUpperCase()
+    : name.slice(0, 2).toUpperCase();
 }
+
+const AVATAR_PALETTE = [
+  '#f97316','#8b5cf6','#ec4899','#06b6d4',
+  '#10b981','#f59e0b','#6366f1','#e11d48',
+];
 
 function stringToColor(str: string): string {
-  const colors = ['#f97316','#8b5cf6','#ec4899','#06b6d4','#10b981','#f59e0b','#6366f1','#e11d48'];
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
-  return colors[Math.abs(hash) % colors.length];
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = str.charCodeAt(i) + ((h << 5) - h);
+  return AVATAR_PALETTE[Math.abs(h) % AVATAR_PALETTE.length];
 }
 
-// ─── Main Component ───────────────────────────────────────────────────────────
+// ─── StatusRow ───────────────────────────────────────────────────────────────
+
+interface StatusRowProps {
+  item: StatusGroup;
+  nameForUser: (uid: string, phone: string | null) => string;
+  visiblePhotoForUser: (uid: string, raw: string | null | undefined) => string | null;
+  onPress: (item: StatusGroup) => void;
+}
+
+function StatusRow({ item, nameForUser, visiblePhotoForUser, onPress }: StatusRowProps) {
+  const { FG }           = useForeground();
+  const { textColor, fontFamily } = useTypography();
+  const { bevel }        = useGlass();
+
+  const name         = nameForUser(item.userId, item.userPhone);
+  const visiblePhoto = visiblePhotoForUser(item.userId, item.photoURL);
+  const color        = stringToColor(name);
+  const initials     = getInitials(name);
+
+  const sorted   = [...item.statuses].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  const latest   = sorted[0];
+  const thumbUrl =
+    (latest?.thumbnailUrl && /^https?:/.test(latest.thumbnailUrl) ? latest.thumbnailUrl : null) ??
+    (latest?.mediaType === 'image' && latest.mediaUrl && /^https?:/.test(latest.mediaUrl)
+      ? latest.mediaUrl
+      : null);
+  const isText   = latest?.mediaType === 'text';
+  const textBg   = latest?.backgroundColor ?? color;
+
+  return (
+    <TouchableOpacity
+      style={[rowStyles.card, bevel]}
+      activeOpacity={0.75}
+      onPress={() => onPress(item)}
+    >
+      {/* ── Gradient ring ────────────────────────────────────────────── */}
+      <LinearGradient
+        colors={item.hasUnviewed ? [color, COLORS.blue] : ['#C7C7CC', '#AEAEB2']}
+        style={rowStyles.ring}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+      >
+        <View style={rowStyles.ringInner}>
+          {thumbUrl ? (
+            <Image source={{ uri: thumbUrl }} style={rowStyles.avatar} contentFit="cover" />
+          ) : isText ? (
+            <View style={[rowStyles.avatar, { backgroundColor: textBg, alignItems: 'center', justifyContent: 'center' }]}>
+              <AppText style={rowStyles.avatarText} numberOfLines={2}>
+                {latest.caption?.slice(0, 2) ?? 'T'}
+              </AppText>
+            </View>
+          ) : visiblePhoto ? (
+            <Image source={{ uri: visiblePhoto }} style={rowStyles.avatar} contentFit="cover" />
+          ) : (
+            <View style={[rowStyles.avatar, { backgroundColor: color, alignItems: 'center', justifyContent: 'center' }]}>
+              <AppText style={rowStyles.avatarText}>{initials}</AppText>
+            </View>
+          )}
+        </View>
+      </LinearGradient>
+
+      {/* Small profile-photo badge bottom-right of ring */}
+      {visiblePhoto && thumbUrl && (
+        <View style={rowStyles.badge}>
+          <Image source={{ uri: visiblePhoto }} style={rowStyles.badgeImg} contentFit="cover" />
+        </View>
+      )}
+
+      {/* Text */}
+      <View style={rowStyles.meta}>
+        <AppText style={[rowStyles.name, { color: textColor, fontFamily }]} numberOfLines={1}>
+          {name}
+        </AppText>
+        <AppText style={[rowStyles.time, { color: FG.secondary }]}>
+          {formatTimeAgo(item.latestTimestamp)}
+          {item.statuses.length > 1 ? `  ·  ${item.statuses.length} updates` : ''}
+        </AppText>
+      </View>
+
+      {item.hasUnviewed && <View style={rowStyles.unreadDot} />}
+    </TouchableOpacity>
+  );
+}
+
+const rowStyles = StyleSheet.create({
+  card: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 13,
+    borderRadius: RADIUS.lg,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    ...SHADOW.card,
+  },
+  ring: { borderRadius: 999, padding: 2.5 },
+  ringInner: {
+    borderRadius: 999,
+    padding: 2.5,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+  },
+  avatar: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+  },
+  avatarText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#fff',
+    textAlign: 'center',
+  },
+  badge: {
+    position: 'absolute',
+    left: 42,
+    top: 40,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 2.5,
+    borderColor: COLORS.sky1,
+    overflow: 'hidden',
+    zIndex: 2,
+  },
+  badgeImg: { width: '100%', height: '100%' },
+  meta: { flex: 1, minWidth: 0 },
+  name: { fontSize: 14, fontWeight: '700' },
+  time: { fontSize: 12, marginTop: 2 },
+  unreadDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: COLORS.blue,
+  },
+});
+
+// ─── Main Screen ─────────────────────────────────────────────────────────────
 
 export default function StatusScreen() {
-  const { user } = useAuth();
-  const userId = user?.uid ?? null;
-  // On a companion, auth.uid is the owner's uid, so statuses are the owner's.
-  // isCompanion gates the owner-only actions (mark viewed, delete).
+  const { user }        = useAuth();
+  const userId          = user?.uid ?? null;
   const { isCompanion } = useAuthContext();
-  const displayName = user?.displayName || user?.email || 'Unknown';
-  const photoURL = user?.photoURL || null;
+  const displayName     = user?.displayName || user?.email || 'Unknown';
+  const photoURL        = user?.photoURL || null;
 
-  const { FG } = useForeground();
-  const { fontFamily, textColor } = useTypography();
-  const { bevel } = useGlass();
-  const insets = useSafeAreaInsets();
-  const { resolveName, contactsMap } = usePhoneBook();
+  const { FG }                        = useForeground();
+  const { fontFamily, textColor }     = useTypography();
+  const { bevel }                     = useGlass();
+  const insets                        = useSafeAreaInsets();
+  const { resolveName, contactsMap }  = usePhoneBook();
 
   const {
     myStatuses,
@@ -71,506 +212,416 @@ export default function StatusScreen() {
     reload: reloadStatuses,
   } = useStatus(userId, isCompanion);
 
-  // Reload whenever this tab comes into focus so the status list is always fresh.
-  useFocusEffect(
-    useCallback(() => {
-      reloadStatuses();
-    }, [reloadStatuses]),
-  );
+  useFocusEffect(useCallback(() => { reloadStatuses(); }, [reloadStatuses]));
 
-  // ── Prefetch media so the viewer opens without a black frame ─────────────
-  // Fire-and-forget: start downloading image URLs into the RN image cache as
-  // soon as the status list arrives. By the time the user taps a row the image
-  // is already local, so the viewer renders it instantly.
+  // ── Prefetch media ────────────────────────────────────────────────────────
   const prefetchedRef = useRef(new Set<string>());
   useEffect(() => {
-    const allStatuses = [
-      ...myStatuses,
-      ...contactStatuses.flatMap((g) => g.statuses),
-    ];
-    allStatuses.forEach((s) => {
-      // Warm the expo-image cache so the viewer renders instantly:
-      //  - image: full media URL + its thumbnail (blurred placeholder)
-      //  - video: thumbnail (blurred poster shown while the video buffers)
-      //  - avatar for the header
+    const all = [...myStatuses, ...contactStatuses.flatMap((g) => g.statuses)];
+    all.forEach((s) => {
       const urls = [
-        s.mediaType === 'image'  ? s.mediaUrl       : null,
-        s.mediaType === 'image'  ? s.thumbnailUrl   : null,
-        s.mediaType === 'video'  ? s.thumbnailUrl   : null,
-        s.photoURL,                                          // avatar
+        s.mediaType === 'image' ? s.mediaUrl     : null,
+        s.mediaType === 'image' ? s.thumbnailUrl : null,
+        s.mediaType === 'video' ? s.thumbnailUrl : null,
+        s.photoURL,
       ].filter((u): u is string => !!u && !prefetchedRef.current.has(u));
-
       urls.forEach((url) => {
         prefetchedRef.current.add(url);
-        // expo-image prefetch → fills the same memory-disk cache the viewer reads.
         Image.prefetch(url, { cachePolicy: 'memory-disk' }).catch(() => {});
       });
     });
   }, [myStatuses, contactStatuses]);
 
-  // ── Resolve poster names via phone book ─────────────────────────────────────
-  // Status docs store a denormalized displayName (often "Unknown" for phone-auth
-  // users). Per the app's contact-name rule we instead show the saved phone-book
-  // contact name, else the phone number. We need each poster's phone: it's on
-  // newer status docs (userPhone); for older docs we look it up from `users`.
-  const [phoneMap, setPhoneMap] = useState<Map<string, string>>(new Map());
-  // Cache of each poster's privacyProfilePhoto setting ('Everyone'|'Contacts'|'Nobody')
-  const [statusPrivacyPhotoMap, setStatusPrivacyPhotoMap] = useState<Map<string, string>>(new Map());
-  // Cache of each poster's privacyStatus setting (who can see their status updates)
-  const [statusVisibilityMap, setStatusVisibilityMap] = useState<Map<string, string>>(new Map());
+  // ── Phone + privacy resolution ────────────────────────────────────────────
+  const [phoneMap,              setPhoneMap]              = useState(new Map<string, string>());
+  const [statusPrivacyPhotoMap, setStatusPrivacyPhotoMap] = useState(new Map<string, string>());
+  const [statusVisibilityMap,   setStatusVisibilityMap]   = useState(new Map<string, string>());
 
   useEffect(() => {
     let cancelled = false;
-    const missing = contactStatuses
-      .filter((g) => !g.userPhone && !phoneMap.has(g.userId))
-      .map((g) => g.userId);
-    // Also fetch privacy for any posters we don't have yet
-    const missingPrivacy = contactStatuses
-      .filter((g) => !statusPrivacyPhotoMap.has(g.userId) || !statusVisibilityMap.has(g.userId))
-      .map((g) => g.userId);
-    const allMissing = Array.from(new Set([...missing, ...missingPrivacy]));
-    if (allMissing.length === 0) return;
+    const all = Array.from(new Set(
+      contactStatuses
+        .filter((g) => !phoneMap.has(g.userId) || !statusVisibilityMap.has(g.userId))
+        .map((g) => g.userId),
+    ));
+    if (!all.length) return;
 
     (async () => {
-      const phoneUpdates      = new Map<string, string>();
-      const privacyUpdates    = new Map<string, string>();
-      const visibilityUpdates = new Map<string, string>();
-      await Promise.all(
-        allMissing.map(async (uid) => {
-          try {
-            const res = await endpoints.getUser(uid);
-            if (res.ok) {
-              const { phoneNumber, avatarObjectKey: _photo } = res.data;
-              if (phoneNumber && !phoneMap.has(uid)) phoneUpdates.set(uid, phoneNumber);
-              // Privacy fields aren't on the public profile — default to permissive
-              // values so status posters' photos show unless explicitly hidden
-              privacyUpdates.set(uid, 'Contacts');
-              visibilityUpdates.set(uid, 'Everyone');
-            }
-          } catch { /* ignore */ }
-        })
-      );
-      if (!cancelled) {
-        if (phoneUpdates.size > 0) setPhoneMap((prev) => new Map([...prev, ...phoneUpdates]));
-        if (privacyUpdates.size > 0) setStatusPrivacyPhotoMap((prev) => new Map([...prev, ...privacyUpdates]));
-        if (visibilityUpdates.size > 0) setStatusVisibilityMap((prev) => new Map([...prev, ...visibilityUpdates]));
-      }
+      const phones: Map<string, string> = new Map();
+      const privacy: Map<string, string> = new Map();
+      const vis: Map<string, string> = new Map();
+      await Promise.all(all.map(async (uid) => {
+        try {
+          const res = await endpoints.getUser(uid);
+          if (res.ok) {
+            const { phoneNumber } = res.data;
+            if (phoneNumber && !phoneMap.has(uid)) phones.set(uid, phoneNumber);
+            privacy.set(uid, 'Contacts');
+            vis.set(uid, 'Everyone');
+          }
+        } catch { /* ignore */ }
+      }));
+      if (cancelled) return;
+      if (phones.size)  setPhoneMap((p)              => new Map([...p, ...phones]));
+      if (privacy.size) setStatusPrivacyPhotoMap((p) => new Map([...p, ...privacy]));
+      if (vis.size)     setStatusVisibilityMap((p)   => new Map([...p, ...vis]));
     })();
 
     return () => { cancelled = true; };
   }, [contactStatuses]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Only show statuses from posters who are:
-  //   1. Saved in the viewer's phone book (WhatsApp-style — you only see updates from contacts)
-  //   2. Whose privacyStatus setting allows this viewer to see their updates
-  // Posters whose phone hasn't loaded yet are withheld until we can verify (not optimistic).
+  // ── Filter visible contacts ───────────────────────────────────────────────
   const visibleContactStatuses = contactStatuses.filter((g) => {
-    // Must be a saved device contact.
     const phone = g.userPhone || phoneMap.get(g.userId) || null;
     if (!phone || !contactsMap.has(phone)) return false;
-
-    // Must allow the viewer per their privacy setting.
     const setting = statusVisibilityMap.get(g.userId) ?? 'Everyone';
     return isVisibleTo(setting as any, true);
   });
 
-  // Resolve the name to show for a poster: saved contact name → phone number.
-  const nameForUser = (uid: string, userPhone: string | null): string => {
+  const nameForUser = (uid: string, userPhone: string | null) => {
     const phone = userPhone || phoneMap.get(uid) || null;
     return resolveName(phone, phone ?? 'Unknown');
   };
 
-  /** Return the poster's photoURL only if their privacyProfilePhoto allows it. */
-  const visiblePhotoForUser = (uid: string, rawPhoto: string | null | undefined): string | null => {
-    if (!rawPhoto) return null;
+  const visiblePhotoForUser = (uid: string, raw: string | null | undefined): string | null => {
+    if (!raw) return null;
     const setting = statusPrivacyPhotoMap.get(uid) ?? 'Contacts';
-    // All status viewers are contacts of the poster (they share statuses with contacts)
-    if (!isVisibleTo(setting as any, true)) return null;
-    return rawPhoto;
+    return isVisibleTo(setting as any, true) ? raw : null;
   };
 
+  // ── Viewer / modal state ──────────────────────────────────────────────────
   const [createModalVisible, setCreateModalVisible] = useState(false);
-  const [viewerVisible, setViewerVisible]           = useState(false);
-  // Store the statuses to show in the viewer at open-time so they don't
-  // change mid-view when viewingMyStatus/viewingStatuses state is cleared.
-  const [viewerStatuses, setViewerStatuses]         = useState<FireStatus[]>([]);
-  const [viewerIsOwner, setViewerIsOwner]           = useState(false);
+  const [viewerVisible,      setViewerVisible]      = useState(false);
+  const [viewerStatuses,     setViewerStatuses]     = useState<FireStatus[]>([]);
+  const [viewerIsOwner,      setViewerIsOwner]      = useState(false);
 
-  // ── Handle create status ────────────────────────────────────────────────────
   const handleCreateStatus = async (
     mediaType: 'image' | 'video' | 'text',
     mediaUri: string | null,
     caption: string | null,
     backgroundColor: string | null,
-    textColor: string | null,
-    durationMs?: number
+    textColorArg: string | null,
+    durationMs?: number,
   ) => {
     if (!userId) return;
     await createStatus(
-      displayName, photoURL, mediaType, mediaUri, caption, backgroundColor, textColor,
-      user?.phoneNumber ?? null,
-      durationMs,
+      displayName, photoURL, mediaType, mediaUri, caption,
+      backgroundColor, textColorArg, user?.phoneNumber ?? null, durationMs,
     );
   };
 
-  // ── Handle view status ──────────────────────────────────────────────────────
   const handleViewMyStatus = () => {
-    if (myStatuses.length === 0) return;
+    if (!myStatuses.length) return;
     setViewerStatuses(myStatuses);
     setViewerIsOwner(true);
     setViewerVisible(true);
   };
 
   const handleViewContactStatus = (group: StatusGroup) => {
-    // Inject the phone-book-resolved name and privacy-filtered photo so the
-    // viewer header shows the right name and hides photos that aren't allowed.
-    const resolved = nameForUser(group.userId, group.userPhone);
+    const resolved    = nameForUser(group.userId, group.userPhone);
     const visiblePhoto = visiblePhotoForUser(group.userId, group.photoURL);
-    setViewerStatuses(group.statuses.map((s) => ({
-      ...s,
-      displayName: resolved,
-      photoURL: visiblePhoto,
-    })));
+    setViewerStatuses(group.statuses.map((s) => ({ ...s, displayName: resolved, photoURL: visiblePhoto })));
     setViewerIsOwner(false);
     setViewerVisible(true);
   };
 
-  const handleCloseViewer = () => {
-    setViewerVisible(false);
-  };
-
   const handleDeleteStatus = async (statusId: string) => {
-    const status = myStatuses.find((s) => s.statusId === statusId);
-    if (status) {
-      await deleteStatus(statusId, status.mediaUrl);
-      // Remove from the viewer's local copy so it updates immediately
-      setViewerStatuses((prev) => prev.filter((s) => s.statusId !== statusId));
+    const s = myStatuses.find((x) => x.statusId === statusId);
+    if (s) {
+      await deleteStatus(statusId, s.mediaUrl);
+      setViewerStatuses((prev) => prev.filter((x) => x.statusId !== statusId));
     }
   };
 
-  // ── Render status row ───────────────────────────────────────────────────────
-  const renderStatus = ({ item }: { item: StatusGroup }) => {
-    const name = nameForUser(item.userId, item.userPhone);
-    const visiblePhoto = visiblePhotoForUser(item.userId, item.photoURL);
-    const color = stringToColor(name);
-    const initials = getInitials(name);
-
-    // Find the latest status's media for thumbnail preview (newest first)
-    const sorted   = [...item.statuses].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-    const latest   = sorted[0];
-    // Prefer explicit thumbnail, fall back to mediaUrl for images, null for text-only
-    const thumbUrl =
-      (latest?.thumbnailUrl && /^https?:/.test(latest.thumbnailUrl) ? latest.thumbnailUrl : null) ??
-      (latest?.mediaType === 'image' && latest.mediaUrl && /^https?:/.test(latest.mediaUrl)
-        ? latest.mediaUrl
-        : null);
-    const isTextStatus = latest?.mediaType === 'text';
-    const textBg = latest?.backgroundColor ?? color;
-
-    return (
-      <TouchableOpacity
-        style={[styles.statusCard, bevel]}
-        activeOpacity={0.75}
-        onPress={() => handleViewContactStatus(item)}
-      >
-        {/* ── Thumbnail ring (WhatsApp-style) ─────────────────────────── */}
-        <LinearGradient
-          colors={item.hasUnviewed ? [color, COLORS.blue] : ['#C7C7CC', '#AEAEB2']}
-          style={styles.ring}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-        >
-          <View style={styles.ringInner}>
-            {thumbUrl ? (
-              /* Media thumbnail fills the circle */
-              <Image
-                source={{ uri: thumbUrl }}
-                style={styles.avatarImage}
-                contentFit="cover"
-              />
-            ) : isTextStatus ? (
-              /* Text status — show coloured background with first letter of caption */
-              <View style={[styles.avatarCircle, { backgroundColor: textBg }]}>
-                <AppText style={styles.avatarText} numberOfLines={2}>
-                  {latest.caption?.slice(0, 2) ?? 'T'}
-                </AppText>
-              </View>
-            ) : visiblePhoto ? (
-              /* No media yet (URL still resolving) — fall back to profile photo */
-              <Image source={{ uri: visiblePhoto }} style={styles.avatarImage} contentFit="cover" />
-            ) : (
-              /* Final fallback: initials */
-              <View style={[styles.avatarCircle, { backgroundColor: color }]}>
-                <AppText style={styles.avatarText}>{initials}</AppText>
-              </View>
-            )}
-          </View>
-        </LinearGradient>
-
-        {/* Small profile-photo badge overlaid on the bottom-right of the ring */}
-        {visiblePhoto && thumbUrl && (
-          <View style={styles.badgeWrap}>
-            <Image source={{ uri: visiblePhoto }} style={styles.badgeImage} contentFit="cover" />
-          </View>
-        )}
-
-        <View style={styles.statusMeta}>
-          <AppText style={[styles.statusName, { color: textColor, fontFamily }]}>
-            {name}
-          </AppText>
-          <AppText style={[styles.statusTime, { color: FG.secondary }]}>
-            {formatTimeAgo(item.latestTimestamp)}
-          </AppText>
-        </View>
-
-        {item.hasUnviewed && (
-          <View style={styles.unreadDot} />
-        )}
-      </TouchableOpacity>
-    );
-  };
+  // ─── Render ───────────────────────────────────────────────────────────────
+  const latestMyTime = myStatuses.length
+    ? myStatuses.reduce((t, s) => (s.createdAt > t ? s.createdAt : t), myStatuses[0].createdAt)
+    : null;
 
   return (
-    <View style={styles.root}>
-      <AppBg />
+    <ScreenLayout active="status">
+      <View style={styles.root}>
+        <AppBg />
 
-      <View style={[styles.header, { backgroundColor: FG.glassBg, borderBottomColor: FG.glassBorder, borderBottomWidth: 1, paddingTop: Platform.OS === 'web' ? 16 : insets.top + 14 }]}>
-        <AppText style={[styles.title, { color: textColor, fontFamily }]}>Updates</AppText>
-      </View>
-
-      {/* My Status glass card */}
-      <TouchableOpacity
-        style={[styles.myCard, bevel]}
-        activeOpacity={0.8}
-        onPress={myStatuses.length > 0 ? handleViewMyStatus : () => setCreateModalVisible(true)}
-      >
-        <View style={styles.meAvatarWrap}>
-          {myStatuses.length > 0 ? (
-            <LinearGradient colors={GRADIENTS.primary} style={styles.statusRing}>
-              <View style={styles.statusRingInner}>
-                <UserAvatar size={52} />
-              </View>
-            </LinearGradient>
-          ) : (
-            <UserAvatar size={52} />
-          )}
-          {myStatuses.length === 0 && (
-            <LinearGradient colors={GRADIENTS.primary} style={styles.mePlusBadge}>
-              <AppIcon name="add" size={12} color="#fff" fixedColor />
-            </LinearGradient>
-          )}
-        </View>
-        <View style={styles.myCardText}>
-          <AppText style={[styles.myCardTitle, { color: FG.primary }]}>My Status</AppText>
-          <AppText style={[styles.myCardSub, { color: FG.secondary }]}>
-            {myStatuses.length > 0
-              ? `${formatTimeAgo(myStatuses.reduce((latest, s) => (s.createdAt > latest ? s.createdAt : latest), myStatuses[0].createdAt))} • Tap to view`
-              : 'Tap to add status update'}
-          </AppText>
-        </View>
-        {myStatuses.length > 0 && (
-          <TouchableOpacity
-            onPress={() => setCreateModalVisible(true)}
-            style={styles.addMoreBtn}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <AppIcon name="add-circle" size={28} color={COLORS.blue} />
-          </TouchableOpacity>
-        )}
-      </TouchableOpacity>
-
-      {/* Loading / Error / Empty states */}
-      {loading && visibleContactStatuses.length === 0 && !error ? null : error ? (
-        <View style={styles.centerContainer}>
-          <AppIcon name="alert-circle-outline" size={52} color={COLORS.sub} />
-          <AppText style={[styles.emptyText, { color: FG.secondary }]}>{error}</AppText>
-        </View>
-      ) : visibleContactStatuses.length === 0 ? (
-        <>
-          <AppText style={[styles.sectionText, { color: FG.secondary }]}>RECENT UPDATES</AppText>
-          <View style={styles.centerContainer}>
-            <AppIcon name="radio-button-off-outline" size={52} color={COLORS.sub} />
-            <AppText style={[styles.emptyText, { color: FG.secondary }]}>
-              No status updates yet
-            </AppText>
-            <AppText style={[styles.emptySubText, { color: FG.secondary }]}>
-              Status updates from your contacts will appear here
+        {/* ── Header ────────────────────────────────────────────────────── */}
+        <View style={[styles.header, { paddingTop: Platform.OS === 'web' ? 20 : insets.top + 14 }]}>
+          <View>
+            <AppText style={[styles.title, { color: textColor, fontFamily }]}>Updates</AppText>
+            <AppText style={[styles.subtitle, { color: FG.secondary, fontFamily }]}>
+              {visibleContactStatuses.length
+                ? `${visibleContactStatuses.length} contact${visibleContactStatuses.length === 1 ? '' : 's'} active`
+                : 'Status from your contacts'}
             </AppText>
           </View>
-        </>
-      ) : (
-        <>
-          <AppText style={[styles.sectionText, { color: FG.secondary }]}>
-            RECENT UPDATES ({visibleContactStatuses.length})
-          </AppText>
+          <TouchableOpacity
+            style={[styles.headerBtn, { borderColor: FG.glassBorder }]}
+            onPress={() => setCreateModalVisible(true)}
+            activeOpacity={0.8}
+          >
+            <LinearGradient colors={GRADIENTS.primary} style={styles.headerBtnGrad}>
+              <AppIcon name="add" size={20} color="#fff" fixedColor />
+            </LinearGradient>
+          </TouchableOpacity>
+        </View>
 
+        {/* ── My Status card ────────────────────────────────────────────── */}
+        <TouchableOpacity
+          style={[styles.myCard, bevel]}
+          activeOpacity={0.8}
+          onPress={myStatuses.length > 0 ? handleViewMyStatus : () => setCreateModalVisible(true)}
+        >
+          {/* Avatar with ring when has status */}
+          <View style={styles.meAvatarWrap}>
+            {myStatuses.length > 0 ? (
+              <LinearGradient colors={GRADIENTS.primary} style={styles.statusRing}>
+                <View style={styles.statusRingInner}>
+                  <UserAvatar size={50} />
+                </View>
+              </LinearGradient>
+            ) : (
+              <View style={styles.noStatusRing}>
+                <UserAvatar size={50} />
+              </View>
+            )}
+            {/* + badge */}
+            <LinearGradient colors={GRADIENTS.primary} style={styles.mePlusBadge}>
+              <AppIcon name="add" size={11} color="#fff" fixedColor />
+            </LinearGradient>
+          </View>
+
+          <View style={styles.myCardBody}>
+            <AppText style={[styles.myCardTitle, { color: textColor, fontFamily }]}>
+              My Status
+            </AppText>
+            <AppText style={[styles.myCardSub, { color: FG.secondary, fontFamily }]}>
+              {myStatuses.length > 0 && latestMyTime
+                ? `${formatTimeAgo(latestMyTime)} · ${myStatuses.length} update${myStatuses.length === 1 ? '' : 's'}`
+                : 'Tap to add a status update'}
+            </AppText>
+          </View>
+
+          {myStatuses.length > 0 && (
+            <TouchableOpacity
+              onPress={() => setCreateModalVisible(true)}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              activeOpacity={0.7}
+            >
+              <LinearGradient colors={GRADIENTS.primary} style={styles.addMoreBtn}>
+                <AppIcon name="add" size={17} color="#fff" fixedColor />
+              </LinearGradient>
+            </TouchableOpacity>
+          )}
+        </TouchableOpacity>
+
+        {/* ── Divider + section label ───────────────────────────────────── */}
+        <View style={styles.sectionRow}>
+          <View style={[styles.sectionLine, { backgroundColor: FG.glassBorder }]} />
+          <AppText style={[styles.sectionLabel, { color: FG.secondary, fontFamily }]}>
+            {visibleContactStatuses.length > 0
+              ? `RECENT  ·  ${visibleContactStatuses.length}`
+              : 'RECENT UPDATES'}
+          </AppText>
+          <View style={[styles.sectionLine, { backgroundColor: FG.glassBorder }]} />
+        </View>
+
+        {/* ── List / empty / error ──────────────────────────────────────── */}
+        {error ? (
+          <View style={styles.empty}>
+            <AppIcon name="alert-circle-outline" size={52} color={COLORS.sub} />
+            <AppText style={[styles.emptyText, { color: FG.secondary }]}>{error}</AppText>
+          </View>
+        ) : visibleContactStatuses.length === 0 ? (
+          <View style={styles.empty}>
+            <View style={styles.emptyIconWrap}>
+              <AppIcon name="aperture-outline" size={44} color={COLORS.blue} />
+            </View>
+            <AppText style={[styles.emptyTitle, { color: textColor, fontFamily }]}>
+              {loading ? 'Loading…' : 'No updates yet'}
+            </AppText>
+            <AppText style={[styles.emptyText, { color: FG.secondary }]}>
+              Status updates from your saved contacts appear here
+            </AppText>
+          </View>
+        ) : (
           <FlatList
             data={visibleContactStatuses}
             keyExtractor={(item) => item.userId}
-            renderItem={renderStatus}
+            renderItem={({ item }) => (
+              <StatusRow
+                item={item}
+                nameForUser={nameForUser}
+                visiblePhotoForUser={visiblePhotoForUser}
+                onPress={handleViewContactStatus}
+              />
+            )}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.listContent}
             ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
             removeClippedSubviews
             maxToRenderPerBatch={10}
             windowSize={8}
-            initialNumToRender={10}
+            initialNumToRender={12}
           />
-        </>
-      )}
+        )}
 
-
-
-      {/* Create Status Modal */}
-      <CreateStatusModal
-        visible={createModalVisible}
-        onClose={() => setCreateModalVisible(false)}
-        onCreate={handleCreateStatus}
-      />
-
-      {/* Status Viewer */}
-      {viewerVisible && viewerStatuses.length > 0 && (
-        <StatusViewer
-          visible={viewerVisible}
-          onClose={handleCloseViewer}
-          statuses={viewerStatuses}
-          initialIndex={0}
-          currentUserId={userId || ''}
-          onStatusViewed={markAsViewed}
-          // Companions can post and view but not delete — deleting a status
-          // is owner-only on the backend.
-          onDeleteStatus={viewerIsOwner && !isCompanion ? handleDeleteStatus : undefined}
+        {/* ── Modals ────────────────────────────────────────────────────── */}
+        <CreateStatusModal
+          visible={createModalVisible}
+          onClose={() => setCreateModalVisible(false)}
+          onCreate={handleCreateStatus}
         />
-      )}
 
-               <BottomNav active='status'/>
-    </View>
-    
+        {viewerVisible && viewerStatuses.length > 0 && (
+          <StatusViewer
+            visible={viewerVisible}
+            onClose={() => setViewerVisible(false)}
+            statuses={viewerStatuses}
+            initialIndex={0}
+            currentUserId={userId || ''}
+            onStatusViewed={markAsViewed}
+            onDeleteStatus={viewerIsOwner && !isCompanion ? handleDeleteStatus : undefined}
+          />
+        )}
+      </View>
+    </ScreenLayout>
   );
 }
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
 
+  // Header
   header: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingHorizontal: 20, paddingTop: 0, paddingBottom: 14,
-  },
-  title:  { fontSize: 26, fontWeight: '800', color: COLORS.text },
-
-  // My status — glass card
-  myCard: {
-    flexDirection: 'row', alignItems: 'center', gap: 14,
-    marginHorizontal: 14, marginBottom: 18, marginTop: 10,
-    borderRadius: RADIUS.lg, padding: 14,
-  },
-  meAvatarWrap: { position: 'relative' },
-  statusRing: {
-    borderRadius: 999,
-    padding: 3,
-  },
-  statusRingInner: {
-    borderRadius: 999,
-    padding: 2,
-    backgroundColor: 'rgba(255,255,255,0.9)',
-  },
-  mePlusBadge: {
-    position: 'absolute', bottom: 0, right: 0,
-    width: 20, height: 20, borderRadius: 10,
-    alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1.5, borderColor: COLORS.sky1,
-  },
-  myCardText:  { flex: 1 },
-  myCardTitle: { fontSize: 14, fontWeight: '700', color: COLORS.text },
-  myCardSub:   { fontSize: 12, color: COLORS.sub, marginTop: 2 },
-  addMoreBtn: {
-    width: 36,
-    height: 36,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
-  sectionText: {
-    fontSize: 10, fontWeight: '700', color: COLORS.sub,
-    letterSpacing: 1.2, paddingHorizontal: 20, paddingBottom: 10,
-  },
-
-  listContent: { paddingHorizontal: 14, paddingBottom: 100 },
-
-  // Glass card per status row
-  statusCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    borderRadius: RADIUS.lg,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingBottom: 16,
   },
-  ring:       { borderRadius: 999, padding: 2.5 },
-  ringInner:  { borderRadius: 999, padding: 2, backgroundColor: 'rgba(255,255,255,0.9)' },
-  avatarCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+  title: {
+    fontSize: 28,
+    fontWeight: '800',
+    letterSpacing: -0.5,
+  },
+  subtitle: {
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  headerBtn: {
+    borderRadius: RADIUS.md,
+    overflow: 'hidden',
+  },
+  headerBtnGrad: {
+    width: 40,
+    height: 40,
+    borderRadius: RADIUS.md,
     alignItems: 'center',
     justifyContent: 'center',
+    ...SHADOW.button,
   },
-  avatarImage: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+
+  // My status card
+  myCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    marginHorizontal: 14,
+    marginBottom: 20,
+    borderRadius: RADIUS.xl,
+    padding: 16,
+    ...SHADOW.card,
   },
-  avatarText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#ffffff',
-    textAlign: 'center',
+  meAvatarWrap: { position: 'relative' },
+  noStatusRing: {
+    borderRadius: 999,
+    padding: 3,
+    borderWidth: 2,
+    borderColor: 'rgba(142,142,147,0.35)',
+    borderStyle: 'dashed',
   },
-  // Small profile photo badge overlaid on the thumbnail ring
-  badgeWrap: {
+  statusRing: { borderRadius: 999, padding: 3 },
+  statusRingInner: {
+    borderRadius: 999,
+    padding: 2.5,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+  },
+  mePlusBadge: {
     position: 'absolute',
-    left: 40,   // right edge of the ~54px ring minus badge overlap
-    top: 38,    // bottom edge of the ring minus badge overlap
+    bottom: -2,
+    right: -2,
     width: 20,
     height: 20,
     borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
     borderWidth: 2,
     borderColor: COLORS.sky1,
-    overflow: 'hidden',
-    zIndex: 2,
+    ...SHADOW.button,
   },
-  badgeImage: {
-    width: '100%',
-    height: '100%',
+  myCardBody: { flex: 1, minWidth: 0 },
+  myCardTitle: { fontSize: 15, fontWeight: '700' },
+  myCardSub: { fontSize: 12, marginTop: 3 },
+  addMoreBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...SHADOW.button,
   },
-  statusMeta: { flex: 1 },
-  statusName: { fontSize: 14, fontWeight: '700', color: COLORS.text },
-  statusTime: { fontSize: 12, color: COLORS.sub, marginTop: 2 },
-  unreadDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: COLORS.blue,
+
+  // Section divider
+  sectionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginHorizontal: 20,
+    marginBottom: 14,
+  },
+  sectionLine: {
+    flex: 1,
+    height: 1,
+  },
+  sectionLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1.1,
+  },
+
+  // List
+  listContent: {
+    paddingHorizontal: 14,
+    paddingBottom: 110,
   },
 
   // Empty states
-  centerContainer: {
+  empty: {
     flex: 1,
-    justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 40,
+    justifyContent: 'center',
     gap: 12,
+    paddingHorizontal: 44,
+  },
+  emptyIconWrap: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: 'rgba(9,178,238,0.10)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 4,
+  },
+  emptyTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   emptyText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.sub,
-    textAlign: 'center',
-  },
-  emptySubText: {
     fontSize: 13,
-    color: COLORS.sub,
     textAlign: 'center',
-    marginTop: -6,
+    lineHeight: 20,
   },
 });

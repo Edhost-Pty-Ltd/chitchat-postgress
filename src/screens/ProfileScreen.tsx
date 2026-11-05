@@ -344,6 +344,7 @@ function EditableField({
             onSubmitEditing={() => onSave(field, draftValue)}
             onBlur={() => onSave(field, draftValue)}
             autoFocus
+            
           />
         ) : (
           <AppText

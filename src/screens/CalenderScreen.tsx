@@ -19,7 +19,7 @@ import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 
-import { BottomNav } from '../components';
+import { BottomNav, ScreenLayout } from '../components';
 import { ParticipantPickerSheet } from '../components/ParticipantPickerSheet';
 import { useAuth } from '../context/AuthContext';
 import { useContacts, AppContact } from '../hooks/useContacts';
@@ -1530,6 +1530,7 @@ export default function CalendarScreen() {
   });
 
   return (
+    <ScreenLayout active="calendar">
     <View style={styles.root}>
       <AppBg />
 
@@ -1870,8 +1871,8 @@ export default function CalendarScreen() {
         <AppIcon name="add" size={28} color={COLORS.blue} fixedColor />
       </TouchableOpacity>
 
-      <BottomNav active="calendar" />
     </View>
+    </ScreenLayout>
   );
 }
 

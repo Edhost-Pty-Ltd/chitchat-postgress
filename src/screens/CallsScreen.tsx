@@ -7,7 +7,7 @@ import {
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Avatar, BottomNav } from '../components';
+import { Avatar, BottomNav, ScreenLayout } from '../components';
 import { COLORS, RADIUS, SHADOW, GRADIENTS } from '../types/theme';
 import type { CallHistoryItem } from '../types/call';
 import type { RootStackParamList } from '../types';
@@ -558,9 +558,9 @@ export default function CallsScreen() {
   };
 
   return (
+    <ScreenLayout active="calls">
     <View style={styles.root}>
       <AppBg />
-
       <CallInfoSheet
         call={selectedCall}
         resolvedName={selectedCallName}
@@ -570,7 +570,7 @@ export default function CallsScreen() {
         onAudioCall={handleInfoAudioCall}
         onVideoCall={handleInfoVideoCall}
         onMessage={handleInfoMessage}
-      />
+      /> 
 
       <ContactPickerSheet
         visible={pickerOpen}
@@ -658,9 +658,9 @@ export default function CallsScreen() {
         </View>
       )}
 
-               <BottomNav active='calls'/>
 
     </View>
+    </ScreenLayout>
   );
 }
 

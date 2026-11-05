@@ -29,6 +29,14 @@ export async function uploadVoiceNote(
     sizeBytes: await fileSize(uri),
     contentType: 'audio/mp4',
     ext: 'm4a',
+  }, (detail) => {
+    // Bridge mediaService's progress shape to the legacy UploadProgress shape
+    // so ChatScreen's progress indicator tracks real bytes, not just 0→100.
+    onProgress({
+      bytesTransferred: detail.bytesSent,
+      totalBytes: detail.totalBytes,
+      percentage: detail.percentage,
+    });
   });
 
   onProgress({ bytesTransferred: 1, totalBytes: 1, percentage: 100 });
