@@ -128,3 +128,70 @@ async function sendExpoPush(messages: unknown[]): Promise<ExpoTicket[]> {
   }
   return tickets;
 }
+
+import type { ReactionPushJob } from '../jobs/queues.js';
+import { userInChatRoom } from '../realtime/emitter.js';
+
+/**
+ * Send a reaction push to the original message author.
+ * Skips if they are actively in the chat room (no need to push).
+ * Skips if they have muted the chat or blocked the reactor.
+ */
+export async function dispatchReactionPush(
+  job: ReactionPushJob,
+): Promise<{ sent: number; removedTokens: number }> {
+  // Don't push if the author is currently looking at the chat.
+  if (await userInChatRoom(job.senderId, job.chatId)) {
+    return { sent: 0, removedTokens: 0 };
+  }
+
+  // Respect mutes.
+  const muteRes = await query<{ user_id: string }>(
+    `SELECT user_id FROM chat_mutes
+       WHERE chat_id = $1 AND user_id = $2
+         AND (muted_until IS NULL OR muted_until > now())`,
+    [job.chatId, job.senderId],
+  );
+  if (muteRes.rows.length > 0) return { sent: 0, removedTokens: 0 };
+
+  const tokens = await tokensForUsers([job.senderId]);
+  if (tokens.length === 0) return { sent: 0, removedTokens: 0 };
+
+  const messages = tokens.map(({ token }) => ({
+    to: token,
+    sound: 'default',
+    title: job.reactorName,
+    // "Kgaogelo reacted ❤️ to your message"
+    body: `reacted ${job.emoji} to your message`,
+    categoryId: 'reaction',
+    data: {
+      chatId: job.chatId,
+      messageId: job.messageId,
+      reactorId: job.reactorId,
+      emoji: job.emoji,
+      type: 'reaction',
+    },
+  }));
+
+  let tickets: ExpoTicket[] = [];
+  try {
+    tickets = await sendExpoPush(messages);
+  } catch (err) {
+    logger.error({ err }, 'Expo reaction push failed');
+    throw err;
+  }
+
+  const removeTokenFn = async (token: string) =>
+    void (await query('DELETE FROM push_tokens WHERE token = $1', [token]));
+  let removed = 0;
+  await Promise.all(
+    tickets.map(async (ticket, i) => {
+      if (ticket?.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
+        await removeTokenFn(tokens[i].token);
+        removed += 1;
+      }
+    }),
+  );
+
+  return { sent: tokens.length, removedTokens: removed };
+}

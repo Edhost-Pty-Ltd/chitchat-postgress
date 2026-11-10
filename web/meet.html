@@ -125,12 +125,20 @@
   }
   .cbtn.off { background: #2a3647; color: var(--sub); }
   .cbtn.end { background: var(--danger); border-color: var(--danger); }
+  .cbtn.active { background: rgba(9,178,238,0.25); border-color: var(--blue); }
   .topinfo {
     display: flex; align-items: center; justify-content: space-between;
     padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 14px;
   }
   .topinfo .count { color: var(--sub); }
-  .hidden { display: none !important; }
+  /* Screen share banner */
+  .share-banner {
+    position: absolute; top: 48px; left: 0; right: 0;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 8px 16px; background: rgba(9,178,238,0.85);
+    font-size: 13px; font-weight: 600; z-index: 20;
+  }
+  .share-banner.remote { background: rgba(22,100,22,0.85); }
 </style>
 </head>
 <body>
@@ -149,16 +157,25 @@
   </div>
 
   <!-- ── In-call ── -->
-  <div id="call">
+  <div id="call" style="position:relative;">
     <div class="topinfo">
       <div id="meetTitle">Meeting</div>
       <div class="count"><span id="pcount">1</span> in call</div>
     </div>
+    <!-- Screen share banners (hidden by default) -->
+    <div class="share-banner" id="myShareBanner" style="display:none;">
+      🖥️ You are sharing your screen &nbsp;
+      <button onclick="stopScreenShare()" style="background:rgba(255,255,255,0.2);border:none;color:#fff;border-radius:8px;padding:3px 10px;cursor:pointer;font-weight:700;">Stop</button>
+    </div>
+    <div class="share-banner remote" id="remoteShareBanner" style="display:none;">
+      🖥️ <span id="remoteShareName">Someone</span> is sharing their screen
+    </div>
     <div class="grid" id="grid"></div>
     <div class="controls">
-      <button class="cbtn" id="btnMic" title="Mute">🎤</button>
-      <button class="cbtn" id="btnCam" title="Camera">🎥</button>
-      <button class="cbtn end" id="btnLeave" title="Leave">📞</button>
+      <button class="cbtn" id="btnMic" title="Toggle Microphone">🎤</button>
+      <button class="cbtn" id="btnCam" title="Toggle Camera">🎥</button>
+      <button class="cbtn" id="btnShare" title="Share Screen">🖥️</button>
+      <button class="cbtn end" id="btnLeave" title="Leave Meeting">📞</button>
     </div>
   </div>
 </div>
@@ -170,8 +187,10 @@
   'use strict';
 
   // ── Config ──────────────────────────────────────────────────────────────
-  // The API/socket origin. In production the website and API are same-origin,
-  // or set window.CHITCHAT_API_BASE before this script to override.
+  // The meeting page is served by the API server itself at /meet/:id, so
+  // window.location.origin is always the correct API base URL.
+  // window.CHITCHAT_API_BASE can still be set before this script to override
+  // (useful when the API is behind a reverse proxy with a different path).
   var API_BASE = (window.CHITCHAT_API_BASE || '').replace(/\/+$/, '') || window.location.origin;
 
   var ICE_SERVERS = [
@@ -189,6 +208,7 @@
     return q || '';
   }
   var MEETING_ID = meetingIdFromUrl();
+  console.log('[meet] startup:', { API_BASE: API_BASE, MEETING_ID: MEETING_ID, pathname: window.location.pathname, origin: window.location.origin });
 
   // ── DOM helpers ──────────────────────────────────────────────────────────
   var lobbyCard = document.getElementById('lobbyCard');
@@ -211,7 +231,8 @@
 
   // ── State ─────────────────────────────────────────────────────────────────
   var localStream = null;
-  var micOn = true, camOn = true;
+  var micOn = true, camOn = true, shareOn = false;
+  var screenStream = null;
   var socket = null, guestToken = null, myId = null, meetingTitle = 'Meeting';
   var peers = {};        // peerId -> { pc, name, isGuest }
   var displayName = '';
@@ -219,7 +240,7 @@
   // ── 1. Load meeting info ───────────────────────────────────────────────────
   function loadInfo() {
     if (!MEETING_ID) { showState('⚠️', 'Invalid meeting link', 'This link is missing a meeting id.'); return; }
-    fetch(API_BASE + '/meet/' + encodeURIComponent(MEETING_ID) + '/info')
+    fetch('/meet/' + encodeURIComponent(MEETING_ID) + '/info')
       .then(function (r) { return r.json(); })
       .then(function (data) {
         if (!data.exists) {
@@ -233,8 +254,9 @@
         meetingTitle = (data.meeting && data.meeting.title) || 'Meeting';
         renderPreJoin(data.meeting);
       })
-      .catch(function () {
-        showState('⚠️', 'Could not load meeting', 'Please check your connection and try again.');
+      .catch(function (err) {
+        console.error('[meet] loadInfo fetch failed:', err, 'API_BASE:', API_BASE, 'MEETING_ID:', MEETING_ID);
+        showState('⚠️', 'Could not load meeting', 'Connection error. API: ' + API_BASE + ' | ID: ' + MEETING_ID);
       });
   }
 
@@ -271,17 +293,27 @@
     }
 
     // Request camera + mic for the preview.
-    navigator.mediaDevices.getUserMedia({ audio: true, video: true })
-      .then(function (stream) {
-        localStream = stream;
-        previewVideo.srcObject = stream;
-        reflectToggles();
-      })
-      .catch(function () {
-        document.getElementById('joinErr').innerHTML =
-          '<div class="msg err">Camera/microphone permission denied. You can still join with them off, or allow access and reload.</div>';
-        micOn = false; camOn = false; reflectToggles();
-      });
+    // navigator.mediaDevices is only available on HTTPS or localhost.
+    // On plain HTTP (e.g. LAN IP), skip the preview entirely and let the user
+    // join without it — WebRTC will still acquire media during the call.
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+        .then(function (stream) {
+          localStream = stream;
+          previewVideo.srcObject = stream;
+          reflectToggles();
+        })
+        .catch(function () {
+          document.getElementById('joinErr').innerHTML =
+            '<div class="msg info">Camera/microphone not available for preview. You can still join — devices will be requested when you enter the call.</div>';
+          micOn = false; camOn = false; reflectToggles();
+        });
+    } else {
+      // HTTP + non-localhost: mediaDevices API unavailable
+      document.getElementById('joinErr').innerHTML =
+        '<div class="msg info">Camera preview unavailable over HTTP. You can still join — your camera and mic will work in the call. For the full experience, access this page over HTTPS.</div>';
+      micOn = false; camOn = false; reflectToggles();
+    }
 
     tMic.onclick = function () {
       micOn = !micOn;
@@ -307,7 +339,7 @@
   function requestGuestAndJoin(name) {
     var btn = document.getElementById('btnJoin');
     btn.disabled = true; btn.textContent = 'Joining…';
-    fetch(API_BASE + '/meet/' + encodeURIComponent(MEETING_ID) + '/guest', {
+    fetch('/meet/' + encodeURIComponent(MEETING_ID) + '/guest', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ displayName: name }),
@@ -332,7 +364,7 @@
 
   // ── 4. Socket + mesh WebRTC ────────────────────────────────────────────────
   function connectSocket() {
-    socket = io(API_BASE, {
+    socket = io('', {
       transports: ['websocket'],
       auth: { guestToken: guestToken },
       reconnection: true,
@@ -386,6 +418,19 @@
       teardown();
       showEndedOverlay('You were removed from the meeting.');
     });
+
+    // A remote participant started/stopped screen sharing.
+    socket.on('meeting:screen-sharing', function (p) {
+      if (!p || p.meetingId !== MEETING_ID || p.userId === myId) return;
+      var remoteBanner = document.getElementById('remoteShareBanner');
+      var nameEl = document.getElementById('remoteShareName');
+      if (p.sharing) {
+        if (nameEl) nameEl.textContent = p.displayName || 'A participant';
+        if (remoteBanner) remoteBanner.style.display = 'flex';
+      } else {
+        if (remoteBanner) remoteBanner.style.display = 'none';
+      }
+    });
   }
 
   function enterCall() {
@@ -415,7 +460,7 @@
       '<video autoplay playsinline muted></video>' +
       '<div class="nametag">' + esc(displayName) + ' (you)</div>';
     grid.appendChild(t);
-    t.querySelector('video').srcObject = localStream;
+    if (localStream) t.querySelector('video').srcObject = localStream;
   }
   function addRemoteTile(peerId, name) {
     if (document.getElementById('tile-' + peerId)) return;
@@ -503,25 +548,122 @@
 
   // ── Controls ────────────────────────────────────────────────────────────────
   function wireControls() {
-    var btnMic = document.getElementById('btnMic');
-    var btnCam = document.getElementById('btnCam');
+    var btnMic   = document.getElementById('btnMic');
+    var btnCam   = document.getElementById('btnCam');
+    var btnShare = document.getElementById('btnShare');
     var btnLeave = document.getElementById('btnLeave');
+
     function reflect() {
-      btnMic.className = 'cbtn' + (micOn ? '' : ' off'); btnMic.textContent = micOn ? '🎤' : '🔇';
-      btnCam.className = 'cbtn' + (camOn ? '' : ' off'); btnCam.textContent = camOn ? '🎥' : '📷';
+      btnMic.className   = 'cbtn' + (micOn   ? '' : ' off'); btnMic.textContent   = micOn   ? '🎤' : '🔇';
+      btnCam.className   = 'cbtn' + (camOn   ? '' : ' off'); btnCam.textContent   = camOn   ? '🎥' : '📷';
+      btnShare.className = 'cbtn' + (shareOn ? ' active' : ''); btnShare.textContent = '🖥️';
     }
+
     btnMic.onclick = function () {
       micOn = !micOn;
       if (localStream) localStream.getAudioTracks().forEach(function (t) { t.enabled = micOn; });
+      // Also mute the screen-share stream's audio if it has any
+      if (screenStream) screenStream.getAudioTracks().forEach(function (t) { t.enabled = micOn; });
       reflect();
     };
+
     btnCam.onclick = function () {
       camOn = !camOn;
       if (localStream) localStream.getVideoTracks().forEach(function (t) { t.enabled = camOn; });
       reflect();
     };
+
+    btnShare.onclick = function () {
+      if (shareOn) {
+        stopScreenShare();
+      } else {
+        startScreenShare();
+      }
+    };
+
     btnLeave.onclick = function () { teardown(); showEndedOverlay('You left the meeting.'); };
     reflect();
+  }
+
+  // ── Screen share ─────────────────────────────────────────────────────────────
+  function startScreenShare() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      alert('Screen sharing is not supported in this browser or requires HTTPS.');
+      return;
+    }
+    navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false })
+      .then(function (dispStream) {
+        screenStream = dispStream;
+        var screenTrack = dispStream.getVideoTracks()[0];
+        if (!screenTrack) return;
+
+        // Replace the camera video track in every peer connection with the screen track.
+        Object.keys(peers).forEach(function (peerId) {
+          var pc = peers[peerId] && peers[peerId].pc;
+          if (!pc) return;
+          var senders = pc.getSenders ? pc.getSenders() : [];
+          var videoSender = senders.find(function (s) { return s.track && s.track.kind === 'video'; });
+          if (videoSender) {
+            videoSender.replaceTrack(screenTrack).catch(function (e) {
+              console.warn('[meet] replaceTrack (share) failed for', peerId, e);
+            });
+          }
+        });
+
+        // Update self tile to show the screen stream.
+        var selfVideo = document.querySelector('#tile-self video');
+        if (selfVideo) selfVideo.srcObject = dispStream;
+
+        shareOn = true;
+        var myBanner = document.getElementById('myShareBanner');
+        if (myBanner) myBanner.style.display = 'flex';
+        document.getElementById('btnShare').className = 'cbtn active';
+
+        // Tell everyone else in the room.
+        if (socket) socket.emit('meeting:screen-sharing', { meetingId: MEETING_ID, sharing: true });
+
+        // When the user stops via the browser's own stop-sharing bar.
+        screenTrack.onended = function () { stopScreenShare(); };
+      })
+      .catch(function (err) {
+        if (err.name !== 'NotAllowedError' && err.name !== 'AbortError') {
+          console.error('[meet] getDisplayMedia failed:', err);
+        }
+      });
+  }
+
+  function stopScreenShare() {
+    if (screenStream) {
+      screenStream.getTracks().forEach(function (t) { t.stop(); });
+      screenStream = null;
+    }
+
+    // Restore the camera track in every peer connection.
+    Object.keys(peers).forEach(function (peerId) {
+      var pc = peers[peerId] && peers[peerId].pc;
+      if (!pc || !localStream) return;
+      var camTrack = localStream.getVideoTracks()[0];
+      if (!camTrack) return;
+      var senders = pc.getSenders ? pc.getSenders() : [];
+      var videoSender = senders.find(function (s) { return s.track && s.track.kind === 'video'; });
+      if (videoSender) {
+        videoSender.replaceTrack(camTrack).catch(function (e) {
+          console.warn('[meet] replaceTrack (restore cam) failed for', peerId, e);
+        });
+      }
+    });
+
+    // Restore self tile.
+    var selfVideo = document.querySelector('#tile-self video');
+    if (selfVideo && localStream) selfVideo.srcObject = localStream;
+
+    shareOn = false;
+    var myBanner = document.getElementById('myShareBanner');
+    if (myBanner) myBanner.style.display = 'none';
+    document.getElementById('btnShare').className = 'cbtn';
+
+    // Notify others.
+    if (socket) socket.emit('meeting:screen-sharing', { meetingId: MEETING_ID, sharing: false });
   }
 
   function showCallError(message) {
@@ -540,6 +682,15 @@
   }
 
   function teardown() {
+    // Stop screen share if active before tearing down.
+    if (screenStream) {
+      screenStream.getTracks().forEach(function (t) { t.stop(); });
+      screenStream = null;
+      shareOn = false;
+      if (socket) {
+        try { socket.emit('meeting:screen-sharing', { meetingId: MEETING_ID, sharing: false }); } catch(e) {}
+      }
+    }
     Object.keys(peers).forEach(removePeer);
     if (socket) {
       try { socket.emit('meeting:leave', { meetingId: MEETING_ID }); } catch (e) {}
@@ -550,8 +701,17 @@
   }
 
   window.addEventListener('beforeunload', function () {
-    try { if (socket) socket.emit('meeting:leave', { meetingId: MEETING_ID }); } catch (e) {}
+    try {
+      if (screenStream) {
+        screenStream.getTracks().forEach(function (t) { t.stop(); });
+        if (socket) socket.emit('meeting:screen-sharing', { meetingId: MEETING_ID, sharing: false });
+      }
+      if (socket) socket.emit('meeting:leave', { meetingId: MEETING_ID });
+    } catch (e) {}
   });
+
+  // Expose for inline onclick handlers.
+  window.stopScreenShare = stopScreenShare;
 
   // Go.
   loadInfo();

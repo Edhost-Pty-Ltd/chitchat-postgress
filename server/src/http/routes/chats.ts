@@ -33,6 +33,7 @@ import {
   getMessageSender,
   getMessageMeta,
   votePoll,
+  reactToMessage,
 } from '../../db/repositories/messages.js';
 import { getUserById } from '../../db/repositories/users.js';
 import {
@@ -43,6 +44,8 @@ import {
 } from '../../db/repositories/chats.js';
 import { emitToUser, emitToChat } from '../../realtime/emitter.js';
 import { fanOutMessage, notificationName } from '../../domain/messaging.js';
+import { enqueueReactionPush } from '../../jobs/queues.js';
+import { logger } from '../../config/logger.js';
 
 const SEND_LIMIT = 60; // messages per window
 const SEND_WINDOW_SEC = 60;
@@ -294,4 +297,63 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     }
     return { forwarded: createdIds.length, messageIds: createdIds };
   });
+
+  // POST /chats/:id/messages/:mid/react
+  // Add or toggle an emoji reaction. Same emoji from same user = remove (toggle).
+  // Different emoji from same user = replace. Broadcasts message:reacted to the
+  // whole chat room and enqueues a push to the message author.
+  app.post<{ Params: { id: string; mid: string } }>(
+    '/chats/:id/messages/:mid/react',
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const chatId = request.params.id;
+      const messageId = request.params.mid;
+      const userId = request.identity!.userId;
+
+      if (!(await isMember(chatId, userId))) {
+        throw Errors.forbidden('Not a member of this chat');
+      }
+
+      const body = request.body as { emoji?: string };
+      const emoji = typeof body?.emoji === 'string' ? body.emoji.trim() : '';
+      if (!emoji || emoji.length > 16) {
+        throw Errors.badRequest('emoji is required (max 16 chars)');
+      }
+
+      const { chatId: msgChatId, senderId, reactions } =
+        await reactToMessage(messageId, userId, emoji);
+
+      if (msgChatId !== chatId) throw Errors.forbidden('Message not in this chat');
+
+      // Broadcast the fresh reactions map to everyone in the chat so all
+      // connected clients update instantly without re-fetching.
+      emitToChat(chatId, 'message:reacted', {
+        chatId,
+        messageId,
+        reactions,   // full reactions object: emoji → userId[]
+        reactorId: userId,
+      });
+
+      // Push to the message author if they're not the reactor and not in the
+      // chat room right now (same pattern as message pushes).
+      if (senderId !== userId) {
+        const reactor = await getUserById(userId);
+        const reactorName = notificationName(reactor);
+        try {
+          await enqueueReactionPush({
+            chatId,
+            messageId,
+            senderId,      // the original message author (receives the push)
+            reactorId: userId,
+            reactorName,
+            emoji,
+          });
+        } catch (err) {
+          logger.warn({ err, messageId }, 'failed to enqueue reaction push');
+        }
+      }
+
+      return reply.code(200).send({ reactions });
+    },
+  );
 }

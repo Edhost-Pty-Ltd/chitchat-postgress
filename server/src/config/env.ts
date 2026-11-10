@@ -21,6 +21,11 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
+  // Optional HTTPS for local dev (required for camera/mic over LAN IPs)
+  USE_HTTPS: booleanish.default(false),
+  HTTPS_KEY_PATH: z.string().optional(),
+  HTTPS_CERT_PATH: z.string().optional(),
+
   DATABASE_URL: z.string().min(1),
   // Postgres TLS. Managed providers (AWS RDS, etc.) require TLS in production.
   //   disable  — no TLS (local dev / docker-compose). Default.
@@ -80,7 +85,10 @@ const schema = z.object({
 
   // Public web app that hosts the meeting room. Meeting invite cards link to
   // `${MEET_URL_BASE}/meet/<meetingId>`.
-  MEET_URL_BASE: z.string().min(1).default('https://chitchatbusiness.com'),
+  // Set this to your Expo web URL: http://localhost:8081 for local dev,
+  // your production domain when deployed. No hardcoded default — you must
+  // set MEET_URL_BASE in server/.env.
+  MEET_URL_BASE: z.string().min(1).default('http://localhost:8081'),
 
   // Secret used to sign short-lived guest tokens for browser participants who
   // join a meeting via its public link. Falls back to a dev-only default; set a

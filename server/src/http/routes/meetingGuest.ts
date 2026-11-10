@@ -1,10 +1,31 @@
 import type { FastifyInstance } from 'fastify';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { parse } from '../validate.js';
 import { Errors } from '../errors.js';
 import { getMeeting } from '../../db/repositories/meetings.js';
 import { issueGuestToken } from '../../auth/guestToken.js';
 import { checkRateLimit } from '../../redis/rateLimit.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = dirname(__filename);
+
+// Load meet.html — read per-request in development so edits take effect
+// without a server restart; cached in production for performance.
+const MEET_HTML_PATH = resolve(__dirname, '../../public/meet.html');
+
+function getMeetHtml(): string {
+  // In production, read once and cache. In development, read fresh each time
+  // so you can edit meet.html without restarting the server.
+  if (process.env.NODE_ENV === 'production') {
+    if (!_meetHtmlCache) _meetHtmlCache = readFileSync(MEET_HTML_PATH, 'utf-8');
+    return _meetHtmlCache;
+  }
+  return readFileSync(MEET_HTML_PATH, 'utf-8');
+}
+let _meetHtmlCache: string | null = null;
 
 /**
  * ─── Public meeting routes for browser guests ───────────────────────────────
@@ -33,7 +54,18 @@ const JOIN_LIMIT = 20;
 const WINDOW_SEC = 60;
 
 export async function registerMeetingGuestRoutes(app: FastifyInstance): Promise<void> {
-  // GET /meet/:id/info — public meeting status for the pre-join screen.
+  // GET /meet/:id — serve the standalone meeting room HTML page.
+  // This route intentionally has NO auth requirement so anyone with a link can
+  // join as a guest. The HTML page itself calls /meet/:id/info and
+  // /meet/:id/guest to authenticate via a short-lived guest JWT.
+  app.get<{ Params: { id: string } }>('/meet/:id', async (_request, reply) => {
+    return reply
+      .code(200)
+      .header('Content-Type', 'text/html; charset=utf-8')
+      // No-store: the page is tiny and always needs a fresh guest token.
+      .header('Cache-Control', 'no-store')
+      .send(getMeetHtml());
+  });
   app.get<{ Params: { id: string } }>('/meet/:id/info', async (request, reply) => {
     const ip = request.ip ?? 'unknown';
     const rl = await checkRateLimit(ip, 'meet-info', INFO_LIMIT, WINDOW_SEC);

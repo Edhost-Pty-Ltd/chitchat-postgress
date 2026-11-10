@@ -15,7 +15,7 @@ import { useAuth } from '../context/AuthContext';
 import { useChats, ChatPreview } from '../hooks/useChats';
 import { useContacts, AppContact } from '../hooks/useContacts';
 import { useChatPrefs, MAX_PINNED } from '../hooks/useChatPrefs';
-import { SwipeableRow } from '../components/SwipeableRow';
+import { SwipeableRow, subscribeRowOpen, closeAllRows } from '../components/SwipeableRow';
 import { ChatPreviewModal } from '../components/ChatPreviewModal';
 import FaceSetupPrompt from '../components/FaceSetupPrompt';
 import { clearLocalMessages } from '../hooks/useLocalMessages';
@@ -309,6 +309,7 @@ interface ChatRowProps {
   FGsecondary:      string;
   onPress:          () => void;
   onLongPress?:     () => void;
+  onAvatarPress?:   () => void;
   senderInfo?:      { displayName: string } | undefined;
   isPinned?:        boolean;
   isMuted?:         boolean;
@@ -318,7 +319,7 @@ interface ChatRowProps {
 const ChatRow = memo(function ChatRow({
   item, displayName, isGroup, contactPhotoUri, firebasePhotoURL,
   isSavedContact, hasStatus, userId, bevel, textColor, fontFamily,
-  FGsecondary, onPress, onLongPress, senderInfo, isPinned, isMuted, isFavourite,
+  FGsecondary, onPress, onLongPress, onAvatarPress, senderInfo, isPinned, isMuted, isFavourite,
 }: ChatRowProps) {
   // Robust voice-note detection. Older messages use the literal
   // "[Voice Note]" marker; newer ones may append a duration like
@@ -339,7 +340,12 @@ const ChatRow = memo(function ChatRow({
 
   return (
     <TouchableOpacity style={[styles.chatCard, bevel]} activeOpacity={0.75} onPress={onPress} onLongPress={onLongPress} delayLongPress={300}>
-      <View style={styles.chatAvatarWrap}>
+      <TouchableOpacity
+        style={styles.chatAvatarWrap}
+        onPress={onAvatarPress ?? onPress}
+        activeOpacity={0.75}
+        hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+      >
         <ChatAvatar
           displayName={displayName}
           contactPhotoUri={contactPhotoUri}
@@ -347,7 +353,7 @@ const ChatRow = memo(function ChatRow({
           isSavedContact={isSavedContact}
           hasStatus={hasStatus}
         />
-      </View>
+      </TouchableOpacity>
       <View style={styles.chatMeta}>
         <View style={styles.chatTopRow}>
           <Text style={[styles.chatName, { color: textColor, fontFamily }]} numberOfLines={1}>
@@ -1521,6 +1527,8 @@ export default function ChatsScreen() {
   const [sheetOpen,  setSheetOpen]  = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const chatsListRef = useRef<FlatList>(null);
+
+  useEffect(() => subscribeRowOpen(() => {}), []);  // keep registry warm
   const [labelManagerOpen, setLabelManagerOpen] = useState(false);
   const [managingLabelId,  setManagingLabelId]  = useState<string | null>(null);
 
@@ -2251,6 +2259,7 @@ export default function ChatsScreen() {
           isMuted={isMuted}
           isFavourite={favourites.includes(item.chatId)}
           onPress={() => {
+            closeAllRows();
             markChatRead(item.chatId);
             navigation.navigate('Chat', {
               chatId: item.chatId,
@@ -2260,7 +2269,17 @@ export default function ChatsScreen() {
               otherUserPhoto: firebasePhotoURL || contactPhotoUri || null,
             });
           }}
-          onLongPress={() => setPreviewChat({
+          onAvatarPress={!isGroup && otherMemberId ? () => {
+            closeAllRows();
+            navigation.navigate('ContactProfile', {
+              userId: otherMemberId,
+              displayName,
+              photoUrl: firebasePhotoURL || contactPhotoUri || null,
+              phoneNumber: otherPhone ?? undefined,
+              chatId: item.chatId,
+            });
+          } : undefined}
+          onLongPress={() => { closeAllRows(); setPreviewChat({
             chatId: item.chatId,
             displayName,
             isGroup,
@@ -2270,7 +2289,7 @@ export default function ChatsScreen() {
             isSavedContact,
             isMuted,
             isFavourite: favourites.includes(item.chatId),
-          })}
+          }); }}
           senderInfo={item.lastSenderId && isGroup ? memberInfoMap.get(item.lastSenderId) : undefined}
         />
       </SwipeableRow>
@@ -2323,10 +2342,20 @@ export default function ChatsScreen() {
       key: 'info', label: 'Contact info', icon: 'information-circle-outline',
       onPress: () => {
         setPreviewChat(null);
-        navigation.navigate('Chat', {
-          chatId: pc.chatId, displayName: pc.displayName, isGroup: pc.isGroup,
-          otherUserId: pc.otherUserId, otherUserPhoto: pc.otherUserPhoto ?? null, openProfile: true,
-        } as any);
+        if (!pc.isGroup && pc.otherUserId) {
+          navigation.navigate('ContactProfile', {
+            userId: pc.otherUserId,
+            displayName: pc.displayName,
+            photoUrl: pc.otherUserPhoto ?? null,
+            phoneNumber: pc.otherUserPhone ?? undefined,
+            chatId: pc.chatId,
+          });
+        } else {
+          navigation.navigate('Chat', {
+            chatId: pc.chatId, displayName: pc.displayName, isGroup: pc.isGroup,
+            otherUserId: pc.otherUserId, otherUserPhoto: pc.otherUserPhoto ?? null, openProfile: true,
+          } as any);
+        }
       },
     });
 
@@ -2637,11 +2666,21 @@ export default function ChatsScreen() {
                 onPress: () => {
                   const ac = actionChat;
                   setActionChat(null);
-                  navigation.navigate('Chat', {
-                    chatId: ac.chatId, displayName: ac.displayName, isGroup: ac.isGroup,
-                    otherUserId: ac.otherUserId, otherUserPhoto: ac.otherUserPhoto ?? null,
-                    openProfile: true,
-                  } as any);
+                  if (!ac.isGroup && ac.otherUserId) {
+                    navigation.navigate('ContactProfile', {
+                      userId: ac.otherUserId,
+                      displayName: ac.displayName,
+                      photoUrl: ac.otherUserPhoto ?? null,
+                      phoneNumber: ac.otherUserPhone ?? undefined,
+                      chatId: ac.chatId,
+                    });
+                  } else {
+                    navigation.navigate('Chat', {
+                      chatId: ac.chatId, displayName: ac.displayName, isGroup: ac.isGroup,
+                      otherUserId: ac.otherUserId, otherUserPhoto: ac.otherUserPhoto ?? null,
+                      openProfile: true,
+                    } as any);
+                  }
                 },
               },
               !actionChat.isSavedContact && !actionChat.isGroup && !!actionChat.otherUserId ? {
@@ -2906,14 +2945,16 @@ export default function ChatsScreen() {
       {tab === 'Broadcast' ? (
         <BroadcastScreen />
       ) : (
-        <FlatList
-          style={{ flex: 1 }}
-          ref={chatsListRef}
-          data={data}
-          keyExtractor={(item) => item.chatId}
-          renderItem={renderChat}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.listContent}
+        <View style={{ flex: 1 }}>
+          <FlatList
+            style={{ flex: 1 }}
+            ref={chatsListRef}
+            data={data}
+            keyExtractor={(item) => item.chatId}
+            renderItem={renderChat}
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.listContent}
+            onScrollBeginDrag={closeAllRows}
           ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
           removeClippedSubviews
           maxToRenderPerBatch={10}
@@ -2974,6 +3015,12 @@ export default function ChatsScreen() {
             ) : null
           }
         />
+
+          {/* When a row is open, any tap that lands on the list content
+              (not on the action buttons) is captured by the row's own
+              absoluteFill overlay and calls close(). No separate screen-level
+              overlay needed — removing it lets action buttons receive taps. */}
+        </View>
       )}
 
       {tab !== 'Broadcast' && (

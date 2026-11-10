@@ -202,6 +202,28 @@ export function registerMeetingHandlers(socket: AuthedSocket): void {
     },
   );
 
+  // Screen share state broadcast: when a participant starts/stops sharing their
+  // screen, relay it to everyone in the room so UIs can show the "sharing"
+  // banner and re-layout tiles. No DB persistence needed — it's ephemeral.
+  socket.on(
+    'meeting:screen-sharing',
+    async (payload: { meetingId?: string; sharing?: boolean }, ack?: Ack) => {
+      const { meetingId, sharing } = payload ?? {};
+      if (!meetingId || !(await canAccess(meetingId))) {
+        ack?.({ ok: false, error: 'FORBIDDEN' });
+        return;
+      }
+      // Broadcast to everyone else in the room (not the sender themselves).
+      socket.to(rooms.meeting(meetingId)).emit('meeting:screen-sharing', {
+        meetingId,
+        userId,
+        displayName: isGuest ? guestName : undefined,
+        sharing: !!sharing,
+      });
+      ack?.({ ok: true });
+    },
+  );
+
   // Relay meeting signaling between participants (Req 8.17). For a mesh of many
   // participants, offers/answers/ICE are targeted at ONE peer via `to`; when
   // `to` is omitted the signal is broadcast to the whole room (back-compat).

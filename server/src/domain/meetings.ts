@@ -33,11 +33,12 @@ export async function broadcastMeetingUpdate(meetingId: string, reason: string):
 }
 
 /**
- * Build the public web link that opens the meeting room in a browser.
+ * Build the external browser join link for a meeting.
+ * Points to this server's own /meet/:id route which serves meet.html.
  */
 export function meetingJoinUrl(meetingId: string): string {
   const base = getEnv().MEET_URL_BASE.replace(/\/+$/, '');
-  return `${base}/meet/${meetingId}`;
+  return `${base}/meet/${encodeURIComponent(meetingId)}`;
 }
 
 export interface MeetingInviteInfo {

@@ -6,20 +6,34 @@
 /** Base URL of the REST API (Req 3.2). */
 export const API_URL = process.env.EXPO_PUBLIC_API_URL ?? '';
 
-/** URL of the Socket.IO gateway (Req 3.2). Falls back to API_URL when unset. */
 export const SOCKET_URL = process.env.EXPO_PUBLIC_SOCKET_URL ?? API_URL;
 
 /**
- * Public web app that hosts the meeting room. A meeting opens in the browser at
- * `${MEET_URL_BASE}/meet/<meetingId>`. The server embeds the same link in the
- * invite card; this constant is used for the organizer's own "Join"/share path.
+ * @deprecated Use meetingJoinUrl() directly. This export is kept for
+ * backward-compatibility but evaluates lazily now.
  */
-export const MEET_URL_BASE =
-  process.env.EXPO_PUBLIC_MEET_URL_BASE ?? 'https://chitchatbusiness.com';
+export const MEET_URL_BASE = process.env.EXPO_PUBLIC_MEET_URL_BASE ?? API_URL;
 
-/** Build the browser join link for a meeting id. */
+/**
+ * Build the external browser join link for a meeting.
+ *
+ * The link always points to the API server's /meet/:id route, which serves
+ * the standalone meet.html page. This means:
+ *  - The meeting opens OUTSIDE the Expo app in a real browser tab
+ *  - It works on all platforms (mobile app, web app, invitation cards)
+ *  - No SPA routing needed — it's a real server-side route
+ *
+ * Set EXPO_PUBLIC_MEET_URL_BASE in .env.local to override (e.g. when the API
+ * is on a different host than the default API_URL).
+ */
 export function meetingJoinUrl(meetingId: string): string {
-  return `${MEET_URL_BASE.replace(/\/+$/, '')}/meet/${meetingId}`;
+  // Use the explicit override if set
+  const base = process.env.EXPO_PUBLIC_MEET_URL_BASE
+    ? process.env.EXPO_PUBLIC_MEET_URL_BASE.replace(/\/+$/, '')
+    : API_URL.replace(/\/+$/, '');   // default: same host as the API
+
+  if (!base) return '';
+  return `${base}/meet/${encodeURIComponent(meetingId)}`;
 }
 
 /**

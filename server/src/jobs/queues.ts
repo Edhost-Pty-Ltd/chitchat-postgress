@@ -1,7 +1,7 @@
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { logger } from '../config/logger.js';
 import { bullConnection } from '../redis/client.js';
-import { dispatchMessagePush, type PushMessageJob } from '../push/dispatcher.js';
+import { dispatchMessagePush, dispatchReactionPush, type PushMessageJob } from '../push/dispatcher.js';
 import { getCall, updateCallStatus } from '../db/repositories/calls.js';
 import { recordHistory } from '../realtime/handlers/signaling.js';
 import { emitToUser } from '../realtime/emitter.js';
@@ -44,6 +44,20 @@ export function getPushQueue(): Queue {
 /** Enqueue a message push job. */
 export async function enqueueMessagePush(job: PushMessageJob): Promise<void> {
   await getPushQueue().add('message', job);
+}
+
+export interface ReactionPushJob {
+  chatId: string;
+  messageId: string;
+  senderId: string;    // message author — receives the push
+  reactorId: string;
+  reactorName: string;
+  emoji: string;
+}
+
+/** Enqueue a reaction push job (notifies the message author). */
+export async function enqueueReactionPush(job: ReactionPushJob): Promise<void> {
+  await getPushQueue().add('reaction', job);
 }
 
 /** The call-timeout queue (lazy). Marks unanswered calls missed (Req 8.10). */
@@ -91,11 +105,17 @@ export async function enqueueDeleteObject(objectKey: string | null | undefined):
 /** Start the push worker. Call once at startup. */
 export function startWorkers(): void {
   if (pushWorker) return;
-  pushWorker = new Worker<PushMessageJob>(
+  pushWorker = new Worker<PushMessageJob | ReactionPushJob>(
     QUEUE_PUSH,
     async (job) => {
-      const result = await dispatchMessagePush(job.data);
-      logger.info({ ...result, messageId: job.data.messageId }, 'push dispatched');
+      if (job.name === 'reaction') {
+        const data = job.data as ReactionPushJob;
+        const result = await dispatchReactionPush(data);
+        logger.info({ messageId: data.messageId, emoji: data.emoji }, 'reaction push dispatched');
+        return result;
+      }
+      const result = await dispatchMessagePush(job.data as PushMessageJob);
+      logger.info({ ...result, messageId: (job.data as PushMessageJob).messageId }, 'push dispatched');
       return result;
     },
     { connection: connection() },

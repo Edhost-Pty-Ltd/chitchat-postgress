@@ -436,6 +436,92 @@ function getWorkHoursSummary(schedule?: Record<string, DaySchedule>) {
 }
 
 // ─── Add Contact Sheet ────────────────────────────────────────────────────────
+// ─── OfflineBanner ───────────────────────────────────────────────────────────
+// Centered floating card that animates in when the device goes offline.
+function OfflineBanner() {
+  const scale   = useRef(new Animated.Value(0.85)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.spring(scale,   { toValue: 1,  useNativeDriver: true, friction: 7, tension: 60 }),
+      Animated.timing(opacity, { toValue: 1,  duration: 220, useNativeDriver: true }),
+    ]).start();
+  }, []);
+
+  return (
+    <Animated.View
+      style={[
+        offlineBannerStyles.wrap,
+        { transform: [{ scale }], opacity },
+      ]}
+      pointerEvents="none"
+    >
+      <LinearGradient
+        colors={['#374151', '#1f2937']}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+        style={offlineBannerStyles.card}
+      >
+        {/* Pulsing icon */}
+        <View style={offlineBannerStyles.iconRing}>
+          <AppIcon name="cloud-offline-outline" size={22} color="#fff" fixedColor />
+        </View>
+        <View style={{ flex: 1 }}>
+          <AppText fixedColor style={offlineBannerStyles.title}>No connection</AppText>
+          <AppText fixedColor style={offlineBannerStyles.subtitle}>
+            Messages will send when you're back online
+          </AppText>
+        </View>
+      </LinearGradient>
+    </Animated.View>
+  );
+}
+
+const offlineBannerStyles = StyleSheet.create({
+  wrap: {
+    position: 'absolute',
+    bottom: 90,
+    left: 24,
+    right: 24,
+    alignSelf: 'center',
+    zIndex: 999,
+    // shadow
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    elevation: 12,
+  },
+  card: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
+  iconRing: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  title: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#fff',
+    marginBottom: 2,
+  },
+  subtitle: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.65)',
+    lineHeight: 16,
+  },
+});
+
 // Lets the user save an unsaved chat partner. First/last name fields plus a
 // "Sync to phone" switch that, when on, also writes to the device address book.
 function AddContactSheet({
@@ -609,6 +695,144 @@ function LocalVideoBubblePreview({ uri }: { uri: string }) {
     />
   );
 }
+
+// ── SwipeToReplyWrapper ───────────────────────────────────────────────────────
+// Direction-aware swipe: one direction = reply, opposite = show message info.
+//
+//   isOut=false (incoming)  →  swipe RIGHT = reply  |  swipe LEFT  = info
+//   isOut=true  (outgoing)  →  swipe LEFT  = reply  |  swipe RIGHT = info
+//
+// Both fire on any meaningful release (≥12pt). The reply icon and info icon
+// appear on opposite sides of the row so the user gets clear visual feedback.
+const SwipeToReplyWrapper = React.memo(function SwipeToReplyWrapper({
+  children,
+  isOut,
+  disabled,
+  onReply,
+  onInfo,
+}: {
+  children: React.ReactNode;
+  isOut: boolean;
+  disabled: boolean;
+  onReply: () => void;
+  onInfo: () => void;
+}) {
+  const swipeX       = useRef(new Animated.Value(0)).current;
+  const replyOpacity = useRef(new Animated.Value(0)).current;
+  const infoOpacity  = useRef(new Animated.Value(0)).current;
+  const firedRef     = useRef<'none' | 'reply' | 'info'>('none');
+
+  const springBack = useCallback(() => {
+    Animated.parallel([
+      Animated.spring(swipeX,       { toValue: 0, useNativeDriver: true, friction: 7, tension: 80 }),
+      Animated.timing(replyOpacity, { toValue: 0, duration: 120, useNativeDriver: true }),
+      Animated.timing(infoOpacity,  { toValue: 0, duration: 120, useNativeDriver: true }),
+    ]).start();
+  }, [swipeX, replyOpacity, infoOpacity]);
+
+  const pan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_e, g) => {
+        if (disabled) return false;
+        return Math.abs(g.dx) > 10 && Math.abs(g.dx) > Math.abs(g.dy) * 2;
+      },
+      onPanResponderGrant: () => {
+        firedRef.current = 'none';
+        swipeX.setOffset(0);
+        swipeX.setValue(0);
+      },
+      onPanResponderMove: (_e, g) => {
+        const dx = g.dx;
+        // isOut=false: right(+) = reply, left(-) = info
+        // isOut=true:  left(-)  = reply, right(+) = info
+        const isReplyDir = isOut ? dx < 0 : dx > 0;
+        const isInfoDir  = isOut ? dx > 0 : dx < 0;
+
+        if (isReplyDir) {
+          const clamped = Math.min(Math.abs(dx), 72);
+          swipeX.setValue(isOut ? -clamped : clamped);
+          replyOpacity.setValue(Math.min(clamped / 48, 1));
+          infoOpacity.setValue(0);
+        } else if (isInfoDir) {
+          const clamped = Math.min(Math.abs(dx), 56);
+          swipeX.setValue(isOut ? clamped : -clamped);
+          infoOpacity.setValue(Math.min(clamped / 40, 1));
+          replyOpacity.setValue(0);
+        }
+      },
+      onPanResponderRelease: (_e, g) => {
+        if (firedRef.current === 'none' && !disabled) {
+          const dx = g.dx;
+          const isReplyDir = isOut ? dx < -12 : dx > 12;
+          const isInfoDir  = isOut ? dx > 12  : dx < -12;
+          if (isReplyDir)     { firedRef.current = 'reply'; onReply(); }
+          else if (isInfoDir) { firedRef.current = 'info';  onInfo();  }
+        }
+        springBack();
+      },
+      onPanResponderTerminate: () => { springBack(); },
+    }),
+  ).current;
+
+  const replyScale = replyOpacity.interpolate({ inputRange: [0, 1], outputRange: [0.5, 1] });
+  const infoScale  = infoOpacity.interpolate({  inputRange: [0, 1], outputRange: [0.5, 1] });
+
+  // Reply icon: sits where the bubble moves TOWARD
+  //   incoming (right swipe) → reply icon appears on the RIGHT of the bubble
+  //   outgoing (left swipe)  → reply icon appears on the LEFT of the bubble
+  const replyIconPos = isOut ? { left: 8 }  : { right: 8 };
+  // Info icon: opposite side
+  const infoIconPos  = isOut ? { right: 8 } : { left: 8 };
+
+  return (
+    <View style={{ overflow: 'hidden' }}>
+      {/* Reply icon */}
+      <Animated.View
+        pointerEvents="none"
+        style={[swipeReplyIconBase, replyIconPos,
+          { opacity: replyOpacity, transform: [{ scale: replyScale }] }]}
+      >
+        <AppIcon name="arrow-undo" size={18} color={COLORS.blue} fixedColor />
+      </Animated.View>
+
+      {/* Info icon (clock) */}
+      <Animated.View
+        pointerEvents="none"
+        style={[swipeReplyIconBase, infoIconPos,
+          { backgroundColor: 'rgba(100,100,120,0.20)',
+            opacity: infoOpacity, transform: [{ scale: infoScale }] }]}
+      >
+        <AppIcon name="time-outline" size={18} color={COLORS.sub} fixedColor />
+      </Animated.View>
+
+      {/* Bubble slides in the direction dragged */}
+      <Animated.View
+        style={{ transform: [{ translateX: swipeX }] }}
+        {...pan.panHandlers}
+      >
+        {children}
+      </Animated.View>
+    </View>
+  );
+});
+
+// Static base style for both swipe icons (created once at module level)
+const swipeReplyIconBase: import('react-native').ViewStyle = {
+  position: 'absolute',
+  top: '50%' as any,
+  marginTop: -16,
+  width: 32,
+  height: 32,
+  borderRadius: 16,
+  backgroundColor: 'rgba(9,178,238,0.15)',
+  alignItems: 'center',
+  justifyContent: 'center',
+  zIndex: 0,
+};
+// Keep these for legacy references inside renderMessage (no longer used for positioning
+// but kept so the file compiles cleanly if anything still references them)
+const swipeReplyIconInStyle:  import('react-native').ViewStyle = { right: 8 };
+const swipeReplyIconOutStyle: import('react-native').ViewStyle = { left: 8 };
 
 export default function ChatScreen() {
   const navigation = useNavigation<NavProp>();
@@ -916,9 +1140,22 @@ export default function ChatScreen() {
 
   // Honor deep-link params from the chat-list actions menu
   useEffect(() => {
-    if (routeOpenProfile) setProfileModalOpen(true);
+    if (routeOpenProfile && otherUserId) {
+      // Use a short timeout so the chat screen is fully mounted before navigating
+      const t = setTimeout(() => {
+        navigation.navigate('ContactProfile', {
+          userId: otherUserId,
+          displayName,
+          photoUrl: otherUserPhoto ?? null,
+          chatId,
+          isGroup,
+          fromChat: true,
+        } as any);
+      }, 100);
+      return () => clearTimeout(t);
+    }
     if (routeOpenAddContact) setAddContactOpen(true);
-  }, [routeOpenProfile, routeOpenAddContact]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Search state ────────────────────────────────────────────────────
   const [searchOpen, setSearchOpen] = useState(false);
@@ -1000,6 +1237,24 @@ export default function ChatScreen() {
 
   // ── Reply state ─────────────────────────────────────────────────
   const [replyingTo, setReplyingTo] = useState<FireMessage | null>(null);
+
+  // ── Emoji reaction picker state ─────────────────────────────────
+  // Shows a WhatsApp-style floating emoji row above the long-pressed message.
+  const [reactionPickerMsgId,  setReactionPickerMsgId]  = useState<string | null>(null);
+  const [reactionPickerIsOut,  setReactionPickerIsOut]  = useState(false);
+  // "Who reacted" bottom sheet state
+  // Holds all reactions on the message + which emoji tab is active.
+  const [reactionViewerState, setReactionViewerState] = useState<{
+    msgId: string;
+    allReactions: Record<string, string[]>; // all emojis on this message
+    activeEmoji: string;                    // which tab is shown
+  } | null>(null);
+  // Full emoji grid toggle (shown when user taps the + button in the picker)
+  const [showFullEmojiGrid, setShowFullEmojiGrid] = useState(false);
+  // Local optimistic reactions map: messageId → { emoji → Set<userId> }
+  const [localReactions, setLocalReactions] = useState<
+    Record<string, Record<string, string[]>>
+  >({});
 
   // ── Forward state ───────────────────────────────────────────────
   const [forwardModalVisible, setForwardModalVisible] = useState(false);
@@ -1478,12 +1733,16 @@ export default function ChatScreen() {
       listRef.current.scrollToIndex({ index, animated: true, viewPosition: 0.4 });
     }
     setHighlightedMessageId(messageId);
+    // "Breathe" for 2 s: pulse opacity 1 → 0.25 → 1 → 0.25 → 1 so the user
+    // can clearly see which message was scrolled to.
     highlightAnim.setValue(1);
-    Animated.timing(highlightAnim, {
-      toValue: 0,
-      duration: 1500,
-      useNativeDriver: true,
-    }).start(() => setHighlightedMessageId(null));
+    Animated.sequence([
+      Animated.timing(highlightAnim, { toValue: 0.25, duration: 300, useNativeDriver: true }),
+      Animated.timing(highlightAnim, { toValue: 1,    duration: 300, useNativeDriver: true }),
+      Animated.timing(highlightAnim, { toValue: 0.25, duration: 300, useNativeDriver: true }),
+      Animated.timing(highlightAnim, { toValue: 1,    duration: 300, useNativeDriver: true }),
+      Animated.timing(highlightAnim, { toValue: 0,    duration: 800, useNativeDriver: true }),
+    ]).start(() => setHighlightedMessageId(null));
   };
 
   // ── Scroll to message handler ───────────────────────────────────
@@ -1658,10 +1917,20 @@ export default function ChatScreen() {
   };
 
   // ── Message selection and actions ───────────────────────────────
-  // Long-press enters selection mode and selects that message
-  const handleLongPressMessage = (messageId: string) => {
-    setSelectedIds((prev) => (prev.includes(messageId) ? prev : [...prev, messageId]));
-    setShowEmoji(false); // Close emoji panel if open
+  // Long-press: show emoji reaction picker first. A second long-press (or
+  // tapping the "⋯" more button) enters the selection/action toolbar mode.
+  const handleLongPressMessage = (messageId: string, isOutgoing: boolean) => {
+    setShowEmoji(false);
+    setShowFullEmojiGrid(false);
+    // If reaction picker is already open for this message, close it and enter
+    // selection mode (same as before) so the user can reply/copy/delete.
+    if (reactionPickerMsgId === messageId) {
+      setReactionPickerMsgId(null);
+      setSelectedIds((prev) => (prev.includes(messageId) ? prev : [...prev, messageId]));
+      return;
+    }
+    setReactionPickerMsgId(messageId);
+    setReactionPickerIsOut(isOutgoing);
   };
 
   // While in selection mode, tapping a message toggles it in/out of the selection
@@ -1716,6 +1985,83 @@ export default function ChatScreen() {
       ]
     );
   };
+
+  // ── Emoji reaction handler ──────────────────────────────────────
+  // Calls the REST API which persists to DB, broadcasts message:reacted
+  // via Socket.IO to ALL connected clients, and enqueues a push to the
+  // message author. An optimistic local update is applied immediately so
+  // the UI responds without waiting for the round-trip.
+  const handleReactToMessage = useCallback((messageId: string, emoji: string) => {
+    if (!userId) return;
+    setReactionPickerMsgId(null);
+    setShowFullEmojiGrid(false);
+
+    // ── Optimistic update ─────────────────────────────────────────
+    // Mirrors exactly the toggle logic on the server: same emoji removes,
+    // different emoji replaces any previous reaction from this user.
+    setLocalReactions((prev) => {
+      const msgReactions = { ...(prev[messageId] ?? {}) };
+
+      // Remove this user from every emoji slot first (replace semantics).
+      const cleared: Record<string, string[]> = {};
+      for (const [e, users] of Object.entries(msgReactions)) {
+        const filtered = (users as string[]).filter(id => id !== userId);
+        if (filtered.length > 0) cleared[e] = filtered;
+      }
+
+      // Toggle: if user already had this exact emoji, the cleared state is
+      // already correct (it was removed above). Otherwise add it.
+      const hadThisEmoji = (msgReactions[emoji] ?? []).includes(userId);
+      if (!hadThisEmoji) {
+        cleared[emoji] = [...(cleared[emoji] ?? []), userId];
+      }
+
+      return { ...prev, [messageId]: cleared };
+    });
+
+    // ── Persist to server ──────────────────────────────────────────
+    endpoints.reactToMessage(chatId, messageId, emoji)
+      .then((res) => {
+        if (res.ok) {
+          // Server is authoritative: replace the local optimistic state with
+          // the real reactions returned by the server.
+          setLocalReactions((prev) => ({
+            ...prev,
+            [messageId]: res.data.reactions,
+          }));
+        } else {
+          // Roll back optimistic update on failure.
+          setLocalReactions((prev) => {
+            const next = { ...prev };
+            delete next[messageId];
+            return next;
+          });
+        }
+      })
+      .catch(() => {
+        // Network error — roll back.
+        setLocalReactions((prev) => {
+          const next = { ...prev };
+          delete next[messageId];
+          return next;
+        });
+      });
+  }, [userId, chatId]);
+
+  // ── Reaction display helper ──────────────────────────────────────
+  // Merges server-side reactions (from FireMessage.reactions) with local
+  // optimistic reactions so the UI is always up to date.
+  const getReactions = useCallback((item: FireMessage): Record<string, string[]> => {
+    const server = item.reactions ?? {};
+    const local  = localReactions[item.messageId] ?? {};
+    // Merge: local takes precedence per-user per-emoji
+    const merged: Record<string, string[]> = { ...server };
+    for (const [emoji, users] of Object.entries(local)) {
+      merged[emoji] = users;
+      if (merged[emoji].length === 0) delete merged[emoji];
+    }
+    return merged;
+  }, [localReactions]);
 
   const handleReplyMessage = () => {
     if (!selectedMessageId) return;
@@ -2745,6 +3091,10 @@ export default function ChatScreen() {
     displayName,
   ]);
 
+  // ── Swipe-to-reply wrapper component ────────────────────────────
+  // Extracted as a stable component so each message gets its own
+  // Animated.Value and PanResponder that don't re-create on parent renders.
+
   // ── Render a single message bubble ──────────────────────────────
   const renderMessage = ({ item }: { item: FireMessage }) => {
     // ── System messages (block/unblock notifications) ───────────────
@@ -2775,117 +3125,116 @@ export default function ChatScreen() {
     const tickStatus = getTickStatus(item, userId, isGroup);
     const tickIcon = getTickIcon(tickStatus);
 
-    // ── Catalog product card — standalone render, no msgRow wrapper ──
-    // Rendered here (before messageContent) so it bypasses the chat bubble
-    // layout entirely and avoids the duplicate-timestamp problem.
+    // ── Helper: render any standalone bubble with swipe, reactions, long-press ──
+    const wrapStandalone = (bubbleContent: React.ReactNode) => {
+      const reactions = getReactions(item);
+      const reactionEntries = Object.entries(reactions).filter(([, users]) => users.length > 0);
+      return (
+        <SwipeToReplyWrapper
+          isOut={isOut}
+          disabled={!!item.uploadStatus}
+          onReply={() => setReplyingTo(item)}
+          onInfo={() => { setMessageForInfo(item); setMessageInfoVisible(true); }}
+        >
+          <TouchableOpacity
+            activeOpacity={1}
+            onPress={onBubblePress}
+            onLongPress={item.uploadStatus ? undefined : () => handleLongPressMessage(item.messageId, isOut)}
+            delayLongPress={300}
+          >
+            <View style={[isSelected && styles.selectedMessage]}>
+              {bubbleContent}
+              {reactionEntries.length > 0 && (
+                <View style={[styles.reactionRow, isOut ? styles.reactionRowOut : styles.reactionRowIn]}>
+                  {reactionEntries.map(([emoji, users]) => (
+                    <TouchableOpacity
+                      key={emoji}
+                      style={[styles.reactionPill, userId && users.includes(userId) && styles.reactionPillSelf]}
+                      onPress={() => setReactionViewerState({
+                        msgId: item.messageId,
+                        allReactions: reactions,
+                        activeEmoji: emoji,
+                      })}
+                      activeOpacity={0.7}
+                    >
+                      <AppText fixedColor style={styles.reactionEmoji}>{emoji}</AppText>
+                      {users.length > 0 && (
+                        <AppText fixedColor style={styles.reactionCount}>{users.length}</AppText>
+                      )}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+            </View>
+          </TouchableOpacity>
+        </SwipeToReplyWrapper>
+      );
+    };
+
+    // ── Catalog product card ─────────────────────────────────────────────────
     if (item.type === 'catalog' && item.catalogItem) {
-      return (
-        <TouchableOpacity
-          activeOpacity={1}
-          onPress={onBubblePress}
-          onLongPress={() => handleLongPressMessage(item.messageId)}
-          delayLongPress={300}
-        >
-          <View style={[isSelected && styles.selectedMessage]}>
-            <CatalogBubble
-              item={item.catalogItem}
-              isOutgoing={isOut}
-              sellerUid={item.senderId}
-              timestamp={formatTime(item.timestamp)}
-              tickIcon={tickIcon}
-            />
-          </View>
-        </TouchableOpacity>
+      return wrapStandalone(
+        <CatalogBubble
+          item={item.catalogItem}
+          isOutgoing={isOut}
+          sellerUid={item.senderId}
+          timestamp={formatTime(item.timestamp)}
+          tickIcon={tickIcon}
+        />
       );
     }
 
-    // ── Order card — standalone render (bypasses msgRow bubble) ──
+    // ── Order card ───────────────────────────────────────────────────────────
     if (item.type === 'order' && item.order) {
-      return (
-        <TouchableOpacity
-          activeOpacity={1}
-          onPress={onBubblePress}
-          onLongPress={() => handleLongPressMessage(item.messageId)}
-          delayLongPress={300}
-        >
-          <View style={[isSelected && styles.selectedMessage]}>
-            <OrderBubble
-              order={item.order}
-              isOutgoing={isOut}
-              timestamp={formatTime(item.timestamp)}
-              tickIcon={tickIcon}
-            />
-          </View>
-        </TouchableOpacity>
+      return wrapStandalone(
+        <OrderBubble
+          order={item.order}
+          isOutgoing={isOut}
+          timestamp={formatTime(item.timestamp)}
+          tickIcon={tickIcon}
+        />
       );
     }
 
-    // ── Shared contact card — standalone render ──
+    // ── Shared contact card ──────────────────────────────────────────────────
     if (item.type === 'contact' && item.contact) {
-      return (
-        <TouchableOpacity
-          activeOpacity={1}
-          onPress={onBubblePress}
-          onLongPress={() => handleLongPressMessage(item.messageId)}
-          delayLongPress={300}
-        >
-          <View style={[isSelected && styles.selectedMessage]}>
-            <ContactBubble
-              contact={item.contact}
-              isOutgoing={isOut}
-              timestamp={formatTime(item.timestamp)}
-              tickIcon={tickIcon}
-              onSaveContact={handleSaveSharedContact}
-            />
-          </View>
-        </TouchableOpacity>
+      return wrapStandalone(
+        <ContactBubble
+          contact={item.contact}
+          isOutgoing={isOut}
+          timestamp={formatTime(item.timestamp)}
+          tickIcon={tickIcon}
+          onSaveContact={handleSaveSharedContact}
+        />
       );
     }
 
-    // ── Poll card — standalone render ──
+    // ── Poll card ────────────────────────────────────────────────────────────
     if (item.type === 'poll' && item.poll) {
-      return (
-        <TouchableOpacity
-          activeOpacity={1}
-          onPress={onBubblePress}
-          onLongPress={() => handleLongPressMessage(item.messageId)}
-          delayLongPress={300}
-        >
-          <View style={[isSelected && styles.selectedMessage]}>
-            <PollBubble
-              poll={item.poll}
-              isOutgoing={isOut}
-              currentUserId={userId}
-              onVote={(optionId) => {
-                if (!userId) return;
-                votePollOption(chatId, item.messageId, userId, optionId).catch(() => {});
-              }}
-              timestamp={formatTime(item.timestamp)}
-              tickIcon={tickIcon}
-            />
-          </View>
-        </TouchableOpacity>
+      return wrapStandalone(
+        <PollBubble
+          poll={item.poll}
+          isOutgoing={isOut}
+          currentUserId={userId}
+          onVote={(optionId) => {
+            if (!userId) return;
+            votePollOption(chatId, item.messageId, userId, optionId).catch(() => {});
+          }}
+          timestamp={formatTime(item.timestamp)}
+          tickIcon={tickIcon}
+        />
       );
     }
 
-    // ── Meeting invite card — standalone render ──
+    // ── Meeting invite card ──────────────────────────────────────────────────
     if (item.type === 'meeting' && item.meeting) {
-      return (
-        <TouchableOpacity
-          activeOpacity={1}
-          onPress={onBubblePress}
-          onLongPress={() => handleLongPressMessage(item.messageId)}
-          delayLongPress={300}
-        >
-          <View style={[isSelected && styles.selectedMessage]}>
-            <MeetingBubble
-              meeting={item.meeting}
-              isOutgoing={isOut}
-              timestamp={formatTime(item.timestamp)}
-              tickIcon={tickIcon}
-            />
-          </View>
-        </TouchableOpacity>
+      return wrapStandalone(
+        <MeetingBubble
+          meeting={item.meeting}
+          isOutgoing={isOut}
+          timestamp={formatTime(item.timestamp)}
+          tickIcon={tickIcon}
+        />
       );
     }
 
@@ -3004,10 +3353,7 @@ export default function ChatScreen() {
                   onPress={() => {
                     const originalMsg = messages.find(m => m.messageId === item.replyTo!.messageId);
                     if (originalMsg) {
-                      const index = messages.findIndex(m => m.messageId === item.replyTo!.messageId);
-                      if (index !== -1 && listRef.current) {
-                        listRef.current.scrollToIndex({ index, animated: true, viewPosition: 0.5 });
-                      }
+                      scrollToAndHighlight(item.replyTo!.messageId);
                     }
                   }}
                   activeOpacity={0.7}
@@ -3017,7 +3363,7 @@ export default function ChatScreen() {
                     <AppText fixedColor style={styles.replyBubbleSender}>
                       {item.replyTo.senderId === userId ? 'You' : resolveSenderName(item.replyTo.senderId)}
                     </AppText>
-                    <AppText fixedColor style={styles.replyBubbleText} numberOfLines={1}>
+                    <AppText fixedColor style={styles.replyBubbleText} numberOfLines={2}>
                       {item.replyTo.type === 'text' && item.replyTo.text
                         ? item.replyTo.text
                         : item.replyTo.type === 'voice'
@@ -3191,10 +3537,7 @@ export default function ChatScreen() {
                   onPress={() => {
                     const originalMsg = messages.find(m => m.messageId === item.replyTo!.messageId);
                     if (originalMsg) {
-                      const index = messages.findIndex(m => m.messageId === item.replyTo!.messageId);
-                      if (index !== -1 && listRef.current) {
-                        listRef.current.scrollToIndex({ index, animated: true, viewPosition: 0.5 });
-                      }
+                      scrollToAndHighlight(item.replyTo!.messageId);
                     }
                   }}
                   activeOpacity={0.7}
@@ -3204,7 +3547,7 @@ export default function ChatScreen() {
                     <AppText style={[styles.replyBubbleSender, { color: COLORS.blue }]}>
                       {item.replyTo.senderId === userId ? 'You' : resolveSenderName(item.replyTo.senderId)}
                     </AppText>
-                    <AppText style={[styles.replyBubbleText, { color: textColor, opacity: 0.7 }]} numberOfLines={1}>
+                    <AppText style={[styles.replyBubbleText, { color: textColor, opacity: 0.7 }]} numberOfLines={2}>
                       {item.replyTo.type === 'text' && item.replyTo.text
                         ? item.replyTo.text
                         : item.replyTo.type === 'voice'
@@ -3255,39 +3598,76 @@ export default function ChatScreen() {
     );
 
     return (
-      <TouchableOpacity
-        activeOpacity={1}
-        onPress={onBubblePress}
-        onLongPress={item.uploadStatus ? undefined : () => handleLongPressMessage(item.messageId)}
-        delayLongPress={300}
+      <SwipeToReplyWrapper
+        isOut={isOut}
+        disabled={!!item.uploadStatus}
+        onReply={() => setReplyingTo(item)}
+        onInfo={() => { setMessageForInfo(item); setMessageInfoVisible(true); }}
       >
-        <View style={[isSelected && styles.selectedMessage]}>
-          {messageContent}
-          {/* Search match highlight — active match is orange-tinted, others blue-tinted */}
-          {isSearchMatch && (
-            <View
-              pointerEvents="none"
-              style={[
-                StyleSheet.absoluteFill,
-                styles.searchHighlightOverlay,
-                isActiveMatch && styles.searchHighlightOverlayActive,
-              ]}
-            />
-          )}
-          {/* Flash highlight after navigating from search */}
-          {item.messageId === highlightedMessageId && (
-            <Animated.View
-              pointerEvents="none"
-              style={[
-                StyleSheet.absoluteFill,
-                styles.searchHighlightOverlay,
-                styles.searchHighlightOverlayActive,
-                { opacity: highlightAnim },
-              ]}
-            />
-          )}
-        </View>
-      </TouchableOpacity>
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={onBubblePress}
+          onLongPress={item.uploadStatus ? undefined : () => handleLongPressMessage(item.messageId, isOut)}
+          delayLongPress={300}
+        >
+          <View style={[isSelected && styles.selectedMessage]}>
+            {messageContent}
+            {/* ── Reaction pills ── */}
+            {(() => {
+              const reactions = getReactions(item);
+              const entries = Object.entries(reactions).filter(([, users]) => users.length > 0);
+              if (entries.length === 0) return null;
+              return (
+                <View style={[styles.reactionRow, isOut ? styles.reactionRowOut : styles.reactionRowIn]}>
+                  {entries.map(([emoji, users]) => (
+                    <TouchableOpacity
+                      key={emoji}
+                      style={[
+                        styles.reactionPill,
+                        userId && users.includes(userId) && styles.reactionPillSelf,
+                      ]}
+                      onPress={() => setReactionViewerState({
+                        msgId: item.messageId,
+                        allReactions: getReactions(item),
+                        activeEmoji: emoji,
+                      })}
+                      activeOpacity={0.7}
+                    >
+                      <AppText fixedColor style={styles.reactionEmoji}>{emoji}</AppText>
+                      {users.length > 0 && (
+                        <AppText fixedColor style={styles.reactionCount}>{users.length}</AppText>
+                      )}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              );
+            })()}
+            {/* Search match highlight — active match is orange-tinted, others blue-tinted */}
+            {isSearchMatch && (
+              <View
+                pointerEvents="none"
+                style={[
+                  StyleSheet.absoluteFill,
+                  styles.searchHighlightOverlay,
+                  isActiveMatch && styles.searchHighlightOverlayActive,
+                ]}
+              />
+            )}
+            {/* Breathe highlight after tapping a reply quote or search result */}
+            {item.messageId === highlightedMessageId && (
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  StyleSheet.absoluteFill,
+                  styles.searchHighlightOverlay,
+                  styles.searchHighlightOverlayActive,
+                  { opacity: highlightAnim },
+                ]}
+              />
+            )}
+          </View>
+        </TouchableOpacity>
+      </SwipeToReplyWrapper>
     );
   };
 
@@ -3321,14 +3701,7 @@ export default function ChatScreen() {
           <AppBg />
 
           {/* ── Offline banner ── */}
-          {!deviceOnline && (
-            <View style={styles.offlineBanner}>
-              <AppIcon name="cloud-offline-outline" size={15} color="#fff" fixedColor />
-              <AppText fixedColor style={styles.offlineBannerText}>
-                No connection — messages will send when back online
-              </AppText>
-            </View>
-          )}
+          {!deviceOnline && <OfflineBanner />}
 
           {/* ── Top bar ── */}
           {searchOpen ? (
@@ -3408,7 +3781,15 @@ export default function ChatScreen() {
             {/* Tapping the avatar/name opens Profile Modal */}
             <TouchableOpacity
               style={styles.topBarContact}
-              onPress={() => setProfileModalOpen(true)}
+              onPress={() => navigation.navigate('ContactProfile', {
+                userId: otherUserId ?? '',
+                displayName,
+                photoUrl: headerPhoto ?? null,
+                phoneNumber: otherUserPhone || undefined,
+                chatId,
+                isGroup,
+                fromChat: true,
+              } as any)}
               activeOpacity={0.75}
             >
               <Avatar
@@ -3592,6 +3973,7 @@ export default function ChatScreen() {
               contentContainerStyle={styles.messageList}
               showsVerticalScrollIndicator={false}
               onScroll={handleScroll}
+              onScrollBeginDrag={() => { setReactionPickerMsgId(null); setShowFullEmojiGrid(false); }}
               scrollEventThrottle={100}
               maxToRenderPerBatch={10}
               updateCellsBatchingPeriod={50}
@@ -3699,6 +4081,88 @@ export default function ChatScreen() {
               <TouchableOpacity onPress={() => { setUploadError(null); pendingRecordingRef.current = null; }} style={styles.permissionDismissBtn}>
                 <AppIcon name="close" size={18} color={COLORS.sub} />
               </TouchableOpacity>
+            </View>
+          )}
+
+          {/* ── Emoji Reaction Picker ── */}
+          {/* WhatsApp-style floating emoji row — appears when a message is long-pressed.
+              Shows 6 quick-react emojis + a + button that expands the full emoji grid.
+              The ⋯ button opens the message action toolbar (reply/copy/delete/etc.). */}
+          {reactionPickerMsgId && (
+            <View style={[styles.reactionPickerContainer, { backgroundColor: FG.glassBg }]}>
+              {/* Quick-react bar */}
+              {!showFullEmojiGrid && (
+                <View style={[styles.reactionPickerBar, { borderColor: FG.glassBorder }]}>
+                  {['❤️', '😂', '😮', '😢', '🙏', '👍'].map((emoji) => (
+                    <TouchableOpacity
+                      key={emoji}
+                      style={styles.reactionPickerItem}
+                      onPress={() => { handleReactToMessage(reactionPickerMsgId, emoji); setShowFullEmojiGrid(false); }}
+                      activeOpacity={0.7}
+                    >
+                      <AppText fixedColor style={styles.reactionPickerEmoji}>{emoji}</AppText>
+                    </TouchableOpacity>
+                  ))}
+                  {/* + opens full emoji grid */}
+                  <TouchableOpacity
+                    style={[styles.reactionPickerMore, { backgroundColor: 'rgba(9,178,238,0.15)' }]}
+                    onPress={() => setShowFullEmojiGrid(true)}
+                    activeOpacity={0.7}
+                  >
+                    <AppIcon name="add" size={22} color={COLORS.blue} fixedColor />
+                  </TouchableOpacity>
+                  {/* ⋯ → full action toolbar */}
+                  <TouchableOpacity
+                    style={styles.reactionPickerMore}
+                    onPress={() => {
+                      const msgId = reactionPickerMsgId;
+                      setReactionPickerMsgId(null);
+                      setShowFullEmojiGrid(false);
+                      setSelectedIds([msgId]);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <AppIcon name="ellipsis-horizontal" size={20} color={FG.secondary} />
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* Full emoji grid (shown when + is tapped) */}
+              {showFullEmojiGrid && (
+                <View style={styles.fullEmojiGrid}>
+                  <View style={styles.fullEmojiGridHeader}>
+                    <AppText style={[styles.fullEmojiGridTitle, { color: textColor }]}>Choose a reaction</AppText>
+                    <TouchableOpacity onPress={() => setShowFullEmojiGrid(false)}>
+                      <AppIcon name="chevron-down" size={20} color={FG.secondary} />
+                    </TouchableOpacity>
+                  </View>
+                  <ScrollView style={{ maxHeight: 200 }} showsVerticalScrollIndicator={false}>
+                    <View style={styles.fullEmojiGridRows}>
+                      {[
+                        // Row 1 — core reactions (matches WhatsApp's extended set)
+                        '❤️','😂','😮','😢','🙏','👍','👎','😍','🥰','😎',
+                        '🔥','🎉','💯','✅','🤣','😅','🤔','👀','💪','🥳',
+                        '😭','🫡','💀','🤯','🫶','😴','🤩','😏','🙈','😡',
+                        // Row 4 — extras
+                        '🎊','🤝','💔','😈','🤗','😤','🥹','😻','💥','⭐',
+                        '🌟','👏','🫠','🤌','🙌','💃','🕺','🫂','❄️','🌈',
+                      ].map((emoji) => (
+                        <TouchableOpacity
+                          key={emoji}
+                          style={styles.fullEmojiItem}
+                          onPress={() => {
+                            handleReactToMessage(reactionPickerMsgId, emoji);
+                            setShowFullEmojiGrid(false);
+                          }}
+                          activeOpacity={0.7}
+                        >
+                          <AppText fixedColor style={styles.fullEmojiChar}>{emoji}</AppText>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </ScrollView>
+                </View>
+              )}
             </View>
           )}
 
@@ -5009,6 +5473,170 @@ export default function ChatScreen() {
           currentUserId={userId}
         />
       )}
+
+      {/* ── Reaction Viewer ("Who Reacted") ─────────────────────────────────── */}
+      {reactionViewerState && (() => {
+        const allEntries = Object.entries(reactionViewerState.allReactions)
+          .filter(([, users]) => users.length > 0);
+        const totalCount = allEntries.reduce((sum, [, users]) => sum + users.length, 0);
+        const activeUsers = reactionViewerState.allReactions[reactionViewerState.activeEmoji] ?? [];
+        const myEmoji = Object.entries(reactionViewerState.allReactions)
+          .find(([, users]) => userId && users.includes(userId))?.[0] ?? null;
+
+        return (
+          <Modal
+            visible
+            transparent
+            animationType="slide"
+            onRequestClose={() => setReactionViewerState(null)}
+          >
+            <View style={styles.reactionViewerOverlay}>
+              <TouchableOpacity
+                style={StyleSheet.absoluteFill as any}
+                activeOpacity={1}
+                onPress={() => setReactionViewerState(null)}
+              />
+              <View style={[styles.reactionViewerSheet, { backgroundColor: FG.glassBg }]}>
+                <AppBg />
+                <View style={styles.reactionViewerHandle} />
+
+                {/* ── Emoji tab bar ── */}
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.reactionTabBar}
+                  contentContainerStyle={{ alignItems: 'center', gap: 4 }}
+                >
+                  {/* "All" tab */}
+                  <TouchableOpacity
+                    style={[
+                      styles.reactionTab,
+                      reactionViewerState.activeEmoji === '__all__' && styles.reactionTabActive,
+                    ]}
+                    onPress={() => setReactionViewerState(s => s ? { ...s, activeEmoji: '__all__' } : null)}
+                  >
+                    <AppText style={[
+                      styles.reactionTabLabel,
+                      { color: reactionViewerState.activeEmoji === '__all__' ? COLORS.blue : FG.secondary },
+                    ]}>
+                      All {totalCount}
+                    </AppText>
+                  </TouchableOpacity>
+
+                  {/* Per-emoji tabs */}
+                  {allEntries.map(([emoji, users]) => (
+                    <TouchableOpacity
+                      key={emoji}
+                      style={[
+                        styles.reactionTab,
+                        reactionViewerState.activeEmoji === emoji && styles.reactionTabActive,
+                      ]}
+                      onPress={() => setReactionViewerState(s => s ? { ...s, activeEmoji: emoji } : null)}
+                    >
+                      <AppText fixedColor style={styles.reactionTabEmoji}>{emoji}</AppText>
+                      <AppText style={[
+                        styles.reactionTabCount,
+                        { color: reactionViewerState.activeEmoji === emoji ? COLORS.blue : FG.secondary },
+                      ]}>
+                        {users.length}
+                      </AppText>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+
+                <View style={[styles.reactionTabDivider, { backgroundColor: FG.glassBorder }]} />
+
+                {/* ── Reactor list ── */}
+                <ScrollView style={{ maxHeight: 340 }} showsVerticalScrollIndicator={false}>
+                  {(reactionViewerState.activeEmoji === '__all__'
+                    ? allEntries.flatMap(([emoji, users]) => users.map(uid => ({ uid, emoji })))
+                    : activeUsers.map(uid => ({ uid, emoji: reactionViewerState.activeEmoji }))
+                  ).map(({ uid, emoji }) => {
+                    const name = uid === userId ? 'You' : resolveSenderName(uid);
+                    const isMe = uid === userId;
+                    const initials = name.trim().split(/\s+/).map((w: string) => w[0]).slice(0, 2).join('').toUpperCase();
+
+                    return (
+                      <View
+                        key={`${uid}-${emoji}`}
+                        style={[
+                          styles.reactionViewerRow,
+                          { borderBottomColor: FG.glassBorder },
+                          isMe && styles.reactionViewerRowMe,
+                        ]}
+                      >
+                        {/* Avatar with emoji badge */}
+                        <View style={styles.reactionViewerAvatarWrap}>
+                          <View style={[
+                            styles.reactionViewerAvatar,
+                            isMe && { backgroundColor: 'rgba(9,178,238,0.35)' },
+                          ]}>
+                            <AppText fixedColor style={styles.reactionViewerInitials}>{initials}</AppText>
+                          </View>
+                          {/* Emoji badge bottom-right of avatar */}
+                          <View style={styles.reactionViewerBadge}>
+                            <AppText fixedColor style={{ fontSize: 13 }}>{emoji}</AppText>
+                          </View>
+                        </View>
+
+                        {/* Name + subtitle */}
+                        <View style={{ flex: 1 }}>
+                          <AppText style={[styles.reactionViewerName, { color: textColor }]}>
+                            {name}
+                          </AppText>
+                          {isMe && (
+                            <AppText style={[styles.reactionViewerSub, { color: FG.secondary }]}>
+                              Tap to remove your reaction
+                            </AppText>
+                          )}
+                        </View>
+
+                        {/* Big emoji on right */}
+                        <AppText fixedColor style={styles.reactionViewerEmojiBig}>{emoji}</AppText>
+
+                        {/* Remove button for own reaction */}
+                        {isMe && (
+                          <TouchableOpacity
+                            style={styles.reactionViewerRemoveBtn}
+                            onPress={() => {
+                              handleReactToMessage(reactionViewerState.msgId, emoji);
+                              setReactionViewerState(null);
+                            }}
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          >
+                            <AppIcon name="close-circle" size={20} color={COLORS.missed} fixedColor />
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    );
+                  })}
+                </ScrollView>
+
+                {/* ── Footer: change your reaction ── */}
+                {myEmoji && (
+                  <View style={[styles.reactionViewerFooter, { borderTopColor: FG.glassBorder }]}>
+                    <AppText style={[{ color: FG.secondary, fontSize: 13 }]}>
+                      Your reaction: {myEmoji}
+                    </AppText>
+                    <TouchableOpacity
+                      style={styles.reactionViewerChangeBtn}
+                      onPress={() => {
+                        setReactionViewerState(null);
+                        // Re-open the picker on same message
+                        setReactionPickerMsgId(reactionViewerState.msgId);
+                      }}
+                    >
+                      <AppText style={{ color: COLORS.blue, fontSize: 13, fontWeight: '700' }}>
+                        Change
+                      </AppText>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+            </View>
+          </Modal>
+        );
+      })()}
 
       {/* ── Message Info Modal ── */}
       {userId && messageForInfo && (
@@ -6419,21 +7047,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 18,
   },
-  offlineBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: '#6b7280',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-  },
-  offlineBannerText: {
-    fontSize: 12,
-    color: '#fff',
-    fontWeight: '500',
-  },
-
   bubble: {
     maxWidth: '75%',
     borderRadius: 18,
@@ -7436,6 +8049,197 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontStyle: 'italic',
   },
+
+  // ── Emoji Reactions ───────────────────────────────────────────────────────
+  reactionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+    marginTop: 4,
+    paddingHorizontal: 4,
+  },
+  reactionRowIn:  { justifyContent: 'flex-start' },
+  reactionRowOut: { justifyContent: 'flex-end' },
+  reactionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+    backgroundColor: 'rgba(120,120,140,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(120,120,140,0.20)',
+  },
+  reactionPillSelf: {
+    backgroundColor: 'rgba(9,178,238,0.18)',
+    borderColor: 'rgba(9,178,238,0.40)',
+  },
+  reactionEmoji: { fontSize: 15 },
+  reactionCount: { fontSize: 12, fontWeight: '600', color: '#fff' },
+
+  // ── Emoji Reaction Picker ──────────────────────────────────────────────────
+  reactionPickerContainer: {
+    borderRadius: 20,
+    marginHorizontal: 12,
+    marginBottom: 4,
+    overflow: 'hidden',
+    ...SHADOW.card,
+  },
+  reactionPickerBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+    borderWidth: 1,
+  },
+  reactionPickerItem: {
+    padding: 6,
+    borderRadius: 24,
+  },
+  reactionPickerEmoji: { fontSize: 26 },
+  reactionPickerMore: {
+    padding: 6,
+    borderRadius: 24,
+    backgroundColor: 'rgba(120,120,140,0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 40,
+    height: 40,
+  },
+
+  // ── Full Emoji Grid ────────────────────────────────────────────────────────
+  fullEmojiGrid: {
+    paddingHorizontal: 8,
+    paddingBottom: 12,
+  },
+  fullEmojiGridHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+  },
+  fullEmojiGridTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  fullEmojiGridRows: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 2,
+  },
+  fullEmojiItem: {
+    width: '10%',
+    aspectRatio: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+  },
+  fullEmojiChar: { fontSize: 24 },
+
+  // ── Reaction Viewer ("Who Reacted") ────────────────────────────────────────
+  reactionViewerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  reactionViewerSheet: {
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingBottom: 24,
+    ...SHADOW.glow,
+  },
+  reactionViewerHandle: {
+    width: 40, height: 4, borderRadius: 2,
+    backgroundColor: 'rgba(9,178,238,0.35)',
+    alignSelf: 'center',
+    marginTop: 12, marginBottom: 4,
+  },
+  // ── Tab bar ──
+  reactionTabBar: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexGrow: 0,
+  },
+  reactionTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 20,
+    backgroundColor: 'rgba(120,120,140,0.10)',
+    marginRight: 6,
+  },
+  reactionTabActive: {
+    backgroundColor: 'rgba(9,178,238,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(9,178,238,0.4)',
+  },
+  reactionTabEmoji: { fontSize: 18 },
+  reactionTabLabel: { fontSize: 13, fontWeight: '700' },
+  reactionTabCount: { fontSize: 13, fontWeight: '600' },
+  reactionTabDivider: { height: StyleSheet.hairlineWidth, marginHorizontal: 16, marginBottom: 4 },
+  // ── Reactor rows ──
+  reactionViewerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  reactionViewerRowMe: {
+    backgroundColor: 'rgba(9,178,238,0.06)',
+  },
+  reactionViewerAvatarWrap: {
+    position: 'relative',
+    width: 44,
+    height: 44,
+  },
+  reactionViewerAvatar: {
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: 'rgba(9,178,238,0.25)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  reactionViewerBadge: {
+    position: 'absolute',
+    bottom: -2,
+    right: -4,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 10,
+    paddingHorizontal: 2,
+  },
+  reactionViewerInitials: { fontSize: 16, fontWeight: '700', color: '#fff' },
+  reactionViewerName: { fontSize: 15, fontWeight: '600' },
+  reactionViewerSub: { fontSize: 12, marginTop: 1 },
+  reactionViewerEmojiBig: { fontSize: 22 },
+  reactionViewerRemoveBtn: {
+    padding: 4,
+  },
+  // ── Footer ──
+  reactionViewerFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    marginTop: 4,
+  },
+  reactionViewerChangeBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 14,
+    backgroundColor: 'rgba(9,178,238,0.12)',
+  },
+  // Legacy — kept so any stale reference doesn't crash
+  reactionViewerHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 20, paddingVertical: 12 },
+  reactionViewerEmoji: { fontSize: 28 },
+  reactionViewerTitle: { flex: 1, fontSize: 15, fontWeight: '700' },
+  reactionViewerEmojiSmall: { fontSize: 20 },
 
   // ── Reply Preview ──────────────────────────────────────────────────────────
   replyPreview: {

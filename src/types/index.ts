@@ -245,6 +245,17 @@ export type RootStackParamList = {
   Settings: undefined;
   Appearance: undefined;
   Profile: undefined;
+  /** Full-page profile view for another user (contact or chat participant). */
+  ContactProfile: {
+    userId: string;
+    displayName: string;
+    photoUrl?: string | null;
+    phoneNumber?: string | null;
+    chatId?: string;
+    isGroup?: boolean;
+    /** Pass true when the screen was opened from inside a chat (so it can pop back to the chat) */
+    fromChat?: boolean;
+  };
   Dashboard:undefined;
   CreateAccount: undefined;
   /**
@@ -274,6 +285,7 @@ export type RootStackParamList = {
   LinkedDevices: undefined;
   BlockedContacts: undefined;
   Broadcast: undefined;
+  MeetingRoom: { meetingId: string };
   AudioCall: { 
     callId: string;
     isOutgoing: boolean;

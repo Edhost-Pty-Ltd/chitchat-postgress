@@ -20,7 +20,7 @@
 //   removes the device, every API call from it returns 401 AUTH_TOKEN_REVOKED
 //   and the companion link guard signs it out.
 //
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, Image,
   StyleSheet, ScrollView, KeyboardAvoidingView,
@@ -139,11 +139,556 @@ function CountryPicker({ visible, selected, onSelect, onClose }: CountryPickerPr
   );
 }
 
+// ─── Web Sign-In (companion link only) ───────────────────────────────────────
+// On web, phone OTP is not shown. The only sign-in method is companion linking
+// via QR code or the 10-char display code — both already handled by the
+// existing companion flow. This renders a full-page, beautifully designed
+// companion-link screen without the phone/OTP card.
+
+function WebSignInScreen() {
+  const { signInAsCompanion } = useAuthContext();
+  const { bevel } = useGlass();
+  const insets = useSafeAreaInsets();
+
+  // Companion state — mirrors the native companion flow
+  const [companionRequest,  setCompanionRequest]  = useState<LinkRequest | null>(null);
+  const [companionLinking,  setCompanionLinking]  = useState(false);
+  const [companionError,    setCompanionError]    = useState<string | null>(null);
+  const [companionApproved, setCompanionApproved] = useState(false);
+  const companionPollCleanup = useRef<(() => void) | null>(null);
+  const [generating,        setGenerating]        = useState(false);
+
+  // Auto-generate a link request when the screen mounts
+  useEffect(() => {
+    startLinkRequest();
+    return () => { companionPollCleanup.current?.(); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const startLinkRequest = async () => {
+    companionPollCleanup.current?.();
+    setCompanionError(null);
+    setCompanionApproved(false);
+    setCompanionLinking(false);
+    setCompanionRequest(null);
+    setGenerating(true);
+
+    const req = await createLinkRequest();
+    setGenerating(false);
+
+    if (!req) {
+      setCompanionError('Could not create a link request. Check your connection and try again.');
+      return;
+    }
+    setCompanionRequest(req);
+
+    companionPollCleanup.current = pollForApproval(
+      req.requestId,
+      async ({ ownerUid, customToken }) => {
+        setCompanionLinking(true);
+        try {
+          await signInAsCompanion(ownerUid, customToken);
+          setCompanionApproved(true);
+        } catch {
+          setCompanionError('Device linked, but sign-in failed. Please refresh and try again.');
+          setCompanionLinking(false);
+        }
+      },
+      () => {
+        setCompanionError('QR code expired. Tap "Refresh" to generate a new one.');
+      },
+    );
+  };
+
+  const WEB_QR_SIZE = 220;
+  const WEB_LOGO_SIZE = Math.round(WEB_QR_SIZE * 0.20);
+
+  // ── Approved ──────────────────────────────────────────────────────────────
+  if (companionApproved) {
+    return (
+      <View style={web.root}>
+        <LinearGradient colors={['#f0f9ff', '#e0f2fe', '#f8fafc']} style={StyleSheet.absoluteFill} />
+        <View style={web.centreCard}>
+          <View style={web.successIcon}>
+            <AppIcon name="checkmark-circle" size={56} color={COLORS.green} fixedColor />
+          </View>
+          <AppText style={web.heading}>Device Linked!</AppText>
+          <AppText style={web.subheading}>Signing you in…</AppText>
+          <ActivityIndicator color={COLORS.blue} style={{ marginTop: 16 }} />
+        </View>
+      </View>
+    );
+  }
+
+  // ── Linking in progress ───────────────────────────────────────────────────
+  if (companionLinking) {
+    return (
+      <View style={web.root}>
+        <LinearGradient colors={['#f0f9ff', '#e0f2fe', '#f8fafc']} style={StyleSheet.absoluteFill} />
+        <View style={web.centreCard}>
+          <ActivityIndicator size="large" color={COLORS.blue} />
+          <AppText style={[web.heading, { marginTop: 20 }]}>Linking device…</AppText>
+          <AppText style={web.subheading}>Just a moment</AppText>
+        </View>
+      </View>
+    );
+  }
+
+  // ── Main layout ───────────────────────────────────────────────────────────
+  return (
+    <View style={web.root}>
+      {/* Subtle light gradient background */}
+      <LinearGradient
+        colors={['#f0f9ff', '#e0f2fe', '#f8fafc']}
+        style={StyleSheet.absoluteFill}
+      />
+
+      {/* Decorative circles */}
+      <View style={[web.orb, web.orbTopRight]} />
+      <View style={[web.orb, web.orbBottomLeft]} />
+
+      <ScrollView
+        contentContainerStyle={[web.scroll, { paddingTop: Math.max(insets.top, 24) + 16 }]}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* ── Logo + brand ── */}
+        <View style={web.brandRow}>
+          <LinearGradient colors={GRADIENTS.primary} style={web.brandIcon}>
+            <AppIcon name="chatbubbles" size={22} color="#fff" fixedColor />
+          </LinearGradient>
+          <View>
+            <AppText style={web.brandName}>ChitChat</AppText>
+            <AppText style={web.brandTag}>Business</AppText>
+          </View>
+        </View>
+
+        {/* ── Hero text ── */}
+        <View style={web.hero}>
+          <AppText style={web.heroTitle}>Use ChitChat{'\n'}on your computer</AppText>
+          <AppText style={web.heroSub}>
+            Link this browser tab to your phone in seconds.
+          </AppText>
+        </View>
+
+        {/* ── Main panel — QR + steps side by side on wide, stacked on narrow ── */}
+        <View style={[web.panel, bevel]}>
+
+          {/* Left: steps */}
+          <View style={web.stepsCol}>
+            <AppText style={web.stepsHeading}>Follow these steps on your phone</AppText>
+            {[
+              { icon: 'settings-outline' as const,     text: 'Open ChitChat and go to\nSettings' },
+              { icon: 'phone-portrait-outline' as const, text: 'Tap Linked Devices\nthen tap the + button' },
+              { icon: 'scan-outline' as const,          text: 'Choose Scan QR Code\nor Enter Code' },
+              { icon: 'checkmark-circle-outline' as const, text: 'Scan the QR code or\ntype the code shown' },
+            ].map((item, i) => (
+              <View key={i} style={web.step}>
+                <View style={web.stepNum}>
+                  <AppText style={web.stepNumText} fixedColor>{i + 1}</AppText>
+                </View>
+                <View style={web.stepIconWrap}>
+                  <AppIcon name={item.icon} size={18} color={COLORS.blue} fixedColor />
+                </View>
+                <AppText style={web.stepText}>{item.text}</AppText>
+              </View>
+            ))}
+
+            <View style={[web.tipBox, { backgroundColor: 'rgba(9,178,238,0.07)', borderColor: 'rgba(9,178,238,0.18)' }]}>
+              <AppIcon name="information-circle-outline" size={15} color={COLORS.blue} fixedColor />
+              <AppText style={web.tipText}>
+                Your messages stay on your phone. This browser tab mirrors them securely.
+              </AppText>
+            </View>
+          </View>
+
+          {/* Vertical divider */}
+          <View style={web.panelDivider} />
+
+          {/* Right: QR */}
+          <View style={web.qrCol}>
+            {generating || !companionRequest ? (
+              <View style={web.qrPlaceholder}>
+                <ActivityIndicator size="large" color={COLORS.blue} />
+                <AppText style={web.qrWaitText}>Generating QR code…</AppText>
+              </View>
+            ) : (
+              <>
+                {/* QR frame */}
+                <View style={web.qrFrame}>
+                  <QRCode
+                    value={`chitchat://link/${companionRequest.requestId}`}
+                    size={WEB_QR_SIZE}
+                    ecl="H"
+                    color="#000000"
+                    backgroundColor="#FFFFFF"
+                    quietZone={6}
+                    logo={require('../../assets/chitchat-logo.png')}
+                    logoSize={WEB_LOGO_SIZE}
+                    logoBackgroundColor="#FFFFFF"
+                    logoBorderRadius={14}
+                    logoMargin={6}
+                  />
+                </View>
+
+                {/* Scan label */}
+                <AppText style={web.qrScanLabel}>
+                  {companionError ? '' : 'Scan with your phone'}
+                </AppText>
+
+                {/* Divider */}
+                <View style={web.orDivider}>
+                  <View style={web.orLine} />
+                  <AppText style={web.orText}>or use this code</AppText>
+                  <View style={web.orLine} />
+                </View>
+
+                {/* Display code */}
+                <View style={web.codeBox}>
+                  <AppText style={web.codeText} selectable>
+                    {companionRequest.displayCode.slice(0, 5)}
+                    {'  '}
+                    {companionRequest.displayCode.slice(5, 10)}
+                  </AppText>
+                </View>
+
+                {/* Waiting / error */}
+                {companionError ? (
+                  <View style={web.errorBox}>
+                    <AppIcon name="alert-circle" size={15} color={COLORS.missed} fixedColor />
+                    <AppText style={web.errorText} fixedColor numberOfLines={2}>{companionError}</AppText>
+                    <TouchableOpacity onPress={startLinkRequest} activeOpacity={0.7}>
+                      <AppText style={web.refreshLink} fixedColor>Refresh</AppText>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <View style={web.waitRow}>
+                    <ActivityIndicator size="small" color={COLORS.blue} />
+                    <AppText style={web.waitText}>Waiting for your phone…</AppText>
+                  </View>
+                )}
+
+                {/* Expiry */}
+                <AppText style={web.expiry}>Code expires in 10 minutes</AppText>
+              </>
+            )}
+          </View>
+        </View>
+
+        {/* Footer */}
+        <AppText style={web.footer}>
+          ChitChat Business · Secure end-to-end encrypted companion link
+        </AppText>
+      </ScrollView>
+    </View>
+  );
+}
+
+// ─── Web-only styles ──────────────────────────────────────────────────────────
+
+const web = StyleSheet.create({
+  root: { flex: 1, minHeight: '100%' as any },
+
+  scroll: {
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingBottom: 60,
+  },
+
+  // Decorative background orbs
+  orb: {
+    position: 'absolute',
+    borderRadius: 999,
+    opacity: 0.35,
+  },
+  orbTopRight: {
+    width: 420,
+    height: 420,
+    top: -160,
+    right: -160,
+    backgroundColor: '#bae6fd',
+  },
+  orbBottomLeft: {
+    width: 320,
+    height: 320,
+    bottom: -100,
+    left: -100,
+    backgroundColor: '#e0e7ff',
+  },
+
+  // Brand
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 40,
+    alignSelf: 'flex-start',
+  },
+  brandIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...SHADOW.button,
+  },
+  brandName: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: COLORS.text,
+    letterSpacing: 0.2,
+  },
+  brandTag: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.blue,
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+  },
+
+  // Hero
+  hero: {
+    alignSelf: 'flex-start',
+    marginBottom: 36,
+  },
+  heroTitle: {
+    fontSize: 36,
+    fontWeight: '800',
+    color: COLORS.text,
+    lineHeight: 44,
+    letterSpacing: -0.5,
+  },
+  heroSub: {
+    fontSize: 16,
+    color: COLORS.sub,
+    marginTop: 8,
+    lineHeight: 22,
+  },
+
+  // Main panel
+  panel: {
+    width: '100%',
+    maxWidth: 860,
+    borderRadius: RADIUS.xl,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    overflow: 'hidden',
+    ...SHADOW.card,
+  },
+
+  // Steps column (left)
+  stepsCol: {
+    flex: 1,
+    minWidth: 260,
+    padding: 32,
+    gap: 0,
+  },
+  stepsHeading: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.text,
+    marginBottom: 22,
+    letterSpacing: 0.1,
+  },
+  step: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    marginBottom: 18,
+  },
+  stepNum: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: COLORS.blue,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 1,
+    flexShrink: 0,
+  },
+  stepNumText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#fff',
+  },
+  stepIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    backgroundColor: 'rgba(9,178,238,0.10)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: -2,
+    flexShrink: 0,
+  },
+  stepText: {
+    flex: 1,
+    fontSize: 14,
+    color: COLORS.text,
+    lineHeight: 20,
+  },
+  tipBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    padding: 12,
+    marginTop: 8,
+  },
+  tipText: {
+    flex: 1,
+    fontSize: 12,
+    color: COLORS.sub,
+    lineHeight: 18,
+  },
+
+  // Vertical divider between columns
+  panelDivider: {
+    width: 1,
+    backgroundColor: COLORS.border,
+    marginVertical: 24,
+  },
+
+  // QR column (right)
+  qrCol: {
+    flex: 1,
+    minWidth: 260,
+    alignItems: 'center',
+    padding: 32,
+    gap: 12,
+  },
+  qrFrame: {
+    borderRadius: 16,
+    backgroundColor: '#fff',
+    padding: 14,
+    ...SHADOW.card,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.06)',
+  },
+  qrPlaceholder: {
+    width: 220,
+    height: 220,
+    borderRadius: 16,
+    backgroundColor: 'rgba(9,178,238,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(9,178,238,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  qrWaitText: {
+    fontSize: 13,
+    color: COLORS.sub,
+  },
+  qrScanLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.sub,
+    marginTop: 4,
+  },
+  orDivider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    width: '85%',
+  },
+  orLine: { flex: 1, height: 1, backgroundColor: COLORS.border },
+  orText: { fontSize: 11, color: COLORS.sub, fontWeight: '600' },
+
+  codeBox: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: RADIUS.md,
+    backgroundColor: 'rgba(9,178,238,0.07)',
+    borderWidth: 1,
+    borderColor: 'rgba(9,178,238,0.20)',
+  },
+  codeText: {
+    fontSize: 26,
+    fontWeight: '800',
+    letterSpacing: 6,
+    color: COLORS.text,
+    fontFamily: Platform.select({ web: 'monospace', ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+  },
+
+  waitRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  waitText: {
+    fontSize: 13,
+    color: COLORS.sub,
+  },
+  expiry: {
+    fontSize: 11,
+    color: COLORS.textFaint,
+  },
+
+  errorBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(232,67,67,0.08)',
+    borderRadius: RADIUS.sm,
+    padding: 10,
+    width: '100%',
+  },
+  errorText: {
+    flex: 1,
+    fontSize: 12,
+    color: COLORS.missed,
+  },
+  refreshLink: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.blue,
+  },
+
+  // Success / linking screens
+  centreCard: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    padding: 40,
+  },
+  successIcon: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: 'rgba(52,199,89,0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  heading: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: COLORS.text,
+    textAlign: 'center',
+  },
+  subheading: {
+    fontSize: 15,
+    color: COLORS.sub,
+    textAlign: 'center',
+  },
+
+  footer: {
+    fontSize: 11,
+    color: COLORS.textFaint,
+    textAlign: 'center',
+    marginTop: 32,
+  },
+});
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 type Step = 'phone' | 'otp';
 
 export default function SignInScreen() {
+  // On web, only companion linking is supported — show the dedicated web UI
+  if (Platform.OS === 'web') return <WebSignInScreen />;
+
   const { signIn: signInToContext, signInAsCompanion } = useAuthContext();
   const { sendOTP, verifyOTP, error: authError } = useAuth();
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList, 'SignIn'>>();

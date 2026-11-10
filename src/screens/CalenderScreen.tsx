@@ -31,6 +31,52 @@ import { meetingJoinUrl } from '../config/env';
 
 const HOUR_HEIGHT = 70; // Height per hour in the timeline
 
+/**
+ * Open a meeting join URL.
+ * Always opens externally — the meeting page is served by the API server,
+ * not the Expo app. On web: new tab. On native: system browser via Linking.
+ */
+function openMeetingLink(url: string): void {
+  if (!url) return;
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined') {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  } else {
+    Linking.openURL(url).catch(() =>
+      Alert.alert('Cannot open link', 'Unable to open the meeting link.'),
+    );
+  }
+}
+
+/**
+ * Copy text to the clipboard on any platform.
+ */
+async function copyToClipboard(text: string): Promise<void> {
+  if (Platform.OS === 'web') {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Fallback: execCommand (older browsers)
+      try {
+        const el = document.createElement('textarea');
+        el.value = text;
+        el.style.position = 'fixed';
+        el.style.opacity = '0';
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand('copy');
+        document.body.removeChild(el);
+      } catch { /* ignore */ }
+    }
+  } else {
+    try {
+      const { Clipboard } = await import('react-native');
+      Clipboard.setString(text);
+    } catch { /* ignore */ }
+  }
+}
+
 type NavProp = NativeStackNavigationProp<RootStackParamList, 'Calendar'>;
 
 type TabType = 'Upcoming' | 'Past';
@@ -484,35 +530,39 @@ function NewMeetingSheet({
       // not a web room, so they skip this.
       if (venue !== 'in-person') {
         const link = meetingJoinUrl(meetingId);
-        Alert.alert(
-          'Meeting created',
-          `Share this link so anyone can join from a browser:\n\n${link}`,
-          [
-            {
-              text: 'Copy link',
-              onPress: async () => {
-                try {
-                  const { Clipboard } = await import('react-native');
-                  Clipboard.setString(link);
+
+        if (Platform.OS === 'web') {
+          // On web, Alert.alert is ugly. Use a browser-native confirm + copy.
+          const action = window.confirm(
+            `Meeting created!\n\nShare this link with participants:\n${link}\n\nClick OK to copy the link to your clipboard.`,
+          );
+          if (action) {
+            await copyToClipboard(link);
+          }
+        } else {
+          Alert.alert(
+            'Meeting created',
+            `Share this link so anyone can join from a browser:\n\n${link}`,
+            [
+              {
+                text: 'Copy link',
+                onPress: async () => {
+                  await copyToClipboard(link);
                   Alert.alert('Copied', 'Meeting link copied to clipboard.');
-                } catch { /* ignore */ }
+                },
               },
-            },
-            {
-              text: 'Share',
-              onPress: () => { Share.share({ message: link, url: link }).catch(() => {}); },
-            },
-            {
-              text: 'Open',
-              onPress: () => {
-                Linking.openURL(link).catch(() =>
-                  Alert.alert('Cannot open link', 'Unable to open the meeting link.'),
-                );
+              {
+                text: 'Share',
+                onPress: () => { Share.share({ message: link, url: link }).catch(() => {}); },
               },
-            },
-            { text: 'Done', style: 'cancel' },
-          ],
-        );
+              {
+                text: 'Open',
+                onPress: () => openMeetingLink(link),
+              },
+              { text: 'Done', style: 'cancel' },
+            ],
+          );
+        }
       }
 
       onDone();
@@ -1271,9 +1321,7 @@ function MeetingDetailSheet({
               <TouchableOpacity
                 onPress={() => {
                   onClose();
-                  Linking.openURL(meetingJoinUrl(meeting.id)).catch(() =>
-                    Alert.alert('Cannot open link', 'Unable to open the meeting link.'),
-                  );
+                  onJoin(meeting!);
                 }}
                 activeOpacity={0.85}
                 style={styles.joinBtnWrap}
@@ -1491,9 +1539,7 @@ export default function CalendarScreen() {
         return;
       }
       const url = meetingJoinUrl(meeting.id);
-      Linking.openURL(url).catch(() =>
-        Alert.alert('Cannot open link', 'Unable to open the meeting link.'),
-      );
+      openMeetingLink(url);
     } catch (err) {
       console.error('[Calendar] Failed to open meeting:', err);
       Alert.alert('Cannot Join', 'Unable to open this meeting.');

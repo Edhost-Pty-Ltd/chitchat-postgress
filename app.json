@@ -22,7 +22,16 @@
         "NSMicrophoneUsageDescription": "ChitChat Business needs access to your microphone to record voice notes.",
         "NSContactsUsageDescription": "ChitChat Business needs access to your contacts to help you find friends on the app.",
         "NSUserNotificationsUsageDescription": "ChitChat Business needs permission to send you notifications for new messages, calls, and status updates.",
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true,
+          "NSExceptionDomains": {
+            "192.168.0.29": {
+              "NSExceptionAllowsInsecureHTTPLoads": true,
+              "NSIncludesSubdomains": false
+            }
+          }
+        }
       },
       "bitcode": false
     },
@@ -112,7 +121,8 @@
       ],
       "expo-sharing",
       "expo-status-bar",
-      "./plugins/withFaceAISDK.js"
+      "./plugins/withFaceAISDK.js",
+      "./plugins/withScreenShare.js"
     ],
     "android": {
       "adaptiveIcon": {

@@ -40,8 +40,7 @@ export default function IdentityVerificationBadge({
             compact && styles.labelCompact,
             { color: verified ? '#fff' : '#92400E' },
           ]}
-        >
-          {verified ? 'Identity verified' : 'Not verified'}
+        > 
         </AppText>
       ) : null}
     </>
@@ -77,7 +76,7 @@ const styles = StyleSheet.create({
   badge: {
     flexDirection: 'row',
     alignItems: 'center',
-    alignSelf: 'flex-start',
+    alignSelf: 'center',
     gap: 5,
     paddingHorizontal: 9,
     paddingVertical: 5,

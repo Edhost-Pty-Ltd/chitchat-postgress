@@ -369,6 +369,14 @@ export function createEndpoints(client: ApiClient = apiClient) {
     ): Promise<ApiResult<{ message: BackendMessage }>> =>
       client.post(`/chats/${chatId}/messages/${messageId}/vote`, { optionId }),
 
+    // ── Reactions ──
+    reactToMessage: (
+      chatId: string,
+      messageId: string,
+      emoji: string,
+    ): Promise<ApiResult<{ reactions: Record<string, string[]> }>> =>
+      client.post(`/chats/${chatId}/messages/${messageId}/react`, { emoji }),
+
     // ── Chat mute ──
     listMutedChats: (): Promise<ApiResult<{ chatIds: string[] }>> => client.get('/me/muted-chats'),
     setChatMuted: (
@@ -727,6 +735,8 @@ export interface BackendMessage {
   readBy: string[];
   edited: boolean;
   editedAt: string | null;
+  /** emoji → array of userIds who reacted with it */
+  reactions: Record<string, string[]>;
 }
 
 export interface SendMessageInput {

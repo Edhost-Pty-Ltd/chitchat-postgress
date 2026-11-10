@@ -72,6 +72,8 @@ export interface StoredMessage {
   readBy: string[];
   edited: boolean;
   editedAt: string | null;
+  /** emoji → array of userIds who reacted */
+  reactions: Record<string, string[]>;
 }
 
 interface MessageRow {
@@ -154,6 +156,82 @@ async function hydrateReceipts(ids: string[]): Promise<Map<string, { delivered: 
 }
 
 /**
+ * Load current reactions for the given messages and return a map of
+ * messageId → { emoji → userId[] }. One row per (message, user) — each user
+ * can hold at most one emoji per message.
+ */
+async function hydrateReactions(ids: string[]): Promise<Map<string, Record<string, string[]>>> {
+  const map = new Map<string, Record<string, string[]>>();
+  if (ids.length === 0) return map;
+  const res = await query<{ message_id: string; emoji: string; user_id: string }>(
+    `SELECT message_id, emoji, user_id FROM message_reactions
+       WHERE message_id = ANY($1::uuid[]) ORDER BY reacted_at ASC`,
+    [ids],
+  );
+  for (const r of res.rows) {
+    const entry = map.get(r.message_id) ?? {};
+    (entry[r.emoji] ??= []).push(r.user_id);
+    map.set(r.message_id, entry);
+  }
+  return map;
+}
+
+/**
+ * Upsert a reaction (toggle semantics: same emoji = remove, different = replace).
+ * Returns { emoji, removed } so the caller can broadcast the right event.
+ * `emoji = null` means the reaction was removed.
+ */
+export async function reactToMessage(
+  messageId: string,
+  reactorId: string,
+  emoji: string,
+): Promise<{ chatId: string; senderId: string; reactions: Record<string, string[]> }> {
+  return withTransaction(async (client: PoolClient) => {
+    // Get chat + sender for the message (needed for broadcasting + push).
+    const msgRes = await client.query<{ chat_id: string; sender_id: string }>(
+      'SELECT chat_id, sender_id FROM messages WHERE id = $1',
+      [messageId],
+    );
+    if (msgRes.rows.length === 0) throw new Error('Message not found');
+    const { chat_id: chatId, sender_id: senderId } = msgRes.rows[0];
+
+    // Check if this user already has the same emoji → remove (toggle off).
+    const existing = await client.query<{ emoji: string }>(
+      'SELECT emoji FROM message_reactions WHERE message_id = $1 AND user_id = $2',
+      [messageId, reactorId],
+    );
+    const currentEmoji = existing.rows[0]?.emoji ?? null;
+
+    if (currentEmoji === emoji) {
+      // Same emoji tapped again → remove
+      await client.query(
+        'DELETE FROM message_reactions WHERE message_id = $1 AND user_id = $2',
+        [messageId, reactorId],
+      );
+    } else {
+      // New emoji (or changing emoji) → upsert
+      await client.query(
+        `INSERT INTO message_reactions (message_id, user_id, emoji)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (message_id, user_id) DO UPDATE SET emoji = $3, reacted_at = now()`,
+        [messageId, reactorId, emoji],
+      );
+    }
+
+    // Re-hydrate all reactions for this message to return the fresh projection.
+    const reactRes = await client.query<{ emoji: string; user_id: string }>(
+      'SELECT emoji, user_id FROM message_reactions WHERE message_id = $1 ORDER BY reacted_at ASC',
+      [messageId],
+    );
+    const reactions: Record<string, string[]> = {};
+    for (const r of reactRes.rows) {
+      (reactions[r.emoji] ??= []).push(r.user_id);
+    }
+    return { chatId, senderId, reactions };
+  });
+}
+
+/**
  * Load current poll votes for the given poll messages and return a map of
  * messageId → { optionId → voterId[] }. The authoritative vote state lives in
  * the poll_votes table; the message's embedded poll.votes is projected from it
@@ -179,6 +257,7 @@ function rowToMessage(
   row: MessageRow,
   receipts: Map<string, { delivered: string[]; read: string[] }>,
   pollVotes?: Map<string, Record<string, string[]>>,
+  reactions?: Map<string, Record<string, string[]>>,
 ): StoredMessage {
   const r = receipts.get(row.id) ?? { delivered: [], read: [] };
 
@@ -220,6 +299,7 @@ function rowToMessage(
     readBy: r.read,
     edited: row.edited ?? false,
     editedAt: row.edited_at ? row.edited_at.toISOString() : null,
+    reactions: reactions?.get(row.id) ?? {},
   };
 }
 
@@ -323,11 +403,12 @@ export async function sendMessage(
     return { row, created: true };
   });
 
-  const [receipts, votes] = await Promise.all([
+  const [receipts, votes, rxns] = await Promise.all([
     hydrateReceipts([result.row.id]),
     hydratePollVotes(result.row.type === 'poll' ? [result.row.id] : []),
+    hydrateReactions([result.row.id]),
   ]);
-  return { message: rowToMessage(result.row, receipts, votes), created: result.created };
+  return { message: rowToMessage(result.row, receipts, votes, rxns), created: result.created };
 }
 
 export interface Page {
@@ -370,11 +451,13 @@ export async function listMessages(
   const hasMore = res.rows.length > limit;
   const pageRows = hasMore ? res.rows.slice(0, limit) : res.rows;
   const pollIds = pageRows.filter((r) => r.type === 'poll').map((r) => r.id);
-  const [receipts, votes] = await Promise.all([
-    hydrateReceipts(pageRows.map((r) => r.id)),
+  const allIds  = pageRows.map((r) => r.id);
+  const [receipts, votes, rxns] = await Promise.all([
+    hydrateReceipts(allIds),
     hydratePollVotes(pollIds),
+    hydrateReactions(allIds),
   ]);
-  const messages = pageRows.map((r) => rowToMessage(r, receipts, votes));
+  const messages = pageRows.map((r) => rowToMessage(r, receipts, votes, rxns));
   const last = pageRows[pageRows.length - 1];
   return {
     messages,
@@ -401,11 +484,13 @@ export async function messagesAfter(
     [chatId, viewerId, afterMessageId],
   );
   const pollIds = res.rows.filter((r) => r.type === 'poll').map((r) => r.id);
-  const [receipts, votes] = await Promise.all([
-    hydrateReceipts(res.rows.map((r) => r.id)),
+  const allIds  = res.rows.map((r) => r.id);
+  const [receipts, votes, rxns] = await Promise.all([
+    hydrateReceipts(allIds),
     hydratePollVotes(pollIds),
+    hydrateReactions(allIds),
   ]);
-  return res.rows.map((r) => rowToMessage(r, receipts, votes));
+  return res.rows.map((r) => rowToMessage(r, receipts, votes, rxns));
 }
 
 /** Record delivery for a recipient (Req 5.6). Returns the sender to notify. */
@@ -508,8 +593,11 @@ export async function editMessage(
   );
   if (!res.rows[0]) return null;
   // Re-hydrate receipts for the single updated row.
-  const receipts = await hydrateReceipts([res.rows[0].id]);
-  return rowToMessage(res.rows[0], receipts);
+  const [receipts, rxns] = await Promise.all([
+    hydrateReceipts([res.rows[0].id]),
+    hydrateReactions([res.rows[0].id]),
+  ]);
+  return rowToMessage(res.rows[0], receipts, undefined, rxns);
 }
 
 /** A message with its chat id and type — used to authorize poll voting. */
@@ -581,9 +669,10 @@ export async function votePoll(
 
   const res = await query<MessageRow>('SELECT * FROM messages WHERE id = $1', [messageId]);
   if (!res.rows[0]) return null;
-  const [receipts, votes] = await Promise.all([
+  const [receipts, votes, rxns] = await Promise.all([
     hydrateReceipts([messageId]),
     hydratePollVotes([messageId]),
+    hydrateReactions([messageId]),
   ]);
-  return rowToMessage(res.rows[0], receipts, votes);
+  return rowToMessage(res.rows[0], receipts, votes, rxns);
 }

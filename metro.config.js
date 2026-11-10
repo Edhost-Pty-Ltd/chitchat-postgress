@@ -7,6 +7,18 @@ const { getDefaultConfig } = require('expo/metro-config');
 /** @type {import('expo/metro-config').MetroConfig} */
 const config = getDefaultConfig(__dirname);
 
+// ─── Block server directory ───────────────────────────────────────────────────
+// The `server/` folder is a Node.js-only backend. Its node_modules contain
+// packages like bullmq that use dynamic import() which Metro cannot transform.
+// Excluding the whole directory prevents Metro from crawling into it at all.
+const serverDir = path.resolve(__dirname, 'server');
+config.resolver.blockList = [
+  // Block the entire server directory tree (source + its own node_modules)
+  new RegExp(`^${serverDir.replace(/[/\\]/g, '[/\\\\]')}[/\\\\].*`),
+  // Also block any face_recognition_feat Python directory
+  new RegExp(`^${path.resolve(__dirname, 'face_recognition_feat').replace(/[/\\]/g, '[/\\\\]')}[/\\\\].*`),
+];
+
 // ─── Web Shims ───────────────────────────────────────────────────────────────
 // Redirect native-only packages to lightweight web-compatible shims on web.
 const webShims = {

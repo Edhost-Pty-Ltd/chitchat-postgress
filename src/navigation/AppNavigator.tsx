@@ -48,6 +48,7 @@ const ContactsScreen             = makeLazy(() => import('../screens/ContactsScr
 const SettingsScreen             = makeLazy(() => import('../screens/SettingsScreen'));
 const AppearanceScreen           = makeLazy(() => import('../screens/AppearanceScreen'));
 const ProfileScreen              = makeLazy(() => import('../screens/ProfileScreen'));
+const ContactProfileScreen       = makeLazy(() => import('../screens/ContactProfileScreen'));
 const VideoCallScreen            = makeLazy(() => import('../screens/VideoCallScreen'));
 const AudioCallScreen            = makeLazy(() => import('../screens/AudioCallScreen'));
 const AccountSettingsScreen      = makeLazy(() => import('../screens/AccountSettingsScreen'));
@@ -60,6 +61,7 @@ const BlockedContactsScreen      = makeLazy(() => import('../screens/BlockedCont
 const BroadcastScreen            = makeLazy(() => import('../screens/BroadcastScreen'));
 const DashboardScreen            = makeLazy(() => import('../screens/MultiAgentDashboardScreen'));
 const FaceEnrollmentScreen       = makeLazy(() => import('../screens/FaceEnrollmentScreen'));
+const MeetingRoomScreen          = makeLazy(() => import('../screens/MeetingRoomScreen'));
 
 import { IncomingCallManager } from '../components';
 
@@ -245,7 +247,16 @@ export default function AppNavigator() {
               <Stack.Screen name="Chats" component={ChatsScreen} />
 
               {/* Secondary screens — lazy */}
-              <Stack.Screen name="Chat" component={ChatScreen as any} />
+              <Stack.Screen
+                name="Chat"
+                component={ChatScreen as any}
+                options={{
+                  // Disable the iOS back-swipe gesture on the chat screen so it
+                  // doesn't conflict with swipe-to-reply on message bubbles.
+                  // Users still go back via the back button in the header.
+                  gestureEnabled: false,
+                }}
+              />
               <Stack.Screen name="Calendar" component={CalendarScreen as any} />
               <Stack.Screen name="Calls" component={CallsScreen as any} />
               <Stack.Screen name="Status" component={StatusScreen as any} />
@@ -258,6 +269,7 @@ export default function AppNavigator() {
               <Stack.Screen name="Settings" component={SettingsScreen as any} options={modalOptions} />
               <Stack.Screen name="Appearance" component={AppearanceScreen as any} options={modalOptions} />
               <Stack.Screen name="Profile" component={ProfileScreen as any} options={modalOptions} />
+              <Stack.Screen name="ContactProfile" component={ContactProfileScreen as any} />
 
               {/* Call screens — full-screen modal */}
               <Stack.Screen name="VideoCall" component={VideoCallScreen as any} options={modalOptions} />
@@ -273,6 +285,9 @@ export default function AppNavigator() {
               <Stack.Screen name="BlockedContacts" component={BlockedContactsScreen as any} />
               <Stack.Screen name="Broadcast" component={BroadcastScreen as any} />
 
+              {/* Meeting room — accessible from /meet/:meetingId web links */}
+              <Stack.Screen name="MeetingRoom" component={MeetingRoomScreen as any} options={modalOptions} />
+
               {/* Account sub-screens */}
             </>
           ) : (
@@ -280,6 +295,8 @@ export default function AppNavigator() {
               <Stack.Screen name="Splash" component={SplashScreen} />
               <Stack.Screen name="SignIn" component={SignInScreen} />
               <Stack.Screen name="CreateAccount" component={CreateAccountScreen} />
+              {/* Allow unauthenticated users to open meeting links directly */}
+              <Stack.Screen name="MeetingRoom" component={MeetingRoomScreen as any} options={modalOptions} />
             </>
           )}
 

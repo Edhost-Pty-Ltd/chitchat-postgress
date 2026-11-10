@@ -216,6 +216,10 @@ export default function VideoCallScreen() {
   // Incremented on every camera flip to force RTCView to remount with the new track
   const [flipKey, setFlipKey] = useState(0);
 
+  // Screen share state from OTHER participants
+  const [remoteSharingUserId, setRemoteSharingUserId] = useState<string | null>(null);
+  const [remoteSharingName, setRemoteSharingName]     = useState<string | null>(null);
+
   // Screen share
   const [screenSharing, setScreenSharing] = useState(false);
   const screenShareStreamRef = useRef<any>(null); // holds the display MediaStream on native
@@ -468,23 +472,10 @@ export default function VideoCallScreen() {
             if (data.answer && !answerApplied.current) {
               answerApplied.current = true;
               await setRemoteAnswer(data.answer).catch(console.error);
-          const offer = await createOffer(true);
-          await SignalingService.saveOffer(callId, offer);
-          unsubscribeCallRef.current = SignalingService.onCallUpdated(callId, (data) => {
-            if (!data) return;
-            if (data.answer && !answerApplied) {
-              answerApplied = true;
-              setRemoteAnswer(data.answer).catch(console.error);
             }
 
             // Apply callee ICE candidates (deduplicated).
-            for (const cand of data.calleeIceCandidates ?? []) {
-              const key = `${cand.candidate}-${cand.sdpMLineIndex}`;
-              if (!iceApplied.current.has(key)) {
-                iceApplied.current.add(key);
-                await addIceCandidate(cand).catch(console.error);
-              }
-            }
+            applyRemoteIce(data.calleeIceCandidates);
           });
         } else {
           // ── INCOMING ─────────────────────────────────────────────────────
@@ -664,6 +655,16 @@ export default function VideoCallScreen() {
   }, [facing, switchingCamera, switchCameraWebRTC]);
 
   // ── Screen share ────────────────────────────────────────────────
+  // Broadcasts meeting:screen-sharing to all participants when state changes.
+  // On iOS, getDisplayMedia() triggers the system RPBroadcastPickerView which
+  // shows the native "Start Broadcast" prompt — the Broadcast Upload Extension
+  // (plugins/withScreenShare.js) then runs in a separate process, keeping
+  // screen capture alive when the app goes to the background.
+  const broadcastScreenShareState = useCallback((sharing: boolean) => {
+    if (!isMeeting || !meetingId) return;
+    socketClient.emit('meeting:screen-sharing', { meetingId, sharing });
+  }, [isMeeting, meetingId]);
+
   const toggleScreenShare = useCallback(async () => {
     try {
       if (screenSharing) {
@@ -687,6 +688,7 @@ export default function VideoCallScreen() {
           }
         }
         setScreenSharing(false);
+        broadcastScreenShareState(false);
         return;
       }
 
@@ -699,15 +701,24 @@ export default function VideoCallScreen() {
           Alert.alert('Not supported', 'Screen share is not available on this browser.');
           return;
         }
-        disp = await md.getDisplayMedia({ video: true, audio: false });
+        disp = await md.getDisplayMedia({ video: { frameRate: 15 }, audio: false });
       } else {
         let webrtcModule: any = null;
         try { webrtcModule = require('@livekit/react-native-webrtc'); } catch { /* not available */ }
 
         if (!webrtcModule?.mediaDevices?.getDisplayMedia) {
-          Alert.alert('Not supported', 'Screen share requires a native build with react-native-webrtc.');
+          Alert.alert(
+            'Not supported',
+            Platform.OS === 'ios'
+              ? 'Screen share requires a native build. Please use the installed app, not Expo Go.'
+              : 'Screen share requires a native build with react-native-webrtc.',
+          );
           return;
         }
+        // On iOS this shows the native "Start Broadcast" system picker.
+        // The Broadcast Upload Extension (configured by plugins/withScreenShare.js)
+        // keeps capturing even when the app is backgrounded.
+        // On Android this triggers the MediaProjection permission prompt.
         disp = await webrtcModule.mediaDevices.getDisplayMedia({ video: true });
       }
 
@@ -730,6 +741,7 @@ export default function VideoCallScreen() {
         screenTrack.onended = () => {
           screenShareStreamRef.current = null;
           setScreenSharing(false);
+          broadcastScreenShareState(false);
           const currentPc = getPeerConnection() as any;
           const camTrack = localStream?.getVideoTracks?.()[0];
           if (currentPc && camTrack) {
@@ -743,22 +755,24 @@ export default function VideoCallScreen() {
       }
 
       setScreenSharing(true);
+      broadcastScreenShareState(true);
     } catch (err: any) {
       if (err?.message?.includes('cancelled') || err?.message?.includes('canceled')) {
-        return;
+        return; // user dismissed the picker
       }
       if (err?.name === 'AbortError' || err?.message?.includes('AbortError')) {
         Alert.alert(
           'Screen Share Unavailable',
-          'Native screen sharing requires a Broadcast Extension configured in Xcode. ' +
-          'Please contact the developer to enable this feature.',
+          Platform.OS === 'ios'
+            ? 'Screen sharing requires the Broadcast Extension to be configured. Run "expo prebuild" and rebuild the app.'
+            : 'Screen share permission was denied. Enable screen recording in Settings.',
         );
         return;
       }
       console.error('[VideoCall] screen share failed:', err);
       Alert.alert('Screen share', 'Could not start screen sharing. Make sure the app has screen recording permission.');
     }
-  }, [screenSharing, localStream, getPeerConnection]);
+  }, [screenSharing, localStream, getPeerConnection, broadcastScreenShareState]);
 
   // ── Recording ───────────────────────────────────────────────────
   /** Start the recorder and flag the meeting as recorded for everyone. */
@@ -1238,6 +1252,18 @@ export default function VideoCallScreen() {
         if (!forThisMeeting(payload)) return;
         meetingEventsRef.current?.updated((payload as { reason?: string }).reason);
       }),
+      // A remote participant started/stopped sharing their screen.
+      socketClient.subscribe('meeting:screen-sharing', (payload) => {
+        if (!forThisMeeting(payload)) return;
+        const p = payload as { userId?: string; displayName?: string; sharing?: boolean };
+        if (p.sharing) {
+          setRemoteSharingUserId(p.userId ?? null);
+          setRemoteSharingName(p.displayName ?? p.userId ?? 'Someone');
+        } else {
+          setRemoteSharingUserId(null);
+          setRemoteSharingName(null);
+        }
+      }),
     ];
     return () => unsubs.forEach((u) => u());
   }, [isMeeting, meetingId]);
@@ -1409,6 +1435,29 @@ export default function VideoCallScreen() {
           <AppText fixedColor style={styles.recordingNoticeText}>
             This meeting is being recorded
           </AppText>
+        </View>
+      )}
+
+      {/* ── Remote participant screen-sharing banner ── */}
+      {isMeeting && remoteSharingUserId && !screenSharing && (
+        <View style={styles.screenShareBanner}>
+          <AppIcon name="desktop-outline" size={16} color="#fff" fixedColor />
+          <AppText fixedColor style={styles.screenShareBannerText}>
+            {remoteSharingName} is sharing their screen
+          </AppText>
+        </View>
+      )}
+
+      {/* ── YOU are sharing banner ── */}
+      {screenSharing && (
+        <View style={[styles.screenShareBanner, { backgroundColor: 'rgba(9,178,238,0.85)' }]}>
+          <AppIcon name="desktop" size={16} color="#fff" fixedColor />
+          <AppText fixedColor style={styles.screenShareBannerText}>
+            You are sharing your screen
+          </AppText>
+          <TouchableOpacity onPress={toggleScreenShare} style={styles.stopShareBtn}>
+            <AppText fixedColor style={styles.stopShareBtnText}>Stop</AppText>
+          </TouchableOpacity>
         </View>
       )}
 
@@ -1923,6 +1972,40 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS.full,
     borderWidth: 1,
     borderColor: 'rgba(239,68,68,0.5)',
+  },
+
+  // ── Screen share banners ────────────────────────────────────────
+  screenShareBanner: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 170 : 150,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(22,100,22,0.85)',
+    paddingVertical: 7,
+    paddingHorizontal: 14,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: 'rgba(34,197,94,0.4)',
+  },
+  screenShareBannerText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#fff',
+    flexShrink: 1,
+  },
+  stopShareBtn: {
+    marginLeft: 6,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+  },
+  stopShareBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
   },
   recordingNoticeDot: {
     width: 8,

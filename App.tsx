@@ -1,12 +1,22 @@
 import React, { useEffect } from 'react';
 import { Platform } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, LinkingOptions } from '@react-navigation/native';
 import { enableScreens } from 'react-native-screens';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 // Import Firebase config FIRST to ensure it's initialized before any contexts
 import './src/config/firebase';
+
+// On web: store the API URL so meet.html (a standalone static page) can read
+// it from storage without needing access to process.env.
+if (Platform.OS === 'web' && typeof window !== 'undefined') {
+  const apiUrl = process.env.EXPO_PUBLIC_API_URL ?? '';
+  if (apiUrl) {
+    try { sessionStorage.setItem('cc_api_url', apiUrl); } catch { /* private browsing */ }
+    try { localStorage.setItem('cc_api_url', apiUrl); }  catch { /* private browsing */ }
+  }
+}
 
 import { AuthProvider, useAuth } from './src/context/AuthContext';
 import { ThemeProvider } from './src/context/ThemeContext';
@@ -21,6 +31,22 @@ import { BiometricGate } from './src/components/BiometricGate';
 import { VerificationGate } from './src/components/VerificationGate';
 import { usePushNotifications } from './src/hooks/usePushNotifications';
 import { initializeWebRTC } from './src/utils/webrtc-platform';
+import type { RootStackParamList } from './src/types';
+
+// ── Deep-link / web routing config ───────────────────────────────────────────
+// Maps URL paths to React Navigation routes.
+// On web the NavigationContainer reads window.location itself at runtime — we
+// don't need to list the origin as a prefix. The config just tells it which
+// path patterns map to which screens.
+// On native, chitchat:// handles deep links.
+const linking: LinkingOptions<RootStackParamList> = {
+  prefixes: ['chitchat://'],
+  config: {
+    screens: {
+      MeetingRoom: 'meet/:meetingId',
+    },
+  },
+};  
 
 // Disable native screens on web to avoid touch/interaction issues
 if (Platform.OS === 'web') {
@@ -133,7 +159,7 @@ export default function App() {
                 <CartProvider>
                   <ActivityWatcher />
                   <PushNotificationManager />
-                  <NavigationContainer>
+                  <NavigationContainer linking={linking}>
                     <StatusBar style="auto" />
                     <AppNavigator />
                     <ToastOverlay />

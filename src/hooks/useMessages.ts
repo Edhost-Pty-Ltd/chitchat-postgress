@@ -115,6 +115,8 @@ export interface FireMessage {
   edited?:    boolean;
   editedAt?:  Date | null;
   forwarded?: boolean;
+  /** Emoji reactions: emoji → array of userIds who reacted with it */
+  reactions?: Record<string, string[]>;
 }
 
 function toDate(raw: any): Date | null {
@@ -288,6 +290,7 @@ function mapBackendMessage(m: BackendMessage, urls: Record<string, string>): Fir
     edited:       m.edited ?? false,
     editedAt:     toDate(m.editedAt),
     forwarded:    (m.subtype === 'forwarded'),
+    reactions:    (m.reactions as Record<string, string[]> | undefined) ?? {},
   };
 }
 
@@ -471,6 +474,17 @@ export function useMessages(chatId: string | null, ownerUid: string | null) {
       socketClient.subscribe('message:edited', onEditedOrPoll),
       socketClient.subscribe('poll:updated', onEditedOrPoll),
       socketClient.subscribe('chat:cleared', onCleared),
+      // Real-time reaction updates: the server broadcasts the full fresh
+      // reactions map so every client is always in sync.
+      socketClient.subscribe('message:reacted', (payload: unknown) => {
+        const p = payload as { chatId?: string; messageId?: string; reactions?: Record<string, string[]> };
+        if (!p?.messageId || p.chatId !== chatIdRef.current) return;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.messageId === p.messageId ? { ...m, reactions: p.reactions ?? {} } : m,
+          ),
+        );
+      }),
       socketClient.subscribe('client:reconnect', () => { void load(); }),
     ];
 

@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
+import * as nodeHttps from 'node:https';
 import { randomUUID } from 'node:crypto';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import cors from '@fastify/cors';
 import { getEnv } from '../config/env.js';
 import { loggerOptions } from '../config/logger.js';
@@ -29,8 +31,29 @@ import { registerRegistrationRoutes } from './routes/registration.js';
 export async function buildServer(): Promise<FastifyInstance> {
   const env = getEnv();
 
+  // HTTPS for local dev: use Node's https.createServer via serverFactory so
+  // Fastify's type stays as the plain HTTP flavour (all route types stay
+  // compatible). The TLS context is set once at startup; the server cert is
+  // read from disk using paths in .env.
+  let serverFactory: FastifyServerOptions['serverFactory'] | undefined;
+  if (env.USE_HTTPS && env.HTTPS_KEY_PATH && env.HTTPS_CERT_PATH) {
+    try {
+      const tlsOpts = {
+        key:  readFileSync(env.HTTPS_KEY_PATH),
+        cert: readFileSync(env.HTTPS_CERT_PATH),
+      };
+      serverFactory = (handler) => {
+        return nodeHttps.createServer(tlsOpts, handler);
+      };
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('Failed to load HTTPS certificates; falling back to HTTP:', err);
+    }
+  }
+
   const app = Fastify({
     logger: loggerOptions,
+    ...(serverFactory ? { serverFactory } : {}),
     // Attach a request id to every request for traceable JSON logs (Req 1.10).
     genReqId: (req) => (req.headers['x-request-id'] as string) ?? randomUUID(),
     requestIdHeader: 'x-request-id',

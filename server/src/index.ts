@@ -27,8 +27,10 @@ async function main(): Promise<void> {
   startWorkers();
   await startScheduler();
 
+  // HTTPS setup for local dev (camera/mic requires secure origin)
   await app.listen({ port: env.PORT, host: '0.0.0.0' });
-  logger.info({ port: env.PORT }, 'ChitChat backend listening');
+  const protocol = app.server.constructor.name === 'Server' ? 'http' : 'https';
+  logger.info({ port: env.PORT, protocol }, 'ChitChat backend listening');
 
   // Graceful shutdown: stop accepting connections, drain, close deps within 15s (Req 12.7).
   let shuttingDown = false;
